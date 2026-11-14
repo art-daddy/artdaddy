@@ -15,6 +15,14 @@ import { peekFirstPrompt, setFirstPrompt } from "./firstPrompt";
 import { resetLiveWait, useLiveWait } from "./liveWait";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
 import {
+  __resetWakeHost,
+  registerPendingWords,
+  wakeBeginTurn,
+  wakeEndTurn,
+  wakeViewOf,
+  type Settled,
+} from "./speechWakeHost";
+import {
   loadClientSession,
   persistSession,
   persistSessionNow,
@@ -829,6 +837,43 @@ describe("useChat controls + session ops", () => {
     await useChat.getState().redo();
     expect(useChat.getState().turns[0].undone).toBe(false);
     expect(useChat.getState().session?.can_undo).toBe(true);
+  });
+
+  it("an undo ends the waiting for words the assistant was told were not ready in the turn that was undone", async () => {
+    const chat = { dir: "C:/p", session: "chat-undo" };
+    useChat.setState({
+      projectId: "p1",
+      transcriptId: chat.session,
+      session: snap(),
+      turns: [
+        {
+          id: "t1",
+          userText: "a",
+          attachments: [],
+          parts: [],
+          status: "done",
+          undone: false,
+          checkpoint: null,
+          timelineAfter: null,
+        },
+      ],
+    });
+    setDesktop("p1");
+    __resetWakeHost();
+    wakeBeginTurn(chat, 1, false);
+    registerPendingWords(
+      { ...chat, exec: 1, source: "m_1", ref: "m_1", window: null, path: null },
+      "k1",
+      30,
+      new Promise<Settled>(() => undefined),
+    );
+    wakeEndTurn(chat, 1, "done");
+    expect(wakeViewOf(chat).total).toBe(1);
+
+    await useChat.getState().undo();
+    expect(useChat.getState().turns[0].undone).toBe(true);
+    expect(wakeViewOf(chat).total, "nothing it was waiting for may wake the undone chat").toBe(0);
+    __resetWakeHost();
   });
 
   it("binds each op to its own project instance: A's undo never touches B (finding #2)", async () => {

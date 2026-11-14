@@ -62,6 +62,7 @@ import { __bufferedAgentEvents, __resetAgentEvents } from "../api/agentEvents";
 import { useAuth } from "./auth";
 import { useChat } from "./chat";
 import { useEditor } from "./editor";
+import { __resetWakeHost, registerPendingWords, wakeViewOf, type Settled } from "./speechWakeHost";
 
 const emit = (event: string, data: unknown) => lastDeps.emit(event, data);
 
@@ -273,6 +274,35 @@ describe("trying a failed turn again", () => {
     expect(after.turns[0].parts.some((p) => p.kind === "error")).toBe(false);
     expect(after.error).toBeNull();
     expect(after.canRetry).toBe(false);
+  });
+
+  it("is waited for again: what the assistant is told was not ready in the retried turn can bring it back", async () => {
+    runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", transcriptId: "chat-retry" });
+    __resetWakeHost();
+    await useChat.getState().send("go"); // the turn ends in its error: whatever it had registered was dropped
+    const chat = { dir: "C:/p", session: "chat-retry" };
+    runnerRetry.mockImplementationOnce(async () => {
+      registerPendingWords(
+        {
+          ...chat,
+          exec: useChat.getState().execToken ?? -1,
+          source: "m_1",
+          ref: "m_1",
+          window: null,
+          path: null,
+        },
+        "k1",
+        30,
+        new Promise<Settled>(() => undefined),
+      );
+      emit("text", { text: "ok" });
+      emit("turn_done", { cost_usd: 0 });
+    });
+    await useChat.getState().retry();
+    expect(wakeViewOf(chat).total, "the retried turn is the chat's live turn again").toBe(1);
+    __resetWakeHost();
   });
 
   it("is offered again, with the new failure and only one error shown, when the retry fails too", async () => {

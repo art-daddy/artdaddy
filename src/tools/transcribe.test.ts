@@ -3205,7 +3205,7 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
       expect(woken).toHaveLength(1);
       expect(woken[0]).toMatchObject({
         kind: "words",
-        label: "the words of 2 files",
+        label: "the words of 1 file", // both clips are stretches of one source
         media_refs: ["c2", "c3"],
       });
       await pass(3 * 60_000);

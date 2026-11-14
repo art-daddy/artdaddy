@@ -89,8 +89,9 @@ interface WakeNote {
 let registry = new WakeRegistry();
 /** Released batches whose wake has not been delivered or dropped: the card shows what they hold. */
 const releases = new Map<string, Release>();
-/** Released batches the hourly cap refused: the card tells the person to ask, until the assistant speaks again. */
-const capped = new Set<string>();
+/** Released batches the hourly cap refused, and when: the card tells the person to ask, until the assistant speaks
+ *  again or the note's time is up. */
+const capped = new Map<string, number>();
 const factNoted = new Set<string>();
 const notes = new Map<string, WakeNote[]>();
 const wakes = new Map<string, number[]>();
@@ -98,6 +99,19 @@ const askedThisTurn = new Map<string, number>();
 const cooldownTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let ticker: ReturnType<typeof setInterval> | null = null;
 let unwire: (() => void) | null = null;
+
+/** The wake's own clock. It runs on the wall clock but never takes a step longer than this: a PC that slept for
+ *  hours, or a page that was frozen, must not count as hours of waiting for words that were not being made. */
+const MAX_CLOCK_STEP_MS = 5 * 60_000;
+let clockAt = 0;
+let awakeMs = 0;
+function wakeNow(): number {
+  const real = Date.now();
+  if (clockAt === 0) clockAt = real;
+  awakeMs += Math.min(Math.max(real - clockAt, 0), MAX_CLOCK_STEP_MS);
+  clockAt = real;
+  return awakeMs + 1;
+}
 
 /** Moves when anything the card shows may have changed. */
 export const useWakeView = create<{ version: number }>(() => ({ version: 0 }));
@@ -121,6 +135,15 @@ function noteOnce(batchId: string, event: WakeFact["event"], files: number): voi
   note(event, files);
 }
 
+/** What a wake may call a file: an id or a plain file name, short, with nothing in it that is not a letter, a digit,
+ *  an underscore, a dot or a dash. A name with a space, a newline, a bracket or a path in it is not named at all (the
+ *  file is still counted), so no name can carry anything into the assistant's prompt but itself. */
+const SAFE_REF = /^[A-Za-z0-9][\w.-]{0,63}$/;
+function safeRef(ref: string | null): string | null {
+  const trimmed = ref?.trim() ?? "";
+  return SAFE_REF.test(trimmed) && !isUnsafeAgentRef(trimmed) ? trimmed : null;
+}
+
 /** Where "the words are not ready" may bring the assistant back, or null where nobody can be promised one: an
  *  outside agent over MCP, the project's own indexer, an edit with no chat behind it, or the switch off. Every
  *  caller of `waitForRun` passes this, so a place that cannot be woken says so by its answer, in one place. */
@@ -140,7 +163,7 @@ export function wakeTargetOf(
     session: origin.chatSessionId,
     exec: origin.executionId,
     source,
-    ref: ref !== null && ref.trim() !== "" && !isUnsafeAgentRef(ref) ? ref.trim() : null,
+    ref: safeRef(ref),
     window,
     path,
   };
@@ -171,8 +194,8 @@ function ensureTicker(): void {
 }
 
 function tick(): void {
+  apply(registry.tick(wakeNow()));
   const now = Date.now();
-  apply(registry.tick(now));
   let pruned = false;
   for (const [chat, list] of notes) {
     const live = list.filter((n) => now - n.at < NOTE_SHOWN_MS);
@@ -181,6 +204,12 @@ function tick(): void {
     if (live.length) notes.set(chat, live);
     else notes.delete(chat);
   }
+  // The person was told to ask the assistant, and has not: that note is done with once its time is up.
+  for (const [batchId, at] of capped)
+    if (now - at >= NOTE_SHOWN_MS) {
+      finish(batchId);
+      pruned = true;
+    }
   if (registry.size() === 0 && releases.size === 0 && notes.size === 0 && ticker !== null) {
     clearInterval(ticker);
     ticker = null;
@@ -203,6 +232,20 @@ function finish(batchId: string): void {
   capped.delete(batchId);
 }
 
+/** How a batch of words is told to the assistant: how many files, and which references it knows them by. A file read
+ *  in several stretches is one file, and every name the assistant used for its stretches is given, so that it reads
+ *  each of them. A file with no safe name is counted and not named. */
+function wordsText(landed: readonly Entry[]): { label: string; media_refs?: string[] } {
+  const files = new Set(landed.map((e) => e.source)).size;
+  const names = [...new Set(landed.map((e) => e.ref).filter((v): v is string => v !== null))];
+  const shown = names.slice(0, MAX_NAMED);
+  if (names.length > MAX_NAMED) shown.push(`and ${names.length - MAX_NAMED} more`);
+  return {
+    label: `the words of ${files} file${files === 1 ? "" : "s"}`,
+    ...(shown.length ? { media_refs: shown } : {}),
+  };
+}
+
 /** What the registry released: the plain notes for what could not be made, and one job in the completion queue for
  *  the words that can be read. A release with no words is only notes: failures never wake. */
 function apply(out: readonly Release[]): void {
@@ -220,18 +263,13 @@ function apply(out: readonly Release[]): void {
       continue;
     }
     note("landed", r.landed.length);
-    const names = r.landed.map((e) => e.ref).filter((v): v is string => v !== null);
-    const shown = names.slice(0, MAX_NAMED);
-    if (names.length > MAX_NAMED) shown.push(`and ${names.length - MAX_NAMED} more`);
-    const n = r.landed.length;
     notifyJobSettled(r.dir, {
       id: r.batchId,
       tool: "inspect_media",
       kind: "words",
       startedBy: "chat",
       status: "done",
-      label: `the words of ${n} file${n === 1 ? "" : "s"}`,
-      ...(shown.length ? { media_refs: shown } : {}),
+      ...wordsText(r.landed),
     });
   }
   if (out.length) bump();
@@ -262,7 +300,7 @@ export function registerPendingWords(
         window: target.window,
         path: target.path,
       },
-      Date.now(),
+      wakeNow(),
     ),
   );
   ensureTicker();
@@ -303,7 +341,7 @@ function landed(chat: ChatKey, key: string, s: Settled): void {
     : isSpeechCancelled(s.error)
       ? { kind: "cancelled" }
       : { kind: "failed", reason: classifyTranscriptFailure(s.error).reason };
-  apply(registry.settle(chat, key, outcome, Date.now()));
+  apply(registry.settle(chat, key, outcome, wakeNow()));
   bump();
 }
 
@@ -321,7 +359,7 @@ export function noteWordsFetched(
     registry.fetched(
       { dir: ctx.store.projectDir, session: origin.chatSessionId },
       source,
-      Date.now(),
+      wakeNow(),
       window,
     ),
   );
@@ -336,6 +374,13 @@ export function wakeBeginTurn(chat: ChatKey | null, exec: number, system: boolea
   bump();
 }
 
+/** A turn that ended (Stop, an error) is taken up again by the person (Continue, Try again): it is the chat's live
+ *  turn once more, so what it is told from here on is waited for. What it had registered before is not brought back. */
+export function wakeResumeTurn(chat: ChatKey | null, exec: number): void {
+  if (!chat) return;
+  registry.resumeTurn(chat, exec);
+}
+
 /** A turn ended. A normal end seals what it was told was not ready; any other end (Stop, an error, a new message
  *  that took over) drops it: the person took over, and nothing must come back behind his back. */
 export function wakeEndTurn(chat: ChatKey | null, exec: number, how: TurnEnd): void {
@@ -344,7 +389,7 @@ export function wakeEndTurn(chat: ChatKey | null, exec: number, how: TurnEnd): v
   const asked = askedThisTurn.get(turn) ?? 0;
   askedThisTurn.delete(turn);
   if (asked > 0) note(how === "done" ? "registered" : "dropped", asked);
-  apply(registry.endTurn(chat, exec, how, Date.now()));
+  apply(registry.endTurn(chat, exec, how, wakeNow()));
   // The person was told to ask the assistant, and the assistant has spoken since: that is done with.
   if (how === "done")
     for (const r of [...releases.values()])
@@ -403,7 +448,7 @@ export function admitWordsWake(dir: string, session: string | null, job: Settled
   wakes.set(key, recent);
   if (recent.length >= WAKE_CAP_PER_HOUR) {
     // Told on the card, once, and not tried again: the person asks when he wants it.
-    capped.add(rel.batchId);
+    capped.set(rel.batchId, now);
     note("capped", files);
     bump();
     return "drop";
@@ -425,11 +470,25 @@ export function admitWordsWake(dir: string, session: string | null, job: Settled
       );
     return "hold";
   }
-  recent.push(now);
+  // What the assistant is told is what is still unread NOW: the person's own turn may have read some of it since
+  // the batch was released. The queue holds this very job, and delivers it right after this answer.
+  Object.assign(job, wordsText(registry.unread(rel.batchId)));
   note("woke", files);
   finish(rel.batchId);
   bump();
   return "deliver";
+}
+
+/** The chat took the wake and began its turn. Counted here, once per wake turn, not per batch: two batches that
+ *  were asked for in one flush are ONE wake, and the cap and the cool-down are about wakes. */
+export function noteWakeSent(
+  dir: string,
+  session: string | null,
+  jobs: readonly SettledJob[],
+): void {
+  if (session === null || !jobs.some((j) => j.kind === "words")) return;
+  const key = chatId({ dir, session });
+  wakes.set(key, [...(wakes.get(key) ?? []), Date.now()]);
 }
 
 /** What the card shows of one chat's waiting for words. Why the assistant is not carrying on is read now, from
@@ -478,6 +537,8 @@ export function __resetWakeHost(): void {
   notes.clear();
   wakes.clear();
   askedThisTurn.clear();
+  clockAt = 0;
+  awakeMs = 0;
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
   if (ticker !== null) clearInterval(ticker);

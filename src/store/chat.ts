@@ -64,7 +64,14 @@ import { undoFlags, localSession } from "./chatSession";
 import { projectConfig } from "./projectConfig";
 import { JOB_WAKE_LEAD, registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
 import type { ChatKey } from "./speechWake";
-import { admitWordsWake, wakeBeginTurn, wakeDropChat, wakeEndTurn } from "./speechWakeHost";
+import {
+  admitWordsWake,
+  noteWakeSent,
+  wakeBeginTurn,
+  wakeDropChat,
+  wakeEndTurn,
+  wakeResumeTurn,
+} from "./speechWakeHost";
 
 /** Per model, whether the server has said it rebuilds that model's input from the transcript
  *  (client-owned history). Absent = not known yet: the request then also carries what the
@@ -328,6 +335,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
   function rearm(exec: TurnExecution): void {
     exec.controller = new AbortController();
     exec.stopped = false;
+    // A turn that ended by Stop or an error was dropped by the wake for words; taken up again, it is live once more.
+    wakeResumeTurn(exec.wake, exec.token);
   }
   /** Hard-abort + retire the current turn (project switch, or a new message sent
    *  before approving): its in-flight call + sidecar die and it can run nothing
@@ -385,6 +394,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // The catalog changed under the editor (a placeholder filled in, or failed), so the
         // timeline can drop its "Generating…" without waiting for a reload.
         useEditor.getState().refreshMedia();
+        noteWakeSent(dir, get().transcriptId, jobs);
         void get().resumeForJobs(jobs);
       },
       // The words of files the assistant was told were not ready are asked, at this moment, whether they may
@@ -1331,6 +1341,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }
         // Reset provider continuity so the next turn rebuilds context from the
         // (now shorter) transcript instead of the stale response chain.
+        // What the assistant was told was not ready, in the turn that was undone, is not waited for any more.
+        wakeDropChat(ed.store.projectDir, get().transcriptId ?? undefined);
         set((s) => ({
           turns: next,
           providerSnapshot: null,
@@ -1410,6 +1422,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           if (!(await replaceTimeline(ed.store, cp))) return null; // project closed mid-restore: leave chat state untouched
           await ed.reload();
         }
+        wakeDropChat(ed.store.projectDir, get().transcriptId ?? undefined); // the undone turns' waiting is over
         set((s) => ({
           turns: next,
           providerSnapshot: null,

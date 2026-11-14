@@ -256,6 +256,12 @@ export class WakeRegistry {
     return out;
   }
 
+  /** The turn `exec` of `chat` is taken up again after it ended (Stop, an error): it is the chat's live turn once
+   *  more. Nothing it registered before is brought back: that was dropped when it ended. */
+  resumeTurn(chat: ChatKey, exec: number): void {
+    this.live.set(chatId(chat), exec);
+  }
+
   /** The turn `exec` of `chat` ended. A normal end seals its batch; any other end drops it. */
   endTurn(chat: ChatKey, exec: number, how: TurnEnd, now: number): Release[] {
     const c = chatId(chat);
@@ -316,30 +322,34 @@ export class WakeRegistry {
       .map(snapshot);
   }
 
-  /** What the card shows for one chat. */
+  /** What the card shows for one chat. Files are counted, not entries: a file read in several stretches is one
+   *  file, and it is done only when every stretch of it is. */
   view(chat: ChatKey): RegistryView {
     const c = chatId(chat);
-    let total = 0;
-    let done = 0;
-    let readyUnread = 0;
+    const files = new Map<string, boolean>(); // source -> some stretch of it is still pending
+    const unread = new Set<string>();
     const pending: Entry[] = [];
     for (const e of this.entries.values()) {
       if (e.chat !== c) continue;
       const batch = this.batches.get(e.batch);
       if (!batch) continue;
       if (batch.phase === "released") {
-        if (e.state === "landed") readyUnread++;
+        if (e.state === "landed") unread.add(e.source);
         continue;
       }
       if (e.state === "pending") {
-        total++;
         pending.push(snapshot(e));
+        files.set(e.source, true);
       } else if (e.state === "landed" || e.state === "fetched") {
-        total++;
-        done++;
+        if (!files.has(e.source)) files.set(e.source, false);
       }
     }
-    return { total, done, pending, readyUnread };
+    return {
+      total: files.size,
+      done: [...files.values()].filter((stillPending) => !stillPending).length,
+      pending,
+      readyUnread: unread.size,
+    };
   }
 
   /** Files held, in every phase (for tests and diagnostics). */

@@ -401,6 +401,42 @@ describe("a batch of files the assistant was told were not ready", () => {
     expect(view.pending.map((e) => e.key)).toEqual(["c"]);
     expect(r.view(B)).toEqual({ total: 0, done: 0, pending: [], readyUnread: 0 });
   });
+
+  it("counts a file read in several stretches as one file, done only when every stretch of it is", () => {
+    const r = new WakeRegistry();
+    begin(r, A, 1);
+    const stretch = (key: string, start: number, end: number) =>
+      r.register(
+        { ...A, exec: 1, key, source: "talk", ref: "m_talk", audioS: 60, window: { start, end } },
+        0,
+      );
+    stretch("w1", 0, 60);
+    stretch("w2", 60, 120);
+    stretch("w3", 120, 180);
+    ask(r, A, 1, "other");
+    r.endTurn(A, 1, "done", 1);
+    expect(r.view(A)).toMatchObject({ total: 2, done: 0 });
+    land(r, A, "w1", 2);
+    land(r, A, "other", 3);
+    expect(r.view(A)).toMatchObject({ total: 2, done: 1 });
+    land(r, A, "w2", 4);
+    expect(r.view(A)).toMatchObject({ total: 2, done: 1 });
+    const out = land(r, A, "w3", 5);
+    expect(out).toHaveLength(1);
+    expect(r.view(A)).toMatchObject({ total: 0, done: 0, readyUnread: 2 }); // two files, four stretches
+  });
+
+  it("takes up a turn again after it ended in an error: what it is told next is waited for", () => {
+    const r = new WakeRegistry();
+    begin(r, A, 1);
+    r.endTurn(A, 1, "error", 1);
+    expect(ask(r, A, 1, "after-error")).toEqual([]);
+    expect(r.size(), "an ended turn is no longer the live one").toBe(0);
+    r.resumeTurn(A, 1);
+    ask(r, A, 1, "after-retry");
+    expect(r.endTurn(A, 1, "done", 2)).toEqual([]);
+    expect(land(r, A, "after-retry", 3).map(refs)).toEqual([["ref-after-retry"]]);
+  });
 });
 
 // --- The same rules, restated as plain lists, and compared on random event sequences -----------------------
@@ -625,25 +661,28 @@ class Model {
 
   view(c: ChatKey): { total: number; done: number; pending: string[]; readyUnread: number } {
     const chat = modelChat(c);
-    let total = 0;
-    let done = 0;
-    let readyUnread = 0;
+    const files = new Map<string, boolean>(); // source -> some stretch still pending
+    const unread = new Set<string>();
     const pending: string[] = [];
     for (const b of this.batches) {
       if (b.chat !== chat) continue;
       for (const e of this.members(b)) {
         if (b.phase === "released") {
-          if (e.state === "landed") readyUnread++;
+          if (e.state === "landed") unread.add(e.source);
         } else if (e.state === "pending") {
-          total++;
+          files.set(e.source, true);
           pending.push(e.key);
         } else if (e.state === "landed" || e.state === "fetched") {
-          total++;
-          done++;
+          if (!files.has(e.source)) files.set(e.source, false);
         }
       }
     }
-    return { total, done, pending: pending.sort(), readyUnread };
+    return {
+      total: files.size,
+      done: [...files.values()].filter((p) => !p).length,
+      pending: pending.sort(),
+      readyUnread: unread.size,
+    };
   }
 }
 
