@@ -31,6 +31,7 @@ import {
   dismissExport,
   gentlestRungOf,
   listExportRecords,
+  restartWords,
   retryExport,
   subscribeExports,
 } from "../timeline/exportQueue";
@@ -41,6 +42,7 @@ import {
   describeEncoder,
   describeExpected,
   describeLiveStatus,
+  describeQuietNote,
   describeResult,
   describeRung,
   describeTryAgain,
@@ -166,11 +168,14 @@ export default function ExportCard(): JSX.Element | null {
       {running.map((r) => {
         const feed = liveFeedOf({ live, finishing }, r.job_id);
         const expected = describeExpected(r.expected);
+        const again =
+          r.attempt && r.attempt > 1 ? (restartWords(r.restartReason)?.after ?? null) : null;
+        const quietNote = feed ? describeQuietNote(feed, now) : null;
         return (
           <div key={r.job_id}>
             <div className="flex items-center justify-between gap-2">
               <span className="min-w-0 truncate font-medium text-neutral-100">
-                {`Exporting “${r.filename}”`}
+                {`Exporting “${r.filename}”${r.attempt && r.attempt > 1 ? ` · attempt ${r.attempt}` : ""}`}
               </span>
               {!r.cancelling && (
                 <button
@@ -187,8 +192,30 @@ export default function ExportCard(): JSX.Element | null {
               <ExportProgressBar fraction={feed?.fraction ?? null} />
             </div>
             <div data-testid="export-card-status" className="mt-1 text-[11px] text-neutral-400">
-              {r.cancelling ? "Cancelling…" : feed ? describeLiveStatus(feed, now) : "Working…"}
+              {r.cancelling
+                ? "Cancelling…"
+                : r.restarting
+                  ? r.restarting
+                  : feed
+                    ? describeLiveStatus(feed, now)
+                    : "Working…"}
             </div>
+            {again && !r.cancelling && (
+              <div
+                data-testid="export-card-restarted"
+                className="mt-0.5 text-[11px] text-neutral-500"
+              >
+                {again}
+              </div>
+            )}
+            {quietNote && !r.cancelling && (
+              <div
+                data-testid="export-card-quiet-note"
+                className="mt-0.5 text-[11px] text-neutral-500"
+              >
+                {quietNote}
+              </div>
+            )}
             {/* What it was expected to take when it began, for the whole run: the time left above is the render's own
                 guess and only appears once it is moving. */}
             {expected && !r.cancelling && (
@@ -238,6 +265,15 @@ export default function ExportCard(): JSX.Element | null {
           elapsedMs: (r.endedAt ?? now) - (r.ranAt ?? r.startedAt),
           error: r.error,
         });
+        // A restart the app made that failed the same way says so in the reason's own words.
+        const failedAgain =
+          r.state === "failed" &&
+          r.attempt &&
+          r.attempt > 1 &&
+          failureOf(r.error).code === "memory_limit"
+            ? (restartWords(r.restartReason)?.failedAgain ?? null)
+            : null;
+        const detail = failedAgain ?? result.detail;
         const tryAgain =
           r.state === "failed" && r.canRetry
             ? r.chipFailed
@@ -262,7 +298,7 @@ export default function ExportCard(): JSX.Element | null {
               {r.state !== "done" && (
                 <div className="truncate text-[11px] text-neutral-500">{r.filename}</div>
               )}
-              {result.detail && <div className="text-[11px] text-neutral-400">{result.detail}</div>}
+              {detail && <div className="text-[11px] text-neutral-400">{detail}</div>}
               {tryAgain && <div className="text-[11px] text-neutral-400">{tryAgain}</div>}
               {elsewhere && (
                 <div className="text-[11px] text-neutral-400">{SAVE_ELSEWHERE_LINE}</div>

@@ -5,6 +5,7 @@
 // callback down through the tool context, a render announces itself here and the UI subscribes.
 // One job at a time, matching the one ffmpeg process.
 import { create } from "zustand";
+import { attempts } from "../timeline/exportAttempts";
 import { ENCODER_IDS, type ExportEncoder } from "../timeline/exportEncoder";
 import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
 import type { LiveFacts, LiveStageName } from "../timeline/exportWords";
@@ -166,6 +167,9 @@ interface ExportState extends ExportJob {
   reset: () => void;
   beginLive: (jobId: string) => void;
   setLiveStage: (jobId: string, stage: LiveStageName) => void;
+  /** What the export's processors are doing, as the watch reads it (true busy, false idle, null unknown): the card's line
+   *  says "Still working" for a quiet but busy render. Only a change is a change. */
+  setLiveBusy: (jobId: string, busy: boolean | null) => void;
   endLive: (jobId: string) => void;
 }
 
@@ -259,15 +263,26 @@ export const useExportJob = create<ExportState>((set, get) => ({
       delete rest[jobId];
       return { live: ending ? null : s.live, finishing: rest };
     }),
+  setLiveBusy: (jobId, busy) =>
+    set((s) => {
+      if (s.live && s.live.jobId === jobId)
+        return s.live.busy === busy ? s : { live: { ...s.live, busy } };
+      const other = s.finishing[jobId];
+      return other && other.busy !== busy
+        ? { finishing: { ...s.finishing, [jobId]: { ...other, busy } } }
+        : s;
+    }),
 }));
 
-/** What is known about an export's run: the feed of the one rendering, or of one that is finishing. */
+/** What is known about an export's run: the feed of the one rendering, or of one that is finishing. The id may be any attempt's of
+ *  the export (the Export dialog holds the first's): the feed is the live attempt's (exportAttempts.ts). */
 export function liveFeedOf(
   state: Pick<ExportState, "live" | "finishing">,
   jobId: string,
 ): ExportLive | null {
-  if (state.live && state.live.jobId === jobId) return state.live;
-  return state.finishing[jobId] ?? null;
+  const id = attempts.current(jobId);
+  if (state.live && state.live.jobId === id) return state.live;
+  return state.finishing[id] ?? null;
 }
 
 /** The live feed after a progress report. Movement is a change in the frame count, the output position

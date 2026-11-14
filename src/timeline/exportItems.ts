@@ -93,7 +93,13 @@ export async function runWithMoves(
 export async function exportTool(
   args: Args,
   ctx: ClientToolContext | null,
-  retrying?: { from: Rung; minRung: Rung; processor?: true; plain?: true },
+  retrying?: {
+    from: Rung;
+    minRung: Rung;
+    processor?: true;
+    plain?: true;
+    restart?: RestartLink;
+  },
   placed?: MovedTo,
 ): Promise<Result> {
   let result: Result;

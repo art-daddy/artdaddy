@@ -31,6 +31,18 @@ export interface LinkMeta {
   route?: number;
 }
 
+/** What an export's start says about the attempt it continues. The queue builds it when it decides a restart, and the
+ *  retry closure carries it back into the queue with the new request, where the admission links the two attempts. */
+export interface RestartLink {
+  kind: LinkKind;
+  /** The attempt it continues: the chain's current one when the restart was decided. */
+  from: string;
+  /** The project's fingerprint when the first attempt was admitted, for an automatic restart: a project edited since is
+   *  not started again by itself (the person's own Try again starts from the project as it is now). */
+  snapshot?: string;
+  meta: LinkMeta;
+}
+
 /** Attempts one chain may hold. A safety net: every switch needs a click on a running export and at most one link is
  *  automatic, so it takes six deliberate clicks to get here. */
 export const MAX_ATTEMPTS = 8;

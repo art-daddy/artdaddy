@@ -103,6 +103,7 @@ import {
   type ExportSubmission,
   type MovedTo,
 } from "./exportQueue";
+import type { RestartLink } from "./exportAttempts";
 import type { ExportStory } from "./exportTrace";
 import { describeExpected } from "./exportWords";
 import type { ExportQuestionKind } from "./exportQuestions";
@@ -3911,7 +3912,13 @@ function verbatimStem(path: unknown): string | null {
 export async function exportTimelineTool(
   callArgs: Args,
   ctx: ClientToolContext | null,
-  retrying?: { from: Rung; minRung: Rung; processor?: true; plain?: true },
+  retrying?: {
+    from: Rung;
+    minRung: Rung;
+    processor?: true;
+    plain?: true;
+    restart?: RestartLink;
+  },
   moved?: MovedTo,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
@@ -3991,6 +3998,18 @@ export async function exportTimelineTool(
     ...(retrying?.plain ? { lean: { plain: true } } : {}),
   });
   if (!prepared.ok) return prepared.result;
+  // An export the app starts again by itself goes on with the project the first attempt was admitted on: an export is a
+  // snapshot, and the minutes of the first attempt are when people keep editing. A project edited since is not started
+  // again; the failure stands and the person's own Try again exports the project as it is now.
+  if (
+    retrying?.restart?.kind === "auto" &&
+    retrying.restart.snapshot !== prepared.admission.snapshotSha256
+  )
+    return {
+      ok: false,
+      error:
+        "the project was edited after this export began, so it was not started again by itself",
+    };
 
   const sub = await queueRenderJob(
     ctx,
@@ -4012,6 +4031,7 @@ export async function exportTimelineTool(
       ...(moved?.story ? { story: moved.story } : {}),
       ...(moved?.waived?.length ? { waived: moved.waived } : {}),
       ...(moved && retrying ? { moved: true as const } : {}),
+      ...(retrying?.restart ? { restart: retrying.restart } : {}),
     },
   );
   // If it fails, one click on the chat card starts it again.
@@ -4082,10 +4102,13 @@ function retryOf(
     const open = options.store;
     // The session this export was asked in may have ended since (the project was closed and opened again):
     // the project is the same, the store is the one open now.
-    const where: ClientToolContext =
+    const alive: ClientToolContext =
       open && open.projectDir === later.store.projectDir && !later.store.sessionLive()
         ? { ...later, store: open }
         : later;
+    // An export the app starts by itself stops with the signal it is given: a Cancel in the gap before it is admitted
+    // reaches every await of its start, as it does for any request.
+    const where: ClientToolContext = options.signal ? { ...alive, signal: options.signal } : alive;
     const { exportTool } = await import("./exportItems");
     const folder = options.saveTo ?? placed?.dir;
     const result = await exportTool(
@@ -4095,24 +4118,27 @@ function retryOf(
         from,
         minRung,
         ...(options.processor ? { processor: true as const } : {}),
+        ...(options.restart ? { restart: options.restart } : {}),
         ...(options.plain || staysPlain ? { plain: true as const } : {}),
       },
       folder ? { dir: folder } : undefined,
     );
     if (result.ok !== false) return { ok: true };
     const facts = (result as { export_refusal?: ExportRefusalFacts }).export_refusal;
-    // A refusal is reported as any other is, so a Try again that came to nothing is not invisible.
-    void import("../api/exportEvents")
-      .then(({ reportExport }) =>
-        reportExport(
-          refusalReport(facts, {
-            elapsed_ms: Date.now() - started,
-            operation: "render",
-            error: String(result.error ?? ""),
-          }),
-        ),
-      )
-      .catch(() => undefined);
+    // A refusal is reported as any other is, so a Try again that came to nothing is not invisible. One the app started
+    // by itself is not: nobody asked for it, and it would count as an export blocked at the door.
+    if (options.restart?.kind !== "auto")
+      void import("../api/exportEvents")
+        .then(({ reportExport }) =>
+          reportExport(
+            refusalReport(facts, {
+              elapsed_ms: Date.now() - started,
+              operation: "render",
+              error: String(result.error ?? ""),
+            }),
+          ),
+        )
+        .catch(() => undefined);
     return facts?.status === "declined"
       ? { ok: false, declined: true }
       : { ok: false, error: String(result.error ?? "the export was refused") };
@@ -4153,6 +4179,9 @@ export interface Carried {
   waived?: readonly ExportQuestionKind[];
   /** The person chose the folder as they started it again: the story's retry says so. */
   moved?: true;
+  /** The attempt this one continues, when the app (or the person's Switch) started it again: the queue links the two at
+   *  the admission, so they are one export to the person and to the assistant. */
+  restart?: RestartLink;
 }
 
 /** The command of an export at the rung the plan chooses for this PC right now (exportPlan.ts): the gentlest
@@ -4253,6 +4282,8 @@ export async function prepareRenderSubmission(
     visual_layers: renderPlan.workload.peakVisualLayers,
     project_width: renderPlan.workload.width,
     project_height: renderPlan.workload.height,
+    // The project as this export was admitted on it: an automatic restart goes on only with this one.
+    snapshot_sha256: request.admission.snapshotSha256,
     calibration: {
       workload: renderPlan.workload,
       output: renderPlan.output,
@@ -4314,6 +4345,7 @@ export async function prepareRenderSubmission(
     ...(carry?.movable ? { movable: true as const } : {}),
     ...(carry?.story ? { story: carry.story } : {}),
     ...(carry?.waived?.length ? { waived: carry.waived } : {}),
+    ...(carry?.restart ? { restart: carry.restart } : {}),
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
     ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),

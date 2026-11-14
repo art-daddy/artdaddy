@@ -133,6 +133,13 @@ export function describeQuietNote(live: LiveFacts, now: number): string | null {
     : null;
 }
 
+/** What the assistant is told about a running export that has made no new picture for a while but whose processors are
+ *  busy: it is working, and a cancel for that alone is the wrong answer. Model-facing, so lane L2 reviews the words. */
+export function busyNoteForAssistant(quietForSeconds: number): string {
+  const minutes = Math.max(1, Math.round(quietForSeconds / 60));
+  return `Still working: the processor is busy, it just has not finished a new picture for ${minutes} min. That is normal for a heavy project; do not cancel it for that alone.`;
+}
+
 /** What an export is expected to take: one sentence for the Export dialog before the click, the chat card while it runs,
  *  and an assistant's answer when it starts one, so all three say the same thing. Nothing when there is no time to say.
  *  `all` is for several files run one after another: it names the time in all and no size, which is one file's. */

@@ -95,12 +95,25 @@ import {
 } from "./exportTrace";
 import {
   QUIET_SECONDS,
+  busyNoteForAssistant,
   describeChipFailure,
   failureOf,
   quietSeconds,
   timeLeftSeconds,
 } from "./exportWords";
 import { limitThatFired, mibBand, parseNativeDiagnostics } from "./nativeDiagnostics";
+import { attempts, type Restarted, type RestartLink } from "./exportAttempts";
+import {
+  RESTARTED_AS,
+  SEND_RESTART_FACTS,
+  decideRestart,
+  producedFraction,
+  recordOf,
+  restartRow,
+  type RestartDecision,
+  type RestartFacts,
+  type RestartRecord,
+} from "./exportRestart";
 
 /** Who stopped an export (a value of the report's trace vocabulary). */
 export type ExportCanceller = Extract<
@@ -155,6 +168,33 @@ const inflight = new Map<string, { task: Promise<unknown>; retry?: () => Promise
  *  the turn's own abort — so the queue owns that now. */
 const controllers = new Map<string, AbortController>();
 const deliveryPorts = new Map<string, ExportDeliveryPort>();
+
+/** The signal of an automatic restart's gap, by the export's public id: a Cancel that reaches the gap fires it, so every
+ *  await of the restart's start stops (the retry closure is handed this signal). */
+const restartGaps = new Map<string, AbortController>();
+
+/** Exports a Cancel was asked of and that have not settled. Noted at once, before the delivery owner answers, so the
+ *  decision to start an export again never misses a Cancel that is still on its way. */
+const cancelAsked = new Set<string>();
+
+const RESTART_LOG_LIMIT = 50;
+/** What each decision to start an export again came to, newest last: a local record for a bug report. Nothing is sent. */
+const restartLog: Array<{ id: string; at: number; record: RestartRecord }> = [];
+
+export function restartDecisions(): ReadonlyArray<{
+  id: string;
+  at: number;
+  record: RestartRecord;
+}> {
+  return restartLog.map((entry) => ({ ...entry }));
+}
+
+function noteRestartDecision(id: string, record: RestartRecord | null): void {
+  if (record === null) return;
+  restartLog.push({ id: attempts.publicId(id), at: Date.now(), record });
+  if (restartLog.length > RESTART_LOG_LIMIT)
+    restartLog.splice(0, restartLog.length - RESTART_LOG_LIMIT);
+}
 
 export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort {
   const entries = new Map<string, ExportDelivery>();
@@ -330,6 +370,15 @@ export interface ExportRecord {
   canRetry?: true;
   /** Try again was pressed and the new export is being started. */
   retrying?: true;
+  /** The app is starting this export again by itself (its attempt ended for lack of memory): what the row says in the
+   *  meantime. The row stays `running` until the new attempt is admitted, which replaces it, or the restart is given up,
+   *  which lets the failure show. */
+  restarting?: string;
+  /** Which attempt of the export this is, from 2, and how it came about: what the card says on a row the app started again. */
+  attempt?: number;
+  restarted?: Restarted;
+  /** The reason that started it again (a row of exportRestart.ts's table): its words are the row's. */
+  restartReason?: string;
   /** What the card says when starting again did not work (the new export was refused). */
   note?: string;
   startedAt: number;
@@ -383,14 +432,18 @@ export function subscribeExports(fn: () => void): () => void {
 export function whenExportEnds(jobId: string): Promise<ExportRecord | null> {
   const settled = (r: ExportRecord | undefined) =>
     r && r.state !== "queued" && r.state !== "running" ? r : null;
-  const now = records.find((x) => x.job_id === jobId);
+  // The id the caller holds is the export's first attempt's; when the app starts it again the live attempt is another
+  // job, and the wait goes on with that one (resolved at every look).
+  const live = (): ExportRecord | undefined =>
+    records.find((x) => x.job_id === attempts.current(jobId));
+  const now = live();
   if (!now) return Promise.resolve(null);
   const already = settled(now);
   if (already) return Promise.resolve({ ...already });
 
   return new Promise((resolve) => {
     const stop = subscribeExports(() => {
-      const done = settled(records.find((x) => x.job_id === jobId));
+      const done = settled(live());
       if (!done) return;
       stop();
       resolve({ ...done });
@@ -400,11 +453,19 @@ export function whenExportEnds(jobId: string): Promise<ExportRecord | null> {
 
 /** Drop a SETTLED row. A running one is left alone — cancel it first. */
 export function dismissExport(jobId: string): boolean {
-  const i = records.findIndex((x) => x.job_id === jobId);
+  const id = attempts.current(jobId);
+  const i = records.findIndex((x) => x.job_id === id);
   if (i < 0 || records[i].state === "running" || records[i].state === "queued") return false;
   records.splice(i, 1);
+  forgetChainWithoutRows(id);
   changed();
   return true;
+}
+
+/** A chain whose last row is gone is forgotten: its ids resolve to themselves again. */
+function forgetChainWithoutRows(id: string): void {
+  if (!attempts.chainOf(id).some((attempt) => records.some((r) => r.job_id === attempt)))
+    attempts.forget(id);
 }
 
 /** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
@@ -415,7 +476,17 @@ export function dismissExport(jobId: string): boolean {
 export type ExportRetry = (
   minRung: Rung,
   failedRung: Rung,
-  options: { store?: ProjectStoreAccess; processor?: true; plain?: true; saveTo?: string },
+  options: {
+    store?: ProjectStoreAccess;
+    processor?: true;
+    /** The export that failed ran a lean render path (Phase 3a): the new export is built with 0.27.0's recipe. */
+    plain?: true;
+    saveTo?: string;
+    /** The attempt this one continues, when the app starts the export again by itself (exportAttempts.ts). */
+    restart?: RestartLink;
+    /** Stops the new export's start (a Cancel in the gap before it is admitted). */
+    signal?: AbortSignal;
+  },
 ) => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
 const retries = new Map<string, ExportRetry>();
 
@@ -458,50 +529,62 @@ export async function retryExport(
   store?: ProjectStoreAccess,
   options: { saveTo?: string } = {},
 ): Promise<void> {
-  const record = records.find((r) => r.job_id === jobId);
-  const retry = retries.get(jobId);
+  // The card holds the live attempt's id and the assistant the first's: Try again works on the live one.
+  const failedId = attempts.current(jobId);
+  const record = records.find((r) => r.job_id === failedId);
+  const retry = retries.get(failedId);
   if (!record || !retry || record.state !== "failed" || record.retrying) return;
-  patch(jobId, { retrying: true, note: undefined });
+  patch(failedId, { retrying: true, note: undefined });
   const failedRung = rungOf(record.rung);
   const failure = failureOf(record.error).code;
   // A failure only the chip can explain is tried again on the processor, from its normal rung: the processor has rungs
-  // of its own. Any other failure steps down the rungs, as before.
+  // of its own. Any other failure steps down the rungs, as before, except a stop at the ceiling of the no-progress rule:
+  // a busy export that made no picture for that long is not helped by a gentler rung, so it starts again as it was.
   const processor = record.chipFailed === true;
+  const minRung = processor
+    ? 0
+    : isCeilingStop(record.error)
+      ? failedRung
+      : retryRung(failedRung, failureOf(record.error).code, ladderOfRecord(record));
   let result: Awaited<ReturnType<ExportRetry>>;
   try {
-    result = await retry(
-      processor ? 0 : retryRung(failedRung, failure, ladderOfRecord(record)),
-      failedRung,
-      {
-        store,
-        ...(processor ? { processor: true as const } : {}),
-        // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice. Not after a failure no recipe can
-        // cause (a full or unwritable drive, a source file that is gone): 0.27.0's recipe would only be slower there, and a retry in another folder keeps the speed.
-        ...(record.lean === true && !ENVIRONMENT_FAILURES.has(failure)
-          ? { plain: true as const }
-          : {}),
-        ...(options.saveTo ? { saveTo: options.saveTo } : {}),
-      },
-    );
+    result = await retry(minRung, failedRung, {
+      store,
+      ...(processor ? { processor: true as const } : {}),
+      // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice. Not after a failure no recipe can
+      // cause (a full or unwritable drive, a source file that is gone): 0.27.0's recipe would only be slower there, and a retry in another folder keeps the speed.
+      ...(record.lean === true && !ENVIRONMENT_FAILURES.has(failure)
+        ? { plain: true as const }
+        : {}),
+      ...(options.saveTo ? { saveTo: options.saveTo } : {}),
+    });
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (result.ok) {
-    dismissExport(jobId);
+    dismissExport(failedId);
     return;
   }
   // A question the person turned down is their own choice, not something that went wrong.
-  patch(jobId, {
+  patch(failedId, {
     retrying: undefined,
     note: result.declined ? undefined : `Could not start again: ${result.error ?? "unknown error"}`,
   });
+}
+
+/** The app stopped this export at the ceiling of its no-progress rule: it had been busy and made no picture for 15 to 30
+ *  minutes (stalledMessage). The words are the app's own, so they are read back here. */
+function isCeilingStop(error: string | undefined): boolean {
+  return typeof error === "string" && /although the PC stayed busy/.test(error);
 }
 
 /** Drop every settled row. */
 export function clearFinishedExports(): void {
   for (let i = records.length - 1; i >= 0; i--) {
     const s = records[i].state;
-    if (s !== "running" && s !== "queued") records.splice(i, 1);
+    if (s === "running" || s === "queued") continue;
+    const [gone] = records.splice(i, 1);
+    forgetChainWithoutRows(gone.job_id);
   }
   changed();
 }
@@ -531,17 +614,35 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
   const feeds = useExportJob.getState();
   const waiting = records.filter((r) => r.state === "queued" && !r.cancelling);
   return records.map((r) => {
+    // The assistant holds the export's first attempt's id for as long as the export lasts, so that is the id it is shown
+    // whichever attempt is the live one (exportAttempts.ts).
+    const attempt = attempts.describe(r.job_id);
     // Each running export has its own feed: one that is still being checked or saved keeps saying so
     // while the next one renders.
     const running = r.state === "running" ? liveFeedOf(feeds, r.job_id) : null;
     const rendering = running !== null && running.stage === "rendering";
     const quiet = running ? quietSeconds(running, now) : 0;
+    const busy = running ? (stories.get(r.job_id)?.watch?.busy() ?? null) : null;
     const left = running ? timeLeftSeconds(running, now) : null;
     const failure = r.state === "failed" ? failureOf(r.error) : null;
+    const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
+    const notes = [
+      ...(restartNote ? [restartNote] : []),
+      ...(busy === true && quiet >= QUIET_SECONDS ? [busyNoteForAssistant(quiet)] : []),
+    ];
     return {
-      job_id: r.job_id,
+      job_id: attempt.publicId,
       filename: r.filename,
       state: r.state,
+      // A restart the app made by itself (or the person's Switch): the same export, a later attempt.
+      ...(attempt.attempt > 1
+        ? {
+            attempt: attempt.attempt,
+            ...(attempt.restarted ? { restarted: attempt.restarted } : {}),
+          }
+        : {}),
+      // The app is starting it again by itself, and the row is waiting for the new attempt.
+      ...(r.restarting ? { restarting: true } : {}),
       ...(r.mediaRef ? { media_ref: r.mediaRef } : {}),
       ...(r.error ? { error: r.error } : {}),
       ...(r.warnings?.length ? { warnings: r.warnings } : {}),
@@ -574,7 +675,14 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
         ? { progress_percent: Math.round(Math.min(1, Math.max(0, running.fraction)) * 100) }
         : {}),
       ...(left !== null ? { time_left_s: Math.round(left) } : {}),
-      ...(quiet >= QUIET_SECONDS ? { stalled_for_s: quiet } : {}),
+      // No new picture for a minute or more: idle (or unreadable) is said as it always was; busy is said as working, so the
+      // assistant does not cancel an export that is only heavy.
+      ...(quiet >= QUIET_SECONDS
+        ? busy === true
+          ? { working: true, quiet_for_s: quiet }
+          : { stalled_for_s: quiet }
+        : {}),
+      ...(notes.length ? { note: notes.join(" ") } : {}),
       // A waiting export: its place in line (1 is next).
       ...(r.state === "queued" && !r.cancelling ? { queue_position: waiting.indexOf(r) + 1 } : {}),
       // A failed export: the reason as a code, and in plain words the person can act on.
@@ -677,26 +785,36 @@ function noteCancelled(jobId: string, by: ExportCanceller): void {
  *  `by` says who stopped it, for the report's story: the person (in the export dialog, on the card,
  *  in the queue), the assistant, or the app itself (quitting). */
 export function cancelExport(jobId: string, by: ExportCanceller = "app"): boolean {
-  const c = controllers.get(jobId);
+  // A Cancel that reaches the gap between an attempt's end and the next one's start (exportAttempts.ts): the restart must
+  // not start, and the export ends cancelled. Looked at before anything else, because the ended attempt has no controller.
+  if (attempts.cancelPending(jobId)) {
+    restartGaps.get(attempts.publicId(jobId))?.abort();
+    markCancelling(attempts.current(jobId));
+    return true;
+  }
+  // The id given is any attempt's of the export (the assistant holds the first's): the Cancel goes to the live one.
+  const live = attempts.current(jobId);
+  const c = controllers.get(live);
   if (!c) return false;
-  const note = captureCancel(jobId, by);
-  const port = deliveryPorts.get(jobId);
+  cancelAsked.add(live);
+  const note = captureCancel(live, by);
+  const port = deliveryPorts.get(live);
   if (port)
     // The cancel is said (in the row and in the story) once it was accepted: a refused one (the file was
     // already being saved) or one that never arrived must not leave a row that claims it is stopping while
     // it carries on, nor a story that says it was cancelled and then that it finished.
     void port
-      .cancel(jobId)
+      .cancel(live)
       .then((cancelled) => {
         if (!cancelled) return;
         note?.();
-        markCancelling(jobId);
+        markCancelling(live);
         c.abort();
       })
       .catch(() => undefined);
   else {
     note?.();
-    markCancelling(jobId);
+    markCancelling(live);
     c.abort();
   }
   return true;
@@ -766,7 +884,7 @@ export function waitForExports(
   signal?: AbortSignal,
 ): Promise<void> {
   const open = (): boolean =>
-    records.some((r) => (jobId === null || r.job_id === jobId) && isOpen(r));
+    records.some((r) => (jobId === null || r.job_id === attempts.current(jobId)) && isOpen(r));
   if (ms <= 0 || signal?.aborted || !open()) return Promise.resolve();
   return new Promise((resolve) => {
     const finish = (): void => {
@@ -806,24 +924,32 @@ export async function manageExportsTool(
   const action = String(args.action ?? "list").trim() || "list";
   if (action === "list") {
     const only = String(args.job_id ?? "").trim() || null;
-    if (only && !records.some((r) => r.job_id === only))
+    if (only && !records.some((r) => r.job_id === attempts.current(only)))
       return {
         ok: false,
         error: `no export with job_id '${only}' in this session; manage_exports action='list' shows them`,
       };
     const waitedMs = exportWaitMs(args.wait_seconds);
     await waitForExports(only, waitedMs, signal);
-    const rows = listExportOutcomes().filter((r) => only === null || r.job_id === only);
+    const rows = listExportOutcomes().filter(
+      (r) => only === null || r.job_id === attempts.publicId(only),
+    );
     const open = rows.filter((r) => r.state === "running" || r.state === "queued").length;
     return { ok: true, exports: rows, ...(open > 0 ? unfinishedHint(open, waitedMs) : {}) };
   }
   if (action !== "cancel")
     return { ok: false, error: `unknown action '${action}'; use 'list' or 'cancel'` };
 
-  const jobId = String(args.job_id ?? "").trim();
-  if (!jobId) return { ok: false, error: "job_id is required to cancel an export" };
+  const askedId = String(args.job_id ?? "").trim();
+  if (!askedId) return { ok: false, error: "job_id is required to cancel an export" };
+  // The id the assistant holds is the export's first attempt's: a Cancel in the gap before the app's restart, or after
+  // it, reaches the live attempt (exportAttempts.ts).
+  if (attempts.hasPending(askedId))
+    return { ok: cancelExport(askedId, "assistant"), cancelled: true };
+  const jobId = attempts.current(askedId);
   const port = deliveryPorts.get(jobId);
   if (port && controllers.has(jobId)) {
+    cancelAsked.add(jobId);
     try {
       const cancelled = await port.cancel(jobId);
       if (cancelled) {
@@ -845,7 +971,7 @@ export async function manageExportsTool(
   if (!record)
     return {
       ok: false,
-      error: `no export with job_id '${jobId}' in this session; manage_exports action='list' shows them`,
+      error: `no export with job_id '${askedId}' in this session; manage_exports action='list' shows them`,
     };
   // Not an error: the export ended before the request arrived. Say HOW it ended — "finished" for
   // a run that was cancelled or failed told the agent a file was delivered when none was (QA
@@ -966,6 +1092,8 @@ export interface ExportSpec {
     /** How the encoder was chosen (exportChoice.ts): the story's chip test and mode events, the report's encoder, chip and
      *  reason, and the chip's device to set aside if it fails the export. */
     choice?: ChoiceFacts;
+    /** The project as this export was admitted on it (its fingerprint): an automatic restart goes on only with this one. */
+    snapshot_sha256?: string;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -994,6 +1122,10 @@ export interface ExportSpec {
   /** Kinds of question the person already said Start anyway to, in the request this one starts again at a folder they
    *  chose: they are not asked a second time (the PC and the project are the same). */
   waived?: readonly ExportQuestionKind[];
+  /** The attempt this export continues, when the app (or the person's Switch) started it again: the admission links the
+   *  two, so they are one export to the person and to the assistant (exportAttempts.ts). An automatic one never asks the
+   *  person anything. */
+  restart?: RestartLink;
   /** What happened to this export so far (see exportTrace.ts). Set by the queue when the request
    *  arrives; a caller leaves it out. */
   story?: ExportStory;
@@ -1086,6 +1218,8 @@ async function reportSettledExport(
     finalSizeBytes?: number;
     /** A later launch of the app finished this export (see `finishAdopted`). */
     recovered?: boolean;
+    /** How much of the project had been produced when it ended, 0 to 100 (read only when the held disclosure is on). */
+    percentDone?: number;
   },
 ): Promise<void> {
   try {
@@ -1141,7 +1275,13 @@ async function reportSettledExport(
           mibBand(facts.residentPeakBytes) ?? 0,
           mibBand(facts.residentLimitBytes) ?? 0,
         );
-      story.trace.record("outcome", outcome.status, Math.round(outcome.elapsedMs / 1000), 0);
+      story.trace.record(
+        "outcome",
+        outcome.status,
+        Math.round(outcome.elapsedMs / 1000),
+        // How far along the export was when it ended: one of the two facts the held disclosure covers (rule E3b-18).
+        SEND_RESTART_FACTS ? Math.min(100, Math.max(0, Math.round(outcome.percentDone ?? 0))) : 0,
+      );
     }
     const engine = spec.meta?.calibration?.engine;
     const choice = spec.meta?.choice;
@@ -1199,6 +1339,10 @@ export function __resetExportQueue(): void {
   beacons.clear();
   controllers.clear();
   deliveryPorts.clear();
+  restartGaps.clear();
+  cancelAsked.clear();
+  restartLog.length = 0;
+  attempts.reset();
   records.length = 0;
   snapshot = [];
   setExportsBusy(false);
@@ -1522,6 +1666,9 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     const { picture, storageReady } = await measurePreflight(specs, refuse);
     const questions = planQuestions(picture, waived);
     if (questions.length === 0) return storageReady;
+    // An export the app starts again by itself asks nobody anything: no one may be there (an assistant started it), and a
+    // question means the room it bet on is not there. It is a refusal, and the first attempt's plain failure stands.
+    if (specs[0].restart?.kind === "auto") return refuse("declined");
     if (!hostMounted()) {
       for (const question of questions) {
         const decision = await askNatively(specs, question);
@@ -1587,13 +1734,18 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
   for (const spec of specs) {
     if (spec.story.trace.has("requested")) continue;
     spec.story.trace.record("requested", spec.via ?? (spec.origin ? "chat" : "other"));
-    if (spec.retry)
-      spec.story.trace.record(
-        "retry",
-        spec.retry.moved ? "browse" : "try_again",
-        spec.retry.from,
-        spec.retry.to,
-      );
+    if (spec.retry) {
+      const automatic = spec.restart?.kind === "auto";
+      // The restarted export's report says the app started it again (`app`), once the owner has approved that disclosure
+      // (rule E3b-18): until then nothing of the restart is in the report. The person's own Try again is as it was.
+      if (!automatic || SEND_RESTART_FACTS)
+        spec.story.trace.record(
+          "retry",
+          automatic ? "app" : spec.retry.moved ? "browse" : "try_again",
+          spec.retry.from,
+          automatic ? (spec.restart?.meta.route ?? spec.retry.to) : spec.retry.to,
+        );
+    }
   }
   const destinations = new Set<string>();
   const projectDir = specs[0].store.projectDir;
@@ -1737,6 +1889,26 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     }
     throw error;
   }
+  // One export across attempts (exportAttempts.ts). A first attempt starts its chain. One the app started again is linked to
+  // the attempt it continues here, in the same synchronous run as its own admission and the failed row's retirement below:
+  // nothing is awaited between "the new attempt exists" and "the old row is gone", so nobody sees both, or neither.
+  let notLinked: string | null = null;
+  if (spec.restart) {
+    const linked = attempts.link(spec.restart.from, jobId, spec.restart.kind, spec.restart.meta);
+    if (!linked.ok) notLinked = linked.why;
+  } else attempts.begin(jobId);
+  if (notLinked !== null) {
+    // A Cancel reached the gap, or the chain has no room for this attempt: the new export's intent is retired through the
+    // normal path and nothing is left behind.
+    reserved.delete(key);
+    const retired = await port.cancel(jobId).catch(() => false);
+    if (retired) await port.complete(jobId).catch(() => false);
+    await ledger.settle(jobId, {
+      status: "cancelled",
+      error: `the export was not started again (${notLinked})`,
+    });
+    throw new Error("export cancelled before it was started again");
+  }
   deliveryPorts.set(jobId, port);
   controllers.set(jobId, new AbortController());
   if (spec.batch) batchOf(spec.batch).open++;
@@ -1770,15 +1942,30 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
       ? { encoder: spec.meta.choice.encoder, reason: spec.meta.choice.reason }
       : {}),
     ...(expected ? { expected } : {}),
+    ...(spec.restart
+      ? {
+          attempt: attempts.attemptNumber(jobId),
+          ...(spec.restart.meta.restarted ? { restarted: spec.restart.meta.restarted } : {}),
+          ...(spec.restart.meta.reason ? { restartReason: spec.restart.meta.reason } : {}),
+        }
+      : {}),
     startedAt: Date.now(),
   });
+  // The attempt this one continues is no longer shown or listed: the new attempt is the export now (the same synchronous run
+  // as the link above).
+  if (spec.restart) {
+    const retired = records.findIndex((r) => r.job_id === spec.restart?.from);
+    if (retired >= 0) records.splice(retired, 1);
+    restartGaps.delete(attempts.publicId(jobId));
+  }
   // Terminal rows are trimmed on ADMISSION rather than on settle, so a long session cannot grow
   // the list without bound while still keeping every finished export the user can currently see.
   let terminal = records.filter((r) => r.state !== "running" && r.state !== "queued").length;
   for (let i = 0; i < records.length && terminal > KEEP_TERMINAL; i++) {
     const s = records[i].state;
     if (s !== "running" && s !== "queued") {
-      records.splice(i--, 1);
+      const [gone] = records.splice(i--, 1);
+      forgetChainWithoutRows(gone.job_id);
       terminal--;
     }
   }
@@ -1861,7 +2048,11 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
       () => story.enter("rendering"),
       stallPolicy,
     );
-    watchTimer = setInterval(() => story.watch?.tick(), WATCH_TICK_MS);
+    watchTimer = setInterval(() => {
+      story.watch?.tick();
+      // What the processors are doing, for the card's line.
+      useExportJob.getState().setLiveBusy(jobId, story.watch?.busy() ?? null);
+    }, WATCH_TICK_MS);
   };
   // The render ended, however it ended: the watch's last word, before the checks that follow it
   // (which take their own time and are not the render standing still).
@@ -1986,6 +2177,9 @@ interface Settle {
  *  one it adopted after a crash of the page, so both end exactly the same way. */
 async function settle(x: Settle): Promise<void> {
   const delivery = deliveryPorts.get(x.jobId);
+  // What the card's feed said when the run ended, read before the feed is closed: the decision to start the export again
+  // wants how much of the project had been produced.
+  const live = x.story ? liveFeedOf(useExportJob.getState(), x.jobId) : null;
   // Committing by rename keeps the destination either untouched or complete. When the fs cannot
   // rename, the caller already pointed the encode at the destination and there is nothing to move.
   const staged = x.stagePath !== x.destPath;
@@ -2035,8 +2229,22 @@ async function settle(x: Settle): Promise<void> {
       );
     }
   }
+  // The decision to start the export again by itself wants what the app process says about the failed run (the memory it
+  // reached, the limit that fired) and how much memory the PC has now. Read here, while a Cancel still reaches the export,
+  // and only for a failure that could be one: a memory stop of an export this page started.
+  const failedRun =
+    error &&
+    !cancelled &&
+    x.story &&
+    retries.has(x.jobId) &&
+    failureOf(error).code === "memory_limit"
+      ? await readFailedRun(x)
+      : null;
   // From here a page that takes over must not touch the file again.
   if (!publicationPending) await x.supervisor?.commit(x.jobId).catch(() => false);
+  // A Cancel that was asked, whether or not the delivery owner has answered yet, is read before the export's controller goes.
+  const cancelRequested =
+    controllers.get(x.jobId)?.signal.aborted === true || cancelAsked.has(x.jobId);
   controllers.delete(x.jobId);
   deliveryPorts.delete(x.jobId);
   stories.delete(x.jobId);
@@ -2053,14 +2261,24 @@ async function settle(x: Settle): Promise<void> {
       Math.round((Date.now() - x.startedAt) / 1000),
     );
   }
-  patch(x.jobId, {
-    state: error ? (cancelled ? "cancelled" : "failed") : "done",
-    endedAt: Date.now(),
-    error: error && !cancelled ? error : undefined,
-    ...(chipFailure ? { chipFailed: true as const } : {}),
-    ...(stderrTail ? { stderrTail } : {}),
-    ...(warnings.length ? { warnings } : {}),
-  });
+  // From here to the registration of the pending restart nothing is awaited: a Cancel that arrives later finds it.
+  const takeover = failedRun
+    ? startRestart(x, error as string, failedRun, live, cancelRequested)
+    : null;
+  patch(
+    x.jobId,
+    takeover
+      ? // The failure is not shown while the app starts the export again; its report and its cleanup are not deferred.
+        { restarting: takeover.words.gap }
+      : {
+          state: error ? (cancelled ? "cancelled" : "failed") : "done",
+          endedAt: Date.now(),
+          error: error && !cancelled ? error : undefined,
+          ...(chipFailure ? { chipFailed: true as const } : {}),
+          ...(stderrTail ? { stderrTail } : {}),
+          ...(warnings.length ? { warnings } : {}),
+        },
+  );
 
   // The delivered file enters the library like any other asset, so the ONE thing an agent could
   // not do was look at what it had actually shipped: `inspect_timeline` inspects the timeline, and
@@ -2098,6 +2316,7 @@ async function settle(x: Settle): Promise<void> {
       warnings: warnings.length,
       error: error && !cancelled ? error : "",
       recovered: x.recovered,
+      percentDone: error ? (live ? Math.round(producedFraction(live) * 100) : 0) : 100,
     });
     beacons.add(beacon);
     void beacon.finally(() => beacons.delete(beacon));
@@ -2109,22 +2328,230 @@ async function settle(x: Settle): Promise<void> {
   const note = warnings.length
     ? `saved as ${x.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
     : `saved as ${x.filename}`;
+  // The assistant knows the export by its first attempt's id and is told how it ended once: a restart in between is part of
+  // the same export (exportAttempts.ts), and is said when it happened.
+  const publicId = attempts.publicId(x.jobId);
+  const restartedAs = attempts.describe(x.jobId).restarted;
   const settled: SettledJob | null = cancelled
     ? null
     : {
-        id: x.jobId,
+        id: publicId,
         tool: "export",
         label: `the export ${x.filename}`,
         status: error ? "failed" : "done",
         startedBy: x.startedBy,
-        ...(error ? { error } : { detail: note }),
+        ...(error
+          ? { error }
+          : {
+              detail: restartedAs
+                ? `${note} (restarted once ${RESTARTED_PHRASE[restartedAs]})`
+                : note,
+            }),
       };
+  cancelAsked.delete(x.jobId);
+  if (takeover) {
+    // The failure waits for the restart: only the final attempt's ending is told.
+    await continueRestart(x, takeover, error as string, settled, {
+      chipFailure,
+      stderrTail,
+      warnings,
+    });
+    return;
+  }
   if (x.batch) {
     const b = batchOf(x.batch);
     b.open--;
     if (settled) b.notes.push([x.store.projectDir, settled]);
     flushBatch(x.batch);
   } else if (settled) notifyJobSettled(x.store.projectDir, settled);
+}
+
+/** What the app process said about a failed run, and what the PC has now: what a decision to start the export again reads. */
+interface FailedRun {
+  stderr: string;
+  diagnostics: ReturnType<typeof parseNativeDiagnostics>;
+  freeBytes: number | null;
+}
+
+async function readFailedRun(x: Settle): Promise<FailedRun> {
+  const views = x.supervisor ? await x.supervisor.list().catch(() => [] as JobView[]) : [];
+  const native = views.find((view) => view.id === x.jobId);
+  const stderr = native ? jobStderr(native) : "";
+  let freeBytes: number | null = null;
+  try {
+    const raw = (await resolveExportResources(x.destPath))?.available_memory_bytes;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) freeBytes = raw;
+  } catch {
+    freeBytes = null;
+  }
+  return { stderr, diagnostics: parseNativeDiagnostics(stderr), freeBytes };
+}
+
+/** A restart that has been decided and registered, and is waiting to be started. */
+interface Takeover {
+  decision: Extract<RestartDecision, { restart: true }>;
+  words: NonNullable<ReturnType<typeof restartRow>>["words"];
+  publicId: string;
+  /** Fired by a Cancel that reaches the gap. */
+  gap: AbortController;
+}
+
+/** What the assistant is told of a restart, by how it started again. */
+const RESTARTED_PHRASE: Readonly<Record<Restarted, string>> = {
+  gentler_setting: "on a gentler setting",
+  memory_light_route: "on the memory-light route",
+  processor: "on the processor",
+  quick: "on the quick setting",
+};
+
+/** The words the assistant is given about an attempt the app started again: its reason's own. */
+function restartNoteOf(jobId: string): string | null {
+  const reason = attempts.incomingLink(jobId)?.meta.reason;
+  return reason ? (restartRow(reason)?.words.assistantNote ?? null) : null;
+}
+
+/** What the card says about an attempt the app started again, by the reason that did it (exportRestart.ts): the line the
+ *  row keeps once it runs, and what is said if it fails the same way. */
+export function restartWords(
+  reason: string | undefined,
+): { after: string; failedAgain: string } | null {
+  const words = reason ? restartRow(reason)?.words : undefined;
+  return words ? { after: words.after, failedAgain: words.failedAgain } : null;
+}
+
+/** The decision to start a failed export again by itself (exportRestart.ts). One synchronous run, nothing awaited: it
+ *  builds the facts, decides, notes the decision in the local record and, when the answer is to restart, registers the
+ *  pending restart, so a Cancel from here on finds it. Null when the export is not started again. */
+function startRestart(
+  x: Settle,
+  error: string,
+  run: FailedRun,
+  live: ReturnType<typeof liveFeedOf>,
+  cancelRequested: boolean,
+): Takeover | null {
+  const record = records.find((r) => r.job_id === x.jobId);
+  const limit = limitThatFired(`${error}\n${run.stderr}`, run.diagnostics);
+  const choice = x.meta?.choice;
+  const sticky = attempts.describe(x.jobId).restarted;
+  const now = Date.now();
+  const facts: RestartFacts = {
+    failure: {
+      code: failureOf(error).code,
+      guard: limit && limit !== "other" ? limit : null,
+      stopKind: null,
+      stopSeconds: null,
+    },
+    attempt: {
+      number: attempts.attemptNumber(x.jobId),
+      rung: rungOf(record?.rung),
+      ladder: record ? ladderOfRecord(record) : [0],
+      engine:
+        x.meta?.calibration?.engine === "partition-pipes-v1"
+          ? "partition-pipes-v1"
+          : "file-sequence-v1",
+      encoder: x.meta?.calibration?.encoder ?? "x264-crf",
+      chipMaker: choice && isChipEncoder(choice.encoder) ? choice.encoder : null,
+      stickyRoute: RESTARTED_AS.find((kind) => kind === sticky) ?? null,
+    },
+    progress: {
+      producedFraction: live ? producedFraction(live) : Number.NaN,
+      elapsedSeconds: Math.max(0, Math.round((now - x.startedAt) / 1000)),
+      activeSeconds: Math.max(0, Math.round((now - (record?.ranAt ?? x.startedAt)) / 1000)),
+      expectedSeconds: record?.expected?.seconds ?? null,
+    },
+    machine: {
+      freeBytes: run.freeBytes,
+      failedPeakBytes: run.diagnostics.residentPeakBytes ?? null,
+      limitBytes: run.diagnostics.residentLimitBytes ?? null,
+    },
+    request: {
+      retryClosureExists: retries.has(x.jobId),
+      // Checked where the new export is prepared (render.ts): its fingerprint against the first attempt's.
+      snapshotUnchanged: true,
+      aborted: cancelRequested || x.run.cancelled,
+      flags: {
+        auto_restart: exportFlag("auto_restart"),
+        memory_restart: exportFlag("memory_restart"),
+        restart_streamed: exportFlag("restart_streamed"),
+        plan_rung: exportFlag("plan_rung"),
+      },
+      autoRestartsUsed: attempts.autoRestartsUsed(x.jobId),
+    },
+    workload: null,
+  };
+  const decision = decideRestart(facts);
+  noteRestartDecision(x.jobId, recordOf(decision));
+  if (!decision.restart) return null;
+  const row = restartRow(decision.reason);
+  if (!row || !attempts.registerPending(x.jobId, "auto")) {
+    noteRestartDecision(x.jobId, "second");
+    return null;
+  }
+  const gap = new AbortController();
+  restartGaps.set(attempts.publicId(x.jobId), gap);
+  return { decision, words: row.words, publicId: attempts.publicId(x.jobId), gap };
+}
+
+/** Start the export again, now that the failed attempt is cleaned up and reported: through the retry closure the card's
+ *  Try again uses, which prepares the new export and asks the person nothing (an automatic restart's question is a
+ *  refusal). The admission links the two attempts and retires the failed row in one synchronous run, so this has
+ *  nothing more to do when it works. When it does not (the project changed, the PC has no room, a question would have
+ *  been asked, a Cancel arrived), the failure that was held back shows, exactly as it would have without the restart, or
+ *  the export ends cancelled. */
+async function continueRestart(
+  x: Settle,
+  takeover: Takeover,
+  error: string,
+  failure: SettledJob | null,
+  kept: { chipFailure: ChipMaker | null; stderrTail?: string; warnings: string[] },
+): Promise<void> {
+  const { decision, gap, publicId } = takeover;
+  const retry = retries.get(x.jobId);
+  let result: Awaited<ReturnType<ExportRetry>> = {
+    ok: false,
+    error: "there is no way to start this export again",
+  };
+  if (retry && !gap.signal.aborted && !attempts.isPendingCancelled(x.jobId)) {
+    try {
+      result = await retry(rungOf(decision.override.rung), rungOf(decision.failedRungN), {
+        store: x.store,
+        signal: gap.signal,
+        restart: {
+          kind: "auto",
+          from: x.jobId,
+          snapshot: x.meta?.snapshot_sha256,
+          meta: {
+            reason: decision.reason,
+            restarted: decision.restarted,
+            failedRung: decision.failedRungN,
+            route: decision.routeM,
+          },
+        },
+      });
+    } catch (thrown) {
+      result = { ok: false, error: thrown instanceof Error ? thrown.message : String(thrown) };
+    }
+  }
+  if (result.ok && attempts.isSuperseded(x.jobId)) {
+    // The new attempt is the export now: it was admitted, linked and its predecessor's row retired in one run.
+    restartGaps.delete(publicId);
+    return;
+  }
+  const cancelled = gap.signal.aborted || attempts.isPendingCancelled(x.jobId);
+  if (!cancelled)
+    noteRestartDecision(x.jobId, /edited/.test(result.error ?? "") ? "edited" : "refused_at_door");
+  attempts.clearPending(x.jobId);
+  restartGaps.delete(publicId);
+  patch(x.jobId, {
+    restarting: undefined,
+    state: cancelled ? "cancelled" : "failed",
+    endedAt: Date.now(),
+    ...(cancelled ? {} : { error }),
+    ...(kept.chipFailure && !cancelled ? { chipFailed: true as const } : {}),
+    ...(kept.stderrTail ? { stderrTail: kept.stderrTail } : {}),
+    ...(kept.warnings.length ? { warnings: kept.warnings } : {}),
+  });
+  if (!cancelled && failure) notifyJobSettled(x.store.projectDir, failure);
 }
 
 /** What render.ts gives an export job, for a page that did not start it. */
