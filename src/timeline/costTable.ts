@@ -56,6 +56,11 @@ export const RUNG_TIME_FACTOR = [1, 1.7, 2.3] as const;
  *  (ALIGNMENT.md F-14, n 45), which is the reference export's `rHat` for a median PC. It mixes project cost and PC pace (inference). */
 export const PRIOR_PACE = { rHat: 2.4, cores: 8 } as const;
 
+/** The PC a speed check that could not finish is priced as: a weak one (more than 4 times the video's length for the reference export, the owner's line
+ *  for weak), on a rough guess because nothing was measured. A placeholder to be fitted on the weak-4 rig profile. `cores` is only the fallback when the caller
+ *  does not know this PC's. */
+export const WEAK_PRIOR_PACE = { rHat: 6, cores: 4 } as const;
+
 /** What a PC check's numbers may be taken to mean. `rHat` outside the bounds, or a read-and-mix share outside its bounds, is clamped, not trusted. */
 export const PACE_LIMITS = {
   rHat: { min: 0.02, max: 1000 },

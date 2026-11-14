@@ -33,6 +33,7 @@ import {
   REFERENCE_FRAME,
   REFERENCE_MEGAPIXELS,
   RUNG_TIME_FACTOR,
+  WEAK_PRIOR_PACE,
 } from "./costTable";
 import { CHIP_MAKERS, FASTER_X264_GAIN, type ChipMaker, type ExportEncoder } from "./exportEncoder";
 import {
@@ -209,7 +210,8 @@ interface Pace {
   basis: Extract<EstimateBasis, "pc_check" | "guess">;
 }
 
-/** This PC's pace from its speed test, or the prior PC's when there is no usable one (no result, the check is off, it never finished). */
+/** This PC's pace from its speed test, or the prior PC's when there is no usable one (no result, the check is off or its record is damaged). A check that could not
+ *  finish is a weak PC's pace, still a guess. */
 function readPace(pace: PcPace | null | undefined, enabled: boolean): Pace {
   const prior: Pace = {
     tFrame: PRIOR_PACE.rHat / 30,
@@ -218,8 +220,14 @@ function readPace(pace: PcPace | null | undefined, enabled: boolean): Pace {
     fasterGain: ENCODE.fasterGain,
     basis: "guess",
   };
-  if (!enabled || !isObject(pace) || pace.cls === "unfinished" || pace.cls === "unknown")
-    return prior;
+  if (!enabled || !isObject(pace) || pace.cls === "unknown") return prior;
+  // The check could not finish: priced as a weak PC, but nothing was measured, so whatever speed the record carries is not believed and the basis stays a guess.
+  if (pace.cls === "unfinished")
+    return {
+      ...prior,
+      tFrame: WEAK_PRIOR_PACE.rHat / 30,
+      cores: positive(pace.cores) ? pace.cores : WEAK_PRIOR_PACE.cores,
+    };
   if (!positive(pace.rHat)) return prior;
   const { aFps, bFps, cFps } = pace;
   const split = positive(aFps) && positive(bFps);

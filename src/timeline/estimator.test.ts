@@ -231,6 +231,19 @@ describe("estimate: where the number comes from", () => {
     );
   });
 
+  it("a check that could not finish is priced as a weak PC: slower than the prior PC, still a rough guess, whatever pace the record carries", () => {
+    const never = estimate(request({ pace: null }))!;
+    const stuck = estimate(request({ pace: { ...labPace, cls: "unfinished" as const } }))!;
+    const slowStuck = estimate(
+      request({ pace: { ...labPace, rHat: 9, cls: "unfinished" as const } }),
+    )!;
+    expect(stuck.basis).toBe("guess");
+    expect(stuck.seconds).toBeGreaterThan(never.seconds);
+    expect(stuck.high).toBeGreaterThan(never.high);
+    // nothing was measured, so what the record says about its own speed is not believed
+    expect(slowStuck).toEqual(stuck);
+  });
+
   it("a faster PC check gives a smaller number than a slower one", () => {
     expect(seconds({ pace: { ...labPace, rHat: 0.4 } })).toBeLessThan(
       seconds({ pace: { ...labPace, rHat: 4 } }),
