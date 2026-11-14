@@ -55,7 +55,7 @@ export interface PcCheckDeps {
   cores: number;
   /** The server's switches, read when a decision is made; `pc_check` off removes the class altogether. */
   flags?: () => Pick<Flags3c, "pc_check">;
-  /** The class cut-offs in force now (lane L2's pair, held in memory only): read at every class decision, never kept here, so a pair the server moves applies
+  /** The class cut-offs in force now (the server's pair, held in memory only): read at every class decision, never kept here, so a pair the server moves applies
    *  at once. Absent, or a pair outside the band: the compiled cut-offs. */
   cutoffs?: () => unknown;
   /** True while a battery reports discharging; null or absent when the page cannot tell. */

@@ -1,8 +1,8 @@
-// The shape prior for the starting rung (the memory prediction, 3c-37 = C). Where this PC has measured nothing for the project's shape, the table's prediction of the peak (shapeMemory.ts) at each rung of the export's own ladder
+// The shape prior for the starting rung. Where this PC has measured nothing for the project's shape, the table's prediction of the peak (shapeMemory.ts) at each rung of the export's own ladder
 // stands in for the missing samples, so the plan starts the export at the first rung whose predicted peak fits under the ceiling instead of letting it stop first. It stands in; it never overrides: a measurement this PC made
 // decides at every rung it covers (the prior is not even consulted), and it can only make the start GENTLER than 0.27.0's, never lighter.
 //
-// A gentler rung can change the delivered file (x264's two encoder threads), so it is the owner's picture rule's business (pictureGate.ts): the prior may start an export at rung 1 or 2 only when the gate's record for that rung
+// A gentler rung can change the delivered file (x264's two encoder threads), so it goes through the picture gate (pictureGate.ts): the prior may start an export at rung 1 or 2 only when the gate's record for that rung
 // says yes for the arguments the code has now. Every answer in the table is still `pending`, so today the prior is worked out and kept locally (`recentShapeDecisions`) and the start rung is 0.27.0's.
 import type { CostShape } from "./costShape";
 import { estimateDepsNow } from "./estimateDeps";
@@ -26,7 +26,7 @@ const MIB = 1024 * 1024;
 
 /** What the prior must pass to start an export at a gentler rung. Both parts are the app's own unless a test gives others. */
 export interface ShapeGate {
-  /** The picture gate's table: the owner's recorded answers. */
+  /** The picture gate's table: the recorded answers. */
   table?: readonly GateRecord[];
   /** The hash of the arguments a rung has in the code now. */
   rungHash?: (rung: 1 | 2) => Promise<string | null>;

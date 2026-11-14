@@ -1,4 +1,4 @@
-// The real inputs of the honest estimate: the switches, the speed check the app ran (through the one handle), lane L2's cut-offs, this PC's earlier exports and the open timeline. Each test
+// The real inputs of the honest estimate: the switches, the speed check the app ran (through the one handle), the server's cut-offs, this PC's earlier exports and the open timeline. Each test
 // changes ONE of the real stores and reads what the person would be told, so a dependency that is wired to the wrong place, or not wired, shows as a number that does not move.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 

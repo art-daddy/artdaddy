@@ -1,6 +1,6 @@
-// E1: the accuracy bar of the dialog's estimate, and the proof that the compare which judges it can fail. The new estimator's coefficients are placeholders until the lane fits them (CALIBRATION-3c section 3), so
-// nothing here says the bar is met: it says the rule is the lane's own (at least 90 % within 2 times, the shown range holding the real time, no silent 4 times), that 0.27.0's recorded estimates fail it at the
-// lane's recorded figure, that a perfect predictor passes and one that is always 3 times off fails, and that any table of recorded cells can be replayed through an estimate and judged.
+// The accuracy bar of the dialog's estimate, and the proof that the compare which judges it can fail. The new estimator's coefficients are placeholders until they are fitted, so
+// nothing here says the bar is met: it says the rule (at least 90 % within 2 times, the shown range holding the real time, no silent 4 times) is enforced, that 0.27.0's recorded estimates fail it at the
+// recorded figure, that a perfect predictor passes and one that is always 3 times off fails, and that any table of recorded cells can be replayed through an estimate and judged.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 

@@ -1,5 +1,5 @@
-// The shape prior for the starting rung (the memory prediction, 3c-37 = C). Where this PC has measured nothing for the project's shape, the table's prediction of the peak at each rung of the export's own ladder lets
-// the plan start the export at the first rung that fits, instead of letting it stop first. It is the owner's picture rule's business too: a gentler rung can change the delivered file, so the prior may start an export
+// The shape prior for the starting rung. Where this PC has measured nothing for the project's shape, the table's prediction of the peak at each rung of the export's own ladder lets
+// the plan start the export at the first rung that fits, instead of letting it stop first. The picture gate decides too: a gentler rung can change the delivered file, so the prior may start an export
 // at rung 1 or 2 only when the picture gate's record for that rung says yes for the arguments the code has now. Every answer in the table is still `pending`, so today the prior is computed and kept locally and the start
 // rung is 0.27.0's. Each case plays the real decision (`decideRung`) with a shape the test builds from the real shape type.
 import fc from "fast-check";

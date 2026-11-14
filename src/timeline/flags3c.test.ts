@@ -1,4 +1,4 @@
-// The one reader of the remote switches the 3c estimate side uses: every switch is read when it is asked for, a switch that cannot be read is the compiled default, and
+// The one reader of the remote switches the estimate side uses: every switch is read when it is asked for, a switch that cannot be read is the compiled default, and
 // the reader cannot throw into an export or a dialog.
 import { afterEach, describe, expect, it, vi } from "vitest";
 

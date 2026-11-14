@@ -40,7 +40,7 @@ export interface RouteEstimatesDeps {
   recipeOf: ((clipId: string) => Recipe) | undefined;
   /** The speed check's stored result for this PC, already tested for age, build and core count (the check service), or null. */
   speedCheck(): PcCheckRecord | null;
-  /** The class cut-offs in force now (lane L2's pair), or undefined for the compiled ones. */
+  /** The class cut-offs in force now (the server's pair), or undefined for the compiled ones. */
   cutoffs(): Cutoffs | undefined;
   /** Logical processors of this PC. */
   cores(): number;

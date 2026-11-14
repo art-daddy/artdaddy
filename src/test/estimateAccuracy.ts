@@ -1,5 +1,4 @@
-// The accuracy compare of the estimate (RED-PLAN-3c E1; DESIGN-3c 3.4; CALIBRATION-3c section 4): one pure function over a table of cells, ported from the lane's `rig\red\accuracy_compare.mjs` so that the
-// same rule judges 0.27.0's recorded estimates now (RED) and the new estimator's when it has been fitted. It lives with the tests: nothing in the app reads it.
+// The accuracy compare of the estimate: one pure function over a table of cells, so that the same rule judges 0.27.0's recorded estimates now and the new estimator's when it has been fitted. It lives with the tests: nothing in the app reads it.
 //
 // A cell: its row and profile, the seconds of video, the seconds the estimate said, the seconds the export really took and, when the estimate showed one, its range and whether it said "could take much longer".
 

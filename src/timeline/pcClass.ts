@@ -1,5 +1,5 @@
 // The PC's class from the hidden speed test: the pure rules (the class from a ratio, the cut-offs' band) and the local store of the check's own answer for each probe.
-// The cut-offs themselves are lane L2's (`pcClass()` of the flags reader, in memory only); this module keeps no copy of them. Nothing here reads the PC, builds a command or
+// The cut-offs themselves are the server's (`pcClass()` of the flags reader, in memory only); this module keeps no copy of them. Nothing here reads the PC, builds a command or
 // returns a speed, a thread count, a preset or an encoder: the class only decides who is warned and who has Quick preselected.
 // Every read fails soft (a damaged, foreign or stale value is no value) and a write that fails is not a failure.
 import type { PcClass } from "./exportTypes3c";
@@ -166,7 +166,7 @@ export function unfinishedRecord(now: PcCheckNow): PcCheckRecord {
   };
 }
 
-/** The class a record stands for under the cut-offs in force NOW, which are lane L2's pair (`pcClass()` of the flags reader), handed in by the caller: a pair the
+/** The class a record stands for under the cut-offs in force NOW, which are the server's pair (`pcClass()` of the flags reader), handed in by the caller: a pair the
  *  server moves applies to a PC that was measured earlier, without measuring again. `unfinished` for a check that did not finish, `unknown` for no record. */
 export function classOfRecord(record: PcCheckRecord | null, cutoffs?: Cutoffs | null): PcClass {
   if (!record) return "unknown";

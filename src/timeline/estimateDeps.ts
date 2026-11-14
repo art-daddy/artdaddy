@@ -1,5 +1,5 @@
-// The real inputs of the honest estimate (see `routeEstimates.ts`): the switches, the speed check the app ran, lane L2's cut-offs, this PC's earlier exports and the pace log's storage. The
-// two things that are not here yet are left as named seams: the source facts reader and the lean recipe decision (lane L3's) are `null` and `undefined`, which the estimator prices as "unknown source"
+// The real inputs of the honest estimate (see `routeEstimates.ts`): the switches, the speed check the app ran, the server's cut-offs, this PC's earlier exports and the pace log's storage. The
+// two things that are not here yet are left as named seams: the source facts reader and the lean recipe decision are `null` and `undefined`, which the estimator prices as "unknown source"
 // and "today's recipe", and the open timeline is read through a reader the app registers at start-up, so nothing here has to import the editor.
 import { pcClass as serverCutoffs } from "../api/exportFlags";
 import { EXPORT_SPEED_PROBE_ID } from "../platform/pcCheckProbe";
