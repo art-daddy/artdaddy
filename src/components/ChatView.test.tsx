@@ -79,6 +79,15 @@ import {
   takeFirstPrompt,
 } from "../store/firstPrompt";
 import { useEditor } from "../store/editor";
+import { __resetComposer, useComposer } from "../store/composer";
+import {
+  __resetWakeHost,
+  noteWordsFetched,
+  registerPendingWords,
+  wakeBeginTurn,
+  wakeEndTurn,
+  type Settled,
+} from "../store/speechWakeHost";
 import ChatView from "./ChatView";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { STARTER_PROMPTS } from "./starterPrompts";
@@ -1785,5 +1794,100 @@ describe("ChatView: chats of a project", () => {
     state.switching = true;
     render(<ChatView />);
     expect(screen.getByRole("button", { name: /Restore Checkpoint/ })).toBeDisabled();
+  });
+});
+
+// While the assistant waits for the words of files it was told were not ready, the pane says how that is going, in
+// a small card beside the export card, and tells the wake whether the box holds a draft.
+describe("the speech card in the chat pane", () => {
+  const DIR = "C:/projects/p1";
+  const SESSION = "chat-p1";
+  const CHAT = { dir: DIR, session: SESSION };
+  const ctx = {
+    store: { projectDir: DIR },
+    origin: { chatSessionId: SESSION, branchId: 0, executionId: 1 },
+  };
+
+  function assistantWaitsFor(files: string[]): void {
+    wakeBeginTurn(CHAT, 1, false);
+    for (const [i, name] of files.entries())
+      registerPendingWords(
+        { ...CHAT, exec: 1, source: name, ref: name, window: null, path: null },
+        `k${i}`,
+        30,
+        new Promise<Settled>(() => undefined),
+      );
+    wakeEndTurn(CHAT, 1, "done");
+  }
+
+  beforeEach(() => {
+    __resetWakeHost();
+    __resetComposer();
+    useEditor.setState({ projectId: "p1", store: { projectDir: DIR } as never });
+  });
+  afterEach(() => {
+    __resetWakeHost();
+    __resetComposer();
+  });
+
+  it("is not there when the assistant is not waiting for anything", () => {
+    render(<ChatView />);
+    expect(screen.queryByTestId("speech-card")).toBeNull();
+  });
+
+  it("says how many files are being transcribed for the assistant, and goes when the assistant has them", () => {
+    assistantWaitsFor(["m_1", "m_2"]);
+    render(<ChatView />);
+    expect(screen.getByTestId("speech-card").textContent).toBe("Transcribing 0 of 2 files");
+
+    act(() => noteWordsFetched(ctx as never, "m_1"));
+    expect(screen.getByTestId("speech-card").textContent).toBe("Transcribing 1 of 2 files");
+
+    act(() => noteWordsFetched(ctx as never, "m_2"));
+    expect(screen.queryByTestId("speech-card")).toBeNull();
+  });
+
+  it("is the chat's own: another chat of the project shows nothing of it", () => {
+    assistantWaitsFor(["m_1"]);
+    state.transcriptId = "another-chat";
+    render(<ChatView />);
+    expect(screen.queryByTestId("speech-card")).toBeNull();
+  });
+
+  it("sits beside the export card, inside the pane, and never over the timeline", () => {
+    assistantWaitsFor(["m_1"]);
+    render(<ChatView />);
+    const card = screen.getByTestId("speech-card");
+    expect(card.closest("[class*='fixed']"), "it is not a floating overlay").toBeNull();
+    expect(card.className).toContain("mb-2");
+  });
+
+  it("tells the wake when the box holds a draft: typing, clearing, a file attached, and leaving the pane", () => {
+    const view = render(<ChatView />);
+    const composer = screen.getByPlaceholderText(/Message the editor/);
+    expect(useComposer.getState().hasDraft).toBe(false);
+    fireEvent.change(composer, { target: { value: "wait, one more thing" } });
+    expect(useComposer.getState().hasDraft).toBe(true);
+    fireEvent.change(composer, { target: { value: "   " } });
+    expect(useComposer.getState().hasDraft, "spaces are no draft").toBe(false);
+    fireEvent.change(composer, { target: { value: "x" } });
+    expect(useComposer.getState().hasDraft).toBe(true);
+    view.unmount();
+    expect(
+      useComposer.getState().hasDraft,
+      "nothing is left to protect once the pane is gone",
+    ).toBe(false);
+  });
+
+  it("never lets a wake through while the person types: changing the text does not clear the draft for a moment", () => {
+    render(<ChatView />);
+    const composer = screen.getByPlaceholderText(/Message the editor/);
+    const seen: boolean[] = [];
+    const stop = useComposer.subscribe((s) => seen.push(s.hasDraft));
+    fireEvent.change(composer, { target: { value: "a" } });
+    fireEvent.change(composer, { target: { value: "ab" } });
+    fireEvent.change(composer, { target: { value: "abc" } });
+    stop();
+    expect(seen.includes(false), "a flicker to no draft would let a wake start").toBe(false);
   });
 });
