@@ -140,6 +140,7 @@ describe("MenuBar", () => {
       id: "a",
       purpose: "index",
       label: "Interview 2.mp4",
+      work: [],
       spanS: 1200,
       phase: "running",
       stop: null,

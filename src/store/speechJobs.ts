@@ -35,12 +35,26 @@ export interface SpeechFacts {
   exportsBusy: boolean;
 }
 
+/** What one run reads, so work that was asked for can be matched to the run that does it (a wake batch names
+ *  files; a run is a job). LOCAL: never shown and never sent. */
+export interface SpeechWorkItem {
+  /** The absolute path of the media file the run reads. */
+  source: string;
+  /** The language as `transcriptWait` keys it (`normLanguage`): "" is the default. */
+  language: string;
+  /** Source seconds; null is the whole file. */
+  window: { start: number; end: number | null } | null;
+}
+
 export interface SpeechJob {
   /** The supervisor's job id for a run that has started; a queue id for one that has not. Stable. */
   id: string;
   purpose: SpeechPurpose;
   /** What the person calls the file (its name); shown on this PC only. */
   label: string;
+  /** What the run reads: one item, or one per file for a run over several files. Empty for a job that is
+   *  only waiting: its file is resolved when its turn comes. */
+  work: readonly SpeechWorkItem[];
   /** Seconds of audio the run covers: the whole file, or its window. Null when not known. */
   spanS: number | null;
   phase: SpeechPhase;

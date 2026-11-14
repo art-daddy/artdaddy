@@ -74,6 +74,7 @@ describe("the watcher of one run", () => {
       id: "whisper-w1",
       purpose: "index",
       label: "talk.mp4",
+      work: [{ source: "C:/media/talk.mp4", language: "", window: null }],
       spanS: 3600,
       threads: 6,
       liveStop: true,
@@ -102,6 +103,7 @@ describe("the watcher of one run", () => {
       id: "whisper-w1",
       purpose: "index",
       label: "talk.mp4",
+      work: [{ source: "C:/media/talk.mp4", language: "", window: null }],
       spanS: 3600,
       phase: "starting",
       stop: null,
@@ -397,30 +399,34 @@ describe("a run of the real engine", () => {
 
   it("titles each run by what it is for, names the file, reads its length from the audio it was given, and says how many threads it has", async () => {
     const rig = speechRig({ audioSeconds: 90 });
-    const index = runWhisper(
-      rig.ctx({ background: true }),
-      `/media/${freshSource().split("/").pop()}`,
-    );
+    const indexSrc = `/media/${freshSource().split("/").pop()}`;
+    const index = runWhisper(rig.ctx({ background: true }), indexSrc);
     await until(() => whisperJobs().length === 1);
     expect(the()).toMatchObject({ purpose: "index", spanS: 90, phase: "starting" });
     expect(the().label).toMatch(/^rig-\d+\.mp4$/);
+    // what the run reads, so that work somebody asked for can be matched to it (local, never sent)
+    expect(the().work).toEqual([{ source: indexSrc, language: "", window: null }]);
     expect(the().facts.threads).toBe(Number(flagArg(whisperJobs()[0], "-t")));
     exits(rig, whisperJobs()[0], "");
     await index;
     expect(listed()).toEqual([]);
 
-    const look = runWhisper(rig.ctx(), freshSource());
+    const lookSrc = freshSource();
+    const look = runWhisper(rig.ctx(), lookSrc, undefined, "es");
     await until(() => whisperJobs().length === 2);
     expect(the().purpose).toBe("look");
+    expect(the().work).toEqual([{ source: lookSrc, language: "es", window: null }]);
     exits(rig, whisperJobs()[1], "");
     await look;
 
-    const span = transcribeSpan({ ...rig.ctx(), speechPurpose: "captions" }, freshSource(), {
+    const spanSrc = freshSource();
+    const span = transcribeSpan({ ...rig.ctx(), speechPurpose: "captions" }, spanSrc, {
       start: 10,
       end: 40,
     });
     await until(() => whisperJobs().length === 3);
     expect(the()).toMatchObject({ purpose: "captions" });
+    expect(the().work).toEqual([{ source: spanSrc, language: "", window: { start: 10, end: 40 } }]);
     exits(rig, whisperJobs()[2], "");
     await span;
 

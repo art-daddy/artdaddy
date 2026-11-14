@@ -543,6 +543,7 @@ export class IndexCoordinator {
         id,
         purpose: "index",
         label: head.source.replace(/\\/g, "/").split("/").pop() || head.source,
+        work: [],
         spanS: null,
         phase: "waiting",
         stop: null,

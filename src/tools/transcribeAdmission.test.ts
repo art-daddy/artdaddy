@@ -14,6 +14,7 @@ vi.mock("../api/appEvents", async (orig) => ({
 }));
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { __resetSpeechJobs, useSpeechJobs, type SpeechJob } from "../store/speechJobs";
 import { FakeJobs } from "../test/fakeJobs";
 import { freshSource, flagValues, speechRig } from "../test/speechRig";
 import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
@@ -184,6 +185,26 @@ describe("a batch that holds a file left for the cap", () => {
     expect(rig.programs.filter((p) => p === "ffmpeg")).toHaveLength(2);
     expect(await peekTranscript(rig.ctx(), b)).toBeNull();
     expect(recentPlans().map((r) => r.plan)).toEqual(["whole", "ondemand", "whole"]);
+  });
+
+  it("lists the one process over several files as ONE job that names every file it reads", async () => {
+    __resetSpeechJobs();
+    const [a, b] = [freshSource(), freshSource()];
+    let seen: readonly SpeechJob[] = [];
+    const rig = speechRig({
+      engine: async () => {
+        seen = [...useSpeechJobs.getState().jobs];
+        return { code: 0 };
+      },
+    });
+    await ensureTranscripts(rig.ctx({ background: true }), [a, b], "small", "es");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ purpose: "index", spanS: null, phase: "starting" });
+    expect(
+      [...seen[0].work].sort((x, y) => x.source.localeCompare(y.source)),
+      "what the run reads, so that work asked for can be matched to it",
+    ).toEqual([a, b].sort().map((source) => ({ source, language: "es", window: null })));
+    expect(useSpeechJobs.getState().jobs, "the run is gone from the list when it ends").toEqual([]);
   });
 
   it("runs the one file left alone when the other is deferred, and when every file is", async () => {

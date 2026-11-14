@@ -29,6 +29,7 @@ function job(id: string, over: Over = {}): SpeechJob {
     id,
     purpose: "index",
     label: FILE,
+    work: [],
     spanS: 1200,
     phase: "running",
     stop: null,

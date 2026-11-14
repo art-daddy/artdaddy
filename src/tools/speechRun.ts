@@ -13,6 +13,7 @@ import {
   type SpeechFacts,
   type SpeechJob,
   type SpeechPurpose,
+  type SpeechWorkItem,
 } from "../store/speechJobs";
 import { cpuOnlyNow } from "./speechBackend";
 import { createSpeechMonitor, passesLiveCap, type MonitorSnapshot } from "./speechMonitor";
@@ -28,6 +29,8 @@ export interface RunInfo {
   purpose: SpeechPurpose;
   /** What the person calls the file: its name. */
   label: string;
+  /** What the run reads, for matching asked-for work to this run (local, never sent). */
+  work: readonly SpeechWorkItem[];
   /** Seconds of audio the run covers, when that is known. */
   spanS: number | null;
   /** The threads the engine is given (`-t`). */
@@ -126,6 +129,7 @@ function watchRun(input: WatchInput): RunWatch {
     id: input.id,
     purpose: input.purpose,
     label: input.label,
+    work: input.work,
     spanS: input.spanS,
     phase: "starting",
     stop: null,

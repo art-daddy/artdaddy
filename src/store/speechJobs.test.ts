@@ -28,6 +28,7 @@ function job(id: string, over: Partial<SpeechJob> = {}): SpeechJob {
     id,
     purpose: "index",
     label: `${id}.mp4`,
+    work: [],
     spanS: 1200,
     phase: "waiting",
     stop: null,

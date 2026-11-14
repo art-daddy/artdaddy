@@ -1256,6 +1256,13 @@ async function runWhisperOnce(
       const { engine, release } = await engineFor(ctx, args, meta, {
         purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
         label: fileLabel(src),
+        work: [
+          {
+            source: src,
+            language: normLanguage(language),
+            window: win.key === "" ? null : { start, end },
+          },
+        ],
         spanS: await wavSeconds(ctx, wav),
         threads: Number(whisperThreads()) || null,
         // Only a whole file that the background started by itself can be stopped for being too slow:
@@ -1990,6 +1997,11 @@ async function runTogether(
         {
           purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
           label: fileLabel(ours[ready[0]].src),
+          work: ready.map((n) => ({
+            source: ours[n].src,
+            language: normLanguage(language),
+            window: null,
+          })),
           spanS: null,
           threads: Number(whisperThreads()) || null,
           liveStop: false,
