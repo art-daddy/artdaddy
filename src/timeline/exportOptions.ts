@@ -604,7 +604,7 @@ export interface ExportOptions {
   maxDurationSec?: number;
   /** Deliver only project frames [from, to): exactly the whole export's frames and sound there. */
   range?: { from: number; to: number };
-  /** The lean render paths (leanOptions.ts, Phase 3a). Absent: 0.27.0's plan, byte for byte. Only the two production boundaries pass it. */
+  /** The lean render paths (leanOptions.ts, Phase 3a). Absent: 0.27.0's plan, byte for byte. Only one production boundary passes it: a whole-timeline export (`prepareRender`); a clip on its own and a working render keep 0.27.0's recipe. */
   lean?: LeanOptions;
 }
 

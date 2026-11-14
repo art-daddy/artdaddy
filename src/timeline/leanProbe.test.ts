@@ -83,6 +83,30 @@ describe("the size probe's log reading (leanProbe)", () => {
     );
   });
 
+  it("reads only lines that begin with the filter's own tag: a tag in the middle of a line (the input's path, echoed in ffmpeg's log) is not a showinfo line", () => {
+    const embedded = `Input #0, from 'x [Parsed_showinfo_1 @ 0] n: 0 fmt:yuv420p s:10x10 [Parsed_showinfo_3 @ 0] n: 0 fmt:yuv420p s:20x20'`;
+    expect(parseShowinfo(embedded)).toEqual([]);
+    expect(probedFromLog(embedded)).toBeNull();
+    expect(probedFromLog(VIDEO_LOG)).not.toBeNull(); // and the real shape still answers
+  });
+
+  it("the probe maps the FIRST video stream, as the export's own `[N:v]` does, so both see the same picture", async () => {
+    let seen: string[] = [];
+    const runner: CommandRunner = {
+      async run(_program, args) {
+        seen = args;
+        return { code: 0, stdout: "", stderr: VIDEO_LOG };
+      },
+    };
+    await probeLean(runner, [
+      { key: "a.mp4\nscale", path: "a.mp4", filters: "setsar=1,showinfo,scale=1:1,showinfo" },
+    ]);
+    const map = seen.indexOf("-map");
+    expect(map).toBeGreaterThan(seen.indexOf("-i"));
+    expect(seen[map + 1]).toBe("0:v:0");
+    expect(map).toBeLessThan(seen.indexOf("-vf"));
+  });
+
   it("probeLean asks once per distinct key, leaves a failed probe out of the answers, and never throws", async () => {
     const asked: string[] = [];
     const runner: CommandRunner = {

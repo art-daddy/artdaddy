@@ -1,6 +1,6 @@
 // Fix 1's decision, one zooming clip at a time (Phase 3a): may this clip's cover aperture be the exact mask stream, or does it keep 0.27.0's per-pixel `geq`?
-// Pure: the builder (render.ts) passes in what it knows and takes back a mask stream or null (= emit today's text). It never throws; every refusal is one of the
-// closed words of `LeanKeptReason`, counted on the builder's tally so the export's report can say why a clip kept today's recipe.
+// The builder (render.ts) passes in what it knows and takes back a mask stream or null (= emit today's text). It touches nothing but what it is handed: the export's budget (what the mask
+// takes is booked on it) and the builder's tally (the closed word of `LeanKeptReason` for every refusal, so the export's report can say why a clip kept today's recipe). It never throws.
 import { apertureRects, maskStream, type MaskStream } from "./leanMasks";
 import type { LeanMaskBudget, LeanOptions } from "./leanOptions";
 import type { LeanTally } from "./leanRecord";

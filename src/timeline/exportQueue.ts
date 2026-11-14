@@ -317,7 +317,7 @@ export interface ExportRecord {
   /** The export failed in a way a chip can cause, and it ran on one: Try again runs it on the processor. */
   chipFailed?: true;
   /** Its plan ran a lean render path (leanRecord.ts, Phase 3a): when it fails, Try again builds 0.27.0's recipe (`plain` of
-   *  {@link ExportRetry}), so a lean path cannot make the same project fail twice. */
+   *  {@link ExportRetry}), so a lean path cannot make the same project fail twice; not after a failure no recipe can cause (ENVIRONMENT_FAILURES). */
   lean?: true;
   /** A way to start this export again is offered (see {@link offerExportRetry}): the card shows Try again on it
    *  once it has failed. */
@@ -421,6 +421,13 @@ export function offerExportRetry(jobId: string, retry: ExportRetry): void {
   patch(jobId, { canRetry: true });
 }
 
+/** The failures no recipe can cause: the drive is full or cannot be written, a source file is gone. A Try again after one of them keeps the recipe the export had (a lean export is not made plain: 0.27.0's recipe would only be slower). */
+const ENVIRONMENT_FAILURES: ReadonlySet<string> = new Set([
+  "source_unavailable",
+  "storage_unavailable",
+  "storage_full",
+]);
+
 /** The rungs Try again may step through on this export: the ones its command really has, and only the normal one
  *  while the switch for rungs is off (nothing gentler is then offered, and nothing is promised). */
 export function ladderOfRecord(record: Pick<ExportRecord, "maxRung" | "ladder">): Ladder {
@@ -450,19 +457,23 @@ export async function retryExport(
   if (!record || !retry || record.state !== "failed" || record.retrying) return;
   patch(jobId, { retrying: true, note: undefined });
   const failedRung = rungOf(record.rung);
+  const failure = failureOf(record.error).code;
   // A failure only the chip can explain is tried again on the processor, from its normal rung: the processor has rungs
   // of its own. Any other failure steps down the rungs, as before.
   const processor = record.chipFailed === true;
   let result: Awaited<ReturnType<ExportRetry>>;
   try {
     result = await retry(
-      processor ? 0 : retryRung(failedRung, failureOf(record.error).code, ladderOfRecord(record)),
+      processor ? 0 : retryRung(failedRung, failure, ladderOfRecord(record)),
       failedRung,
       {
         store,
         ...(processor ? { processor: true as const } : {}),
-        // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice.
-        ...(record.lean === true ? { plain: true as const } : {}),
+        // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice. Not after a failure no recipe can
+        // cause (a full or unwritable drive, a source file that is gone): 0.27.0's recipe would only be slower there, and a retry in another folder keeps the speed.
+        ...(record.lean === true && !ENVIRONMENT_FAILURES.has(failure)
+          ? { plain: true as const }
+          : {}),
         ...(options.saveTo ? { saveTo: options.saveTo } : {}),
       },
     );

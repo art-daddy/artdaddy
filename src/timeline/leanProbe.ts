@@ -21,7 +21,7 @@ interface ShowInfo {
 export function parseShowinfo(log: string): ShowInfo[] {
   const out: ShowInfo[] = [];
   for (const line of log.split(/\r?\n/)) {
-    const instance = /Parsed_showinfo_(\d+)/.exec(line)?.[1];
+    const instance = /^\s*\[Parsed_showinfo_(\d+)\b/.exec(line)?.[1]; // a line that begins with the filter's own tag: ffmpeg also echoes the input's PATH in its log, and a path may hold a newline
     if (instance === undefined) continue;
     const frame = /\bn:\s*(\d+)\b/.exec(line)?.[1];
     const fmt = /\bfmt:(\S+)/.exec(line)?.[1];
@@ -80,6 +80,9 @@ async function probeOne(
         "-an",
         "-i",
         request.path,
+        // the graph's own `[N:v]` is the FIRST video stream; without this ffmpeg takes the best one, which for a file with two video streams can be another
+        "-map",
+        "0:v:0",
         "-vf",
         request.filters,
         "-frames:v",

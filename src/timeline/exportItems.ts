@@ -32,7 +32,7 @@ import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
 import { missingClip } from "./operations";
 import {
-  buildLeanRenderCommand,
+  buildRenderCommand,
   encoderOptions,
   exportFolder,
   exportTimelineTool,
@@ -301,8 +301,9 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
       branding,
       range: { from: c.from, to: c.to },
     };
-    // The same rule as the whole timeline's, decided for this clip's own length and picture. A clip on its own is a deliverable: it gets the lean render paths too.
-    const plan = await buildLeanRenderCommand(ctx, loaded!.seconds, stage, {
+    // The same rule as the whole timeline's, decided for this clip's own length and picture. A clip on its own keeps 0.27.0's recipe (Phase 3a): it has no
+    // Try again that could fall back to it, so the lean render paths are for the Export dialog's whole-timeline exports only.
+    const plan = buildRenderCommand(loaded!.seconds, stage, {
       ...clipOptions,
       ...(await encoderOptions(
         ctx,

@@ -13,6 +13,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import * as host from "../platform/host";
 import { useAuth } from "../store/auth";
@@ -42,6 +43,7 @@ import {
   type ExportRetry,
 } from "./exportQueue";
 import type { Rung } from "./exportPlan";
+import { failureOf } from "./exportWords";
 import { LEAN_FLAG_NAMES } from "./leanOptions";
 import { LEAN_FIXES, LEAN_KEPT_REASONS, type LeanRecord } from "./leanRecord";
 import { addClipsTool } from "./placement";
@@ -301,16 +303,67 @@ describe("the queue: Try again is plain exactly when the failed export ran a lea
     expect(call.options.plain).toBe(true);
   });
 
-  it("the folder the person chose (Save somewhere else) is carried beside plain", async () => {
-    const { call } = await retriedAfter(
+  it("the folder the person chose (Save somewhere else) is carried; after a full drive the retry keeps the lean recipe, after a failure of the recipe it is plain", async () => {
+    const afterDisk = await retriedAfter(
       { error: DISK, plan: { rung: 0 }, lean: { ran: ["zoom"], kept: [] } },
       "E:\\Elsewhere",
     );
-    expect(call.options.saveTo).toBe("E:\\Elsewhere");
-    expect(call.options.plain).toBe(true);
+    expect(afterDisk.call.options.saveTo).toBe("E:\\Elsewhere");
+    expect(afterDisk.call.options).not.toHaveProperty("plain");
+    __resetExportQueue();
+    const afterGraph = await retriedAfter(
+      { error: GRAPH_REFUSED, plan: { rung: 0 }, lean: { ran: ["zoom"], kept: [] } },
+      "E:\\Elsewhere",
+    );
+    expect(afterGraph.call.options.saveTo).toBe("E:\\Elsewhere");
+    expect(afterGraph.call.options.plain).toBe(true);
   });
 
-  // The rule, over every failure the retry treats differently and every lean record: the lean record adds `plain` and changes nothing else about the call.
+  // A failure no recipe can cause (the drive is full or cannot be written, a source file is gone) keeps the lean recipe: 0.27.0's would only be slower. Every other failure the
+  // reason list has is plain after a lean export: a recipe could have caused it (a refused graph, a failed check, memory, time, an interruption of unknown cause).
+  const ENVIRONMENT: Array<[string, string]> = [
+    ["storage_full", DISK],
+    ["storage_unavailable", "EACCES: permission denied, open 'E:/out/final.mp4.part'"],
+    ["source_unavailable", "ENOENT: no such file or directory, open 'C:/media/a.mov'"],
+  ];
+  const RECIPE: Array<[string, string]> = [
+    ["render_failed", GRAPH_REFUSED],
+    ["memory_limit", MEMORY],
+    ["time_limit", "execution deadline expired: the export stalled"],
+    ["verification_failed", "artifact verification failed: frame count 59 of 60"],
+    ["interrupted", "the app was interrupted: restart"],
+    ["unknown", "something odd happened"],
+  ];
+  it.each(ENVIRONMENT)(
+    "a lean export that failed for %s is retried as it was: no plain",
+    async (_code, error) => {
+      const { record, call } = await retriedAfter({
+        error,
+        plan: { rung: 0 },
+        lean: { ran: ["zoom", "stills"], kept: [] },
+      });
+      expect(failureOf(error).code).toBe(_code);
+      expect(record.lean).toBe(true);
+      expect(call.options).not.toHaveProperty("plain");
+    },
+  );
+  it.each(RECIPE)("a lean export that failed for %s is retried plain", async (_code, error) => {
+    const { call } = await retriedAfter({
+      error,
+      plan: { rung: 0 },
+      lean: { ran: ["zoom", "stills"], kept: [] },
+    });
+    expect(failureOf(error).code).toBe(_code);
+    expect(call.options.plain).toBe(true);
+  });
+  it("the two lists above are the whole reason list: nothing is classified by accident", () => {
+    const listed = new Set([...ENVIRONMENT, ...RECIPE].map(([code]) => code));
+    const notAFailure = new Set(["none", "cancelled", "declined"]);
+    for (const code of EXPORT_REASON_CODES)
+      expect(listed.has(code) || notAFailure.has(code), code).toBe(true);
+  });
+
+  // The rule, over every failure the retry treats differently and every lean record: the lean record adds `plain` and changes nothing else about the call (after a failure no recipe can cause, not even that).
   const SHAPES: readonly Failure[] = [
     { error: MEMORY, plan: { rung: 0 } },
     { error: MEMORY, plan: { rung: 1 } },
@@ -319,7 +372,7 @@ describe("the queue: Try again is plain exactly when the failed export ran a lea
     { error: DRIVER, plan: { rung: 0 }, chip: true },
     { error: DRIVER, plan: { rung: 1 }, chip: true },
   ];
-  it("for any failure and any lean record, the call differs from the one without a record by `plain` alone, and only when a fix ran", async () => {
+  it("for any failure and any lean record, the call differs from the one without a record by `plain` alone, and only when a fix ran and the failure is one a recipe can cause", async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom(...SHAPES),
@@ -331,7 +384,13 @@ describe("the queue: Try again is plain exactly when the failed export ran a lea
           const withRecord = await retriedAfter({ ...shape, lean: { ran, kept } }, saveTo);
           __resetExportQueue();
           const without = await retriedAfter(shape, saveTo);
-          expect(leanRetryFaults(ran, withRecord.call, without.call)).toEqual([]);
+          const environment = [
+            "source_unavailable",
+            "storage_unavailable",
+            "storage_full",
+          ].includes(failureOf(shape.error).code);
+          if (environment) expect(withRecord.call).toEqual(without.call);
+          else expect(leanRetryFaults(ran, withRecord.call, without.call)).toEqual([]);
           expect(withRecord.record.lean).toBe(ran.length > 0 ? true : undefined);
           if (shape.chip) expect(without.call.options.processor).toBe(true);
         },
