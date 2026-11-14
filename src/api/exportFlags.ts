@@ -1,5 +1,7 @@
 // The exporter's remote switches (Phase 3). Behaviours that could not be fully proven in the lab can each be switched
-// off from the server without a release:
+// off from the server without a release. Every entry says what "off" restores (0.27.0 is the app release before the
+// switches added after the first eight; their restore text is word for word the one in the server's export_flags.py,
+// which also says how the flags relate):
 //   stall_stop  stop an export that has made no progress (off: it is only logged, as before)
 //   plan_rung   start an export that would not fit with fewer threads (off: it starts as before)
 //   pc_floor    stop an export when the PC itself runs short of memory (off: the job's own limits only)
@@ -7,6 +9,83 @@
 //               that maker's graphics chip may be tested, offered and chosen (off: never; the processor encodes)
 //   chip_default  Fast is chosen for the person when the export would take over a minute (off: still offered)
 //   faster_x264 the processor's faster setting may be chosen for a slow export when no chip is usable (off: never)
+//   speech_cpu_cap
+//               the "transcribe less" group: a whole-file processor job projected over 10 minutes is not started by
+//               itself and a running one projected past 20 minutes is stopped; the assistant's span limit follows this
+//               PC's measured speed; captions ask only each clip's used part (off: 0.27.0: whole-file jobs are
+//               planned as today (no cap, no live stop), the assistant's spans are limited by the fixed 10 minutes and
+//               a longer one is queued whole in the background, and captions ask for the whole file)
+//   speech_gpu_retry
+//               a graphics chip that crashed during transcription is tried again after an app update or 6 hours
+//               (off: the chip stays off for 7 days, as in 0.27.0)
+//   import_note
+//               a note rides on every message sent while the person's imports run, an `importing` list appears in
+//               `library_op list`, the project state block and the MCP read, and an unresolved name says "still
+//               importing" (off: 0.27.0: no note, no list, "not found")
+//   canvas_ask_stills
+//               a pictures-first drop on an Auto project asks the existing Keep Current / Change to Match question, and
+//               the agent's placement result carries the "canvas is still the default" note (off: 0.27.0: nothing
+//               asked, nothing said)
+//   proxy_first_needed
+//               the clip at the playhead (else the first on the timeline) goes to the front of the app's own proxy
+//               queue (off: 0.27.0: first in, first out)
+//   lean_zoom
+//               a zooming picture or clip with fit cover gets the exact mask stream (off: a zooming picture or clip
+//               with fit cover keeps 0.27.0's per-pixel zoom mask on every frame (slow, same picture))
+//   lean_fades
+//               transition, wipe and fade masks and animated opacity run only on the frames that need them (off:
+//               transition, wipe and fade masks and animated opacity run on every frame of their clip as in 0.27.0 (a
+//               wipe-right clip keeps its thin dark line at the left edge))
+//   lean_dip
+//               the dip's colour layer is only as long as its gate (off: the dip's colour layer is as long as the
+//               whole project (or partition) as in 0.27.0)
+//   lean_stills
+//               each picture is read once (off: each picture is read again for every frame as in 0.27.0)
+//   lean_grade
+//               vibrance may use several threads and a graded picture is graded once (off: vibrance runs on one
+//               thread and a graded picture is graded for every frame as in 0.27.0)
+//   lean_decoders
+//               still-picture and audio inputs of a one-pass export get a decoder-thread cap (off: the pictures and
+//               audio of a one-pass export use ffmpeg's own decoder thread count as in 0.27.0)
+//   idle_rule
+//               the no-progress stop v2: only an idle export is stopped early; a busy one gets 30 minutes for its first
+//               picture and 15 between pictures (off: a silent export is stopped after 5 minutes before its first
+//               report and 3 minutes after, whatever the processor and the disk are doing, as in 0.27.0; a busy one is
+//               never given the longer ceilings)
+//   auto_restart
+//               the master of every automatic restart: the app may restart an export by itself, once, when a reason of
+//               the shared table says so (off: the app never restarts an export by itself, whatever the reason (a
+//               memory stop, a failed chip encode): the person sees the plain message and Try again, as in 0.27.0)
+//   memory_restart
+//               the memory safety net (both stages) (off: a memory stop never restarts the export by itself: the
+//               person sees the plain message and Try again, as in 0.27.0)
+//   restart_streamed
+//               the net's second kind of route (stage 2, the memory-light engine) (off: the app's automatic restart
+//               uses only a gentler setting, never the memory-light engine)
+//   pc_check
+//               the hidden 10-second speed test gives this PC a class (off: the speed test never runs and no PC class
+//               exists: estimates use today's guess and this PC's earlier exports only, nothing asks "Check this PC's
+//               speed first?", and Quick is never preselected)
+//   estimate_v2
+//               estimates price the recipe that will really run and learn from stopped runs too (off: estimates are
+//               0.27.0's: the length-only guess and the history, with no project cost model, no learning from stopped
+//               runs, no range and no "rough guess" wording; and the graphics-chip and faster-setting rules read
+//               0.27.0's numbers again)
+//   memory_shape
+//               a first export's memory is predicted from the project's shape and can start at a gentler setting
+//               (off: a first export's memory is the flat 2 GB reserve as in 0.27.0; nothing predicts it from the
+//               project's shape, and no export starts at a gentler setting because of one)
+//   quick_export
+//               Quick export and the route question (no visible Fast) (off: there is no Quick export and no route
+//               question; the Export dialog's Mode row (Full quality or Fast where a graphics chip passed) comes back
+//               as in 0.27.0)
+//   export_help
+//               a slow render gets the banner, Switch to Quick and the new fields in the assistant's list (off: a
+//               slow render says only what 0.27.0 says: no banner, no Switch to Quick, no new fields in the assistant's
+//               export list)
+//   chip_restart
+//               a graphics-chip failure restarts once on the processor by itself (off: a graphics-chip failure waits
+//               for the person's Try again, as in 0.27.0)
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -24,6 +103,27 @@ export const EXPORT_FLAG_NAMES = [
   "chip_intel",
   "chip_default",
   "faster_x264",
+  "speech_cpu_cap",
+  "speech_gpu_retry",
+  "import_note",
+  "canvas_ask_stills",
+  "proxy_first_needed",
+  "lean_zoom",
+  "lean_fades",
+  "lean_dip",
+  "lean_stills",
+  "lean_grade",
+  "lean_decoders",
+  "idle_rule",
+  "auto_restart",
+  "memory_restart",
+  "restart_streamed",
+  "pc_check",
+  "estimate_v2",
+  "memory_shape",
+  "quick_export",
+  "export_help",
+  "chip_restart",
 ] as const;
 export type ExportFlagName = (typeof EXPORT_FLAG_NAMES)[number];
 
@@ -38,7 +138,56 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   chip_intel: true,
   chip_default: true,
   faster_x264: true,
+  speech_cpu_cap: true,
+  speech_gpu_retry: true,
+  import_note: true,
+  canvas_ask_stills: true,
+  proxy_first_needed: true,
+  lean_zoom: true,
+  lean_fades: true,
+  lean_dip: true,
+  lean_stills: true,
+  lean_grade: true,
+  lean_decoders: true,
+  idle_rule: true,
+  auto_restart: true,
+  memory_restart: true,
+  restart_streamed: true,
+  pc_check: true,
+  estimate_v2: true,
+  memory_shape: true,
+  quick_export: true,
+  export_help: true,
+  chip_restart: true,
 };
+
+/** The two cut-offs that turn this PC's speed-test score into fast / OK / weak (`ok_over` and `weak_over` on the
+ *  wire). Unlike a flag, a number can move a threshold both ways, so a pair is only ever used as a whole. */
+export interface PcClassCutoffs {
+  okOver: number;
+  weakOver: number;
+}
+
+/** What runs until the server has accepted another pair: the one the app was tuned with. */
+export const COMPILED_PC_CLASS: Readonly<PcClassCutoffs> = { okOver: 1, weakOver: 4 };
+
+/** The band each cut-off may be retuned within, both ends included. The server checks the same band before it
+ *  serves a pair; a pair that is outside it, or is not ordered (okOver below weakOver), is not used at all. */
+export const PC_CLASS_BANDS = {
+  okOver: { min: 0.5, max: 2 },
+  weakOver: { min: 2, max: 8 },
+} as const;
+
+function acceptPcClass(raw: unknown): PcClassCutoffs | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const { ok_over: ok, weak_over: weak } = raw as Record<string, unknown>;
+  // typeof leaves out booleans and strings; finite leaves out NaN and infinity.
+  if (typeof ok !== "number" || typeof weak !== "number") return null;
+  if (!Number.isFinite(ok) || !Number.isFinite(weak)) return null;
+  const { okOver, weakOver } = PC_CLASS_BANDS;
+  if (ok < okOver.min || ok > okOver.max || weak < weakOver.min || weak > weakOver.max) return null;
+  return ok < weak ? { okOver: ok, weakOver: weak } : null;
+}
 
 const STORAGE_KEY = "artdaddy.exportFlags.v1";
 /** At most one question to the server in this long, unless asked to ask. */
@@ -62,12 +211,21 @@ function stored(): Record<ExportFlagName, boolean> {
 }
 
 let current: Record<ExportFlagName, boolean> = stored();
+/** Memory only, never written to storage: an app restart starts from the compiled pair and the first answer of the
+ *  session retunes it. */
+let currentPcClass: Readonly<PcClassCutoffs> = COMPILED_PC_CLASS;
 let askedAt = 0;
 let inflight: Promise<void> | null = null;
 
 /** Whether a behaviour is on right now. A name this client does not know is never on. */
 export function exportFlag(name: ExportFlagName): boolean {
   return current[name] ?? false;
+}
+
+/** The cut-offs of the PC speed class right now: the pair the server last accepted this session, else the
+ *  compiled one. */
+export function pcClass(): Readonly<PcClassCutoffs> {
+  return currentPcClass;
 }
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
@@ -116,6 +274,9 @@ async function ask(options: RefreshOptions): Promise<void> {
       if (typeof value === "boolean") next[name] = value;
     }
     current = next;
+    // A valid answer without a valid pair puts the compiled pair back: an operator who removes the section must undo
+    // a retune. An answer that is not valid (above) leaves the pair alone, as it leaves the flags.
+    currentPcClass = acceptPcClass((body as { pc_class?: unknown }).pc_class) ?? COMPILED_PC_CLASS;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     } catch {
@@ -137,6 +298,7 @@ export function __setExportFlag(name: ExportFlagName, value: boolean): void {
 export function __resetExportFlags(options: { keepStorage?: boolean } = {}): void {
   askedAt = 0;
   inflight = null;
+  currentPcClass = COMPILED_PC_CLASS;
   if (!options.keepStorage) {
     try {
       localStorage.removeItem(STORAGE_KEY);
