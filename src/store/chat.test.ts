@@ -1686,6 +1686,40 @@ describe("useChat loop deps + remaining actions", () => {
     expect(await useChat.getState().restoreTo("nope")).toBeNull();
   });
 
+  it("restoreTo ends the waiting for the words of turns it rolled away: nothing wakes a chat for what it no longer says", async () => {
+    const chat = { dir: "C:/p", session: "chat-restore" };
+    setDesktop("p1");
+    useChat.setState({
+      projectId: "p1",
+      transcriptId: chat.session,
+      turns: [
+        {
+          id: "t1",
+          userText: "transcribe them",
+          attachments: [],
+          parts: [],
+          status: "done",
+          undone: false,
+          checkpoint: null,
+          timelineAfter: null,
+        },
+      ] as Any,
+    });
+    __resetWakeHost();
+    wakeBeginTurn(chat, 1, false);
+    registerPendingWords(
+      { ...chat, exec: 1, source: "m_1", ref: "m_1", window: null, path: null },
+      "k1",
+      30,
+      new Promise<Settled>(() => undefined),
+    );
+    wakeEndTurn(chat, 1, "done");
+    expect(wakeViewOf(chat).total).toBe(1);
+    await useChat.getState().restoreTo("t1");
+    expect(wakeViewOf(chat).total).toBe(0);
+    __resetWakeHost();
+  });
+
   it("sendFeedback uploads a bundle and returns whether it was stored", async () => {
     setDesktop("p1");
     useChat.setState({ projectId: "p1", transcriptId: "tx1" });
