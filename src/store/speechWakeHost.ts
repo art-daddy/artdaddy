@@ -97,6 +97,8 @@ const notes = new Map<string, WakeNote[]>();
 const wakes = new Map<string, number[]>();
 const askedThisTurn = new Map<string, number>();
 const cooldownTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** The cache-probing loops that are running, by chat and file: a second ask about a file joins the first. */
+const probing = new Map<string, Promise<Settled>>();
 let ticker: ReturnType<typeof setInterval> | null = null;
 let unwire: (() => void) | null = null;
 
@@ -312,7 +314,8 @@ export function registerPendingWords(
 }
 
 /** For words that arrive without a run to wait for (the project's indexer was handed the file): `probe` says,
- *  every few seconds, whether the words are in the cache yet, until they are or the file is no longer waited for. */
+ *  every few seconds, whether the words are in the cache yet, until they are or the file is no longer waited for. A
+ *  file asked about again while it is looked for shares the one loop. */
 export function registerCachedWords(
   target: WakeTarget,
   key: string,
@@ -321,17 +324,27 @@ export function registerCachedWords(
   everyMs = 5_000,
 ): void {
   const chat: ChatKey = { dir: target.dir, session: target.session };
-  const settled = new Promise<Settled>((resolve) => {
-    const look = (): void => {
-      if (!registry.isPending(chat, key))
-        return resolve({ ok: false, error: "no longer waited for" });
-      probe().then(
-        (ready) => (ready ? resolve({ ok: true }) : void setTimeout(look, everyMs)),
-        () => void setTimeout(look, everyMs),
-      );
+  const id = `${chatId(chat)}\u0000${key}`;
+  let settled = probing.get(id);
+  if (!settled) {
+    let mine!: Promise<Settled>;
+    const end = (s: Settled, resolve: (s: Settled) => void): void => {
+      if (probing.get(id) === mine) probing.delete(id);
+      resolve(s);
     };
-    setTimeout(look, everyMs);
-  });
+    mine = settled = new Promise<Settled>((resolve) => {
+      const look = (): void => {
+        if (!registry.isPending(chat, key))
+          return end({ ok: false, error: "no longer waited for" }, resolve);
+        probe().then(
+          (ready) => (ready ? end({ ok: true }, resolve) : void setTimeout(look, everyMs)),
+          () => void setTimeout(look, everyMs),
+        );
+      };
+      setTimeout(look, everyMs);
+    });
+    probing.set(id, mine);
+  }
   registerPendingWords(target, key, audioSeconds, settled);
 }
 
@@ -539,6 +552,7 @@ export function __resetWakeHost(): void {
   askedThisTurn.clear();
   clockAt = 0;
   awakeMs = 0;
+  probing.clear();
   for (const t of cooldownTimers.values()) clearTimeout(t);
   cooldownTimers.clear();
   if (ticker !== null) clearInterval(ticker);

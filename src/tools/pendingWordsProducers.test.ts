@@ -9,6 +9,10 @@ import { describe, expect, it } from "vitest";
 const SRC = path.resolve(__dirname, "..");
 const NOT_TESTS = /^(?!.*\.(test|e2e|smoke|property|eval)\.tsx?$).*\.tsx?$/;
 
+/** The code without its comments: a comment that names a call is not the call. */
+const withoutComments = (text: string): string =>
+  text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+
 function sources(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const full = path.join(dir, e.name);
@@ -48,14 +52,11 @@ describe("every producer of 'the words are not ready' is wired to the wake, or s
   const files = sources(SRC)
     .map((f) => ({
       name: path.relative(SRC, f).split(path.sep).join("/"),
-      text: readFileSync(f, "utf8"),
+      text: withoutComments(readFileSync(f, "utf8")),
     }))
     .filter((f) => !f.name.startsWith("test/"));
   const talksOfWaiting = files.filter(
-    (f) =>
-      /\bwaitForRun\(/.test(f.text) ||
-      /["'`]in_progress["'`]/.test(f.text) ||
-      /status: "in_progress"/.test(f.text),
+    (f) => /\bwaitForRun\(/.test(f.text) || /\bin_progress\b/.test(f.text),
   );
 
   it("finds the producers it knows, so this passes for nothing if the scan finds none", () => {

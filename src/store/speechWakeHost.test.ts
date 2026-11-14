@@ -760,6 +760,23 @@ describe("words that come from the project's own queue, with no run to wait for"
     await settle(30_000);
     expect(other.mock.calls.length).toBeLessThanOrEqual(1);
   });
+
+  it("looks in the cache once for a file however many calls ask about it, and still wakes once", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    let cached = false;
+    const probe = vi.fn(async () => cached);
+    wakeBeginTurn(CHAT, 1, false);
+    registerCachedWords(wakeTargetOf(ctxOf(1), "src-d", "m_d")!, "d", 30, probe, 5_000);
+    registerCachedWords(wakeTargetOf(ctxOf(1), "src-d", "m_d")!, "d", 30, probe, 5_000);
+    registerCachedWords(wakeTargetOf(ctxOf(1), "src-d", "m_d")!, "d", 30, probe, 5_000);
+    wakeEndTurn(CHAT, 1, "done");
+    await settle(20_000);
+    expect(probe, "one look every 5 s, not one per ask").toHaveBeenCalledTimes(4);
+    cached = true;
+    await settle(5_000 + SETTLE_WINDOW_MS + 10);
+    expect(sink.words()).toHaveLength(1);
+  });
 });
 
 describe("what is kept about it on this PC", () => {
