@@ -35,6 +35,7 @@ import { toolDefinition } from "../contract";
 import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
+import { formatActivityMark } from "./exportActivity";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
 import * as options from "./exportOptions";
 import type { ExportQuestionKind } from "./exportQuestions";
@@ -3506,10 +3507,13 @@ describe("what happened to an export, as its report tells it", () => {
   describe("an export that makes no progress (the stall stop)", () => {
     /** A supervised export whose process prints some progress and then goes quiet: it only ends when it is
      *  aborted, as a killed ffmpeg would. `cancel` wraps the delivery owner's cancel, to hold, refuse or
-     *  break the app's own stop. */
+     *  break the app's own stop. `activity` is what the app process says the processors are doing, as its sampler does:
+     *  a mark at the start and one every five seconds ("idle" by default: a frozen export, "busy": a heavy one, "none":
+     *  no reading). */
     async function frozenExport(
       over: {
         progress?: boolean;
+        activity?: "idle" | "busy" | "none";
         cancel?: (
           real: (id: string) => Promise<boolean>,
           calls: string[],
@@ -3538,7 +3542,19 @@ describe("what happened to an export, as its report tells it", () => {
         run: async (signal, id) => {
           await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
           if (over.progress !== false) jobs.stdout(id, block(900, 30_000));
+          const activity = over.activity ?? "idle";
+          let cpuMs = 0;
+          const mark = () => jobs.stdout(id, formatActivityMark({ cpuMs, readBytes: 0 }));
+          let marks: ReturnType<typeof setInterval> | undefined;
+          if (activity !== "none") {
+            mark();
+            marks = setInterval(() => {
+              cpuMs += activity === "busy" ? 7_500 : 5;
+              mark();
+            }, 5_000);
+          }
           await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+          clearInterval(marks);
           jobs.exit(id, 255, "");
           await fs.remove(STAGE).catch(() => undefined);
           throw new Error("ffmpeg render failed (code=255)");
@@ -3546,6 +3562,82 @@ describe("what happened to an export, as its report tells it", () => {
       });
       return { submitted, jobs, fs, cancelCalls, real };
     }
+
+    it("does not stop a busy export after three minutes or five: its processors are working, so it gets the ceilings, and the stop at the ceiling says the PC stayed busy", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { fs } = await frozenExport({ activity: "busy" });
+        await vi.advanceTimersByTimeAsync(600_000); // ten minutes without a new picture
+        expect(listExportRecords()[0].state).toBe("running"); // 0.27.0 stopped it at three
+        await vi.advanceTimersByTimeAsync(295_000);
+        expect(listExportRecords()[0].state).toBe("running");
+        await vi.advanceTimersByTimeAsync(10_000); // the 15 minutes between pictures
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        const record = listExportRecords()[0];
+        expect(record.state).toBe("failed");
+        expect(record.error).toMatch(
+          /no new picture for 15 min although the PC stayed busy \(stalled\)/,
+        );
+        expect(await fs.exists(STAGE)).toBe(false);
+        const row = ((await manageExportsTool({ action: "list" })) as Any).exports[0];
+        expect(row).toMatchObject({ state: "failed", failure_code: "time_limit" });
+        const stop = lastReport().trace.find((e: Any) => e.v === "spinning");
+        expect(stop).toMatchObject({ e: "stall_detected", n: 900 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives a busy export that has made no picture at all thirty minutes, not five", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        await frozenExport({ progress: false, activity: "busy" });
+        await vi.advanceTimersByTimeAsync(1_790_000);
+        expect(listExportRecords()[0].state).toBe("running");
+        await vi.advanceTimersByTimeAsync(15_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0].state).toBe("failed");
+        expect(listExportRecords()[0].error).toMatch(
+          /made no picture in 30 min although the PC stayed busy \(stalled\)/,
+        );
+        expect(lastReport().trace.find((e: Any) => e.v === "slow_start")).toMatchObject({
+          n: 1800,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("never stops early on an export it has no reading for, and stops it at the ceiling", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        await frozenExport({ activity: "none" });
+        await vi.advanceTimersByTimeAsync(895_000);
+        expect(listExportRecords()[0].state).toBe("running");
+        await vi.advanceTimersByTimeAsync(10_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0].state).toBe("failed");
+        expect(listExportRecords()[0].error).toMatch(/although the PC stayed busy/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("is today's rule when the idle rule is switched off: a busy export is stopped after three minutes", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      __setExportFlag("idle_rule", false);
+      try {
+        await frozenExport({ activity: "busy" });
+        await vi.advanceTimersByTimeAsync(185_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0].state).toBe("failed");
+        expect(listExportRecords()[0].error).toMatch(/no progress for 3 min \(stalled\)/);
+      } finally {
+        __setExportFlag("idle_rule", true);
+        vi.useRealTimers();
+      }
+    });
 
     it("stops it after three minutes without progress, and says so as a time limit in plain words", async () => {
       vi.useFakeTimers({ now: 1_000_000 });

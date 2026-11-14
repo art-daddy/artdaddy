@@ -351,20 +351,20 @@ describe("RunWatch stopping a stalled export only when it is idle (the idle rule
     expect(stops).toEqual([]);
   });
 
-  it("stops a spinning export at the ceiling: 30 minutes for its first picture, 15 between pictures", () => {
+  it("stops a spinning export at the ceiling: 30 minutes for its first picture, 15 between pictures (the owner's numbers)", () => {
     const never = watched();
-    never.pass(BUSY_START_CEILING_SECONDS - 5, BUSY);
+    never.pass(30 * 60 - 5, BUSY);
     expect(never.stops).toEqual([]);
     never.pass(5, BUSY);
-    expect(never.stops).toEqual([["slow_start", BUSY_START_CEILING_SECONDS]]);
+    expect(never.stops).toEqual([["slow_start", 30 * 60]]);
     const spinning = watched();
     spinning.w.chunk(block(10, 330));
-    spinning.pass(BUSY_RUN_CEILING_SECONDS - 5, BUSY);
+    spinning.pass(15 * 60 - 5, BUSY);
     expect(spinning.stops).toEqual([]);
     spinning.pass(5, BUSY);
-    expect(spinning.stops).toEqual([["spinning", BUSY_RUN_CEILING_SECONDS]]);
-    expect(BUSY_START_CEILING_SECONDS).toBeGreaterThan(BUSY_RUN_CEILING_SECONDS);
-    expect(BUSY_RUN_CEILING_SECONDS).toBeGreaterThan(SLOW_START_SECONDS);
+    expect(spinning.stops).toEqual([["spinning", 15 * 60]]);
+    expect(BUSY_START_CEILING_SECONDS).toBe(30 * 60);
+    expect(BUSY_RUN_CEILING_SECONDS).toBe(15 * 60);
   });
 
   it("never lets the activity count as progress: a busy silence reaches its ceiling and is reported as the long gap it was", () => {
