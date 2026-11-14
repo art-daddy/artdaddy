@@ -5,8 +5,10 @@ import {
   __resetWorkGate,
   adoptTurn,
   backgroundTurn,
+  backgroundWorkActive,
   lookWhisper,
   setExportsBusy,
+  subscribeBackgroundWork,
   type BackgroundKind,
 } from "./workGate";
 
@@ -298,6 +300,163 @@ describe("the work gate (4i)", () => {
         expect(lookStarts).toEqual([...lookStarts].sort((a, b) => a - b));
       }),
       { numRuns: 150 },
+    );
+  }, 60_000);
+});
+
+// The PC check must never run beside a look's whisper or a background job, so it needs to read, and hear of, the gate's state.
+describe("the background work the gate can be asked about", () => {
+  it("is quiet until something takes a turn, and quiet again when it is given back, for each kind of work", async () => {
+    expect(backgroundWorkActive()).toBe(false);
+    for (const kind of ["whisper", "loudness"] as const) {
+      const turn = ask(kind);
+      await tick();
+      expect(backgroundWorkActive(), kind).toBe(true);
+      turn.got()!();
+      expect(backgroundWorkActive(), kind).toBe(false);
+    }
+    const adopted = adoptTurn("whisper");
+    expect(backgroundWorkActive()).toBe(true);
+    adopted();
+    expect(backgroundWorkActive()).toBe(false);
+  });
+
+  it("counts a look from the moment it is asked for, whether it runs or waits behind another, until it is over", async () => {
+    const a = look();
+    const b = look();
+    await tick();
+    expect([a.started(), b.started()]).toEqual([true, false]);
+    expect(backgroundWorkActive()).toBe(true);
+    a.finish();
+    await a.result;
+    await tick();
+    expect(backgroundWorkActive()).toBe(true); // the one that waited now runs
+    b.finish();
+    await b.result;
+    await tick();
+    expect(backgroundWorkActive()).toBe(false);
+  });
+
+  it("does not count a look that was stopped while it waited, nor one that failed", async () => {
+    const stop = new AbortController();
+    const a = look();
+    const b = look(stop.signal);
+    await tick();
+    stop.abort();
+    expect(await b.result).toBeNull();
+    a.finish();
+    await a.result;
+    await tick();
+    expect(backgroundWorkActive()).toBe(false);
+    await expect(
+      lookWhisper(async () => {
+        throw new Error("whisper-cli failed");
+      }),
+    ).rejects.toThrow(/failed/);
+    expect(backgroundWorkActive()).toBe(false);
+  });
+
+  it("does not count a queued export: it holds work back and is not itself the work", () => {
+    setExportsBusy(true);
+    expect(backgroundWorkActive()).toBe(false);
+  });
+
+  it("tells a listener each time the answer can have changed, until it stops listening, and survives a listener that throws", async () => {
+    const heard: boolean[] = [];
+    const stop = subscribeBackgroundWork(() => heard.push(backgroundWorkActive()));
+    const stopFailing = subscribeBackgroundWork(() => {
+      throw new Error("a listener that fails");
+    });
+    const turn = ask("whisper");
+    await tick();
+    turn.got()!();
+    const a = look();
+    await tick();
+    a.finish();
+    await a.result;
+    expect(heard).toEqual([true, false, true, false]);
+    stop();
+    const later = ask("loudness");
+    await tick();
+    later.got()!();
+    expect(heard).toHaveLength(4);
+    stopFailing();
+  });
+
+  it("forgets, at a reset, the work that was under way, and tells a listener so", async () => {
+    const turn = ask("whisper");
+    await tick();
+    const heard: boolean[] = [];
+    const stop = subscribeBackgroundWork(() => heard.push(backgroundWorkActive()));
+    __resetWorkGate();
+    expect(backgroundWorkActive()).toBe(false);
+    expect(heard).toContain(false);
+    turn.got()!(); // a release from before the reset changes nothing
+    expect(backgroundWorkActive()).toBe(false);
+    stop();
+  });
+
+  it("is true exactly while a look runs or waits or a job holds a turn (property)", async () => {
+    const op = fc.oneof(
+      fc.record({
+        op: fc.constant("ask" as const),
+        kind: fc.constantFrom<BackgroundKind>("whisper", "loudness"),
+      }),
+      fc.record({ op: fc.constant("release" as const), pick: fc.nat() }),
+      fc.record({ op: fc.constant("look" as const) }),
+      fc.record({ op: fc.constant("finish" as const), pick: fc.nat() }),
+    );
+    await fc.assert(
+      fc.asyncProperty(fc.array(op, { maxLength: 30 }), async (ops) => {
+        __resetWorkGate();
+        const releases: Array<() => void> = [];
+        const finishers: Array<() => void> = [];
+        let looksOpen = 0;
+        let jobsHeld = 0;
+        let asked = 0;
+        let granted = 0;
+        const settle = async (): Promise<void> => {
+          for (let i = 0; i < 30; i++) await Promise.resolve();
+        };
+        for (const o of ops) {
+          if (o.op === "ask") {
+            asked++;
+            void backgroundTurn(o.kind).then((release) => {
+              if (!release) return;
+              granted++;
+              jobsHeld++;
+              releases.push(() => {
+                jobsHeld--;
+                release();
+              });
+            });
+          } else if (o.op === "look") {
+            looksOpen++;
+            const gate = new Promise<void>((resolve) => finishers.push(resolve));
+            void lookWhisper(() => gate).then(() => looksOpen--);
+          } else if (o.op === "release" && releases.length) {
+            releases.splice(o.pick % releases.length, 1)[0]();
+          } else if (o.op === "finish" && finishers.length) {
+            finishers.splice(o.pick % finishers.length, 1)[0]();
+          }
+          await settle();
+          expect(backgroundWorkActive()).toBe(looksOpen > 0 || jobsHeld > 0);
+        }
+        // Everything asked for runs and ends, so no waiter outlives this run to take a turn in the next one's gate.
+        for (
+          let i = 0;
+          i < 400 && (finishers.length || releases.length || looksOpen > 0 || granted < asked);
+          i++
+        ) {
+          finishers.splice(0).forEach((f) => f());
+          await settle();
+          releases.splice(0).forEach((r) => r());
+          await settle();
+          expect(backgroundWorkActive()).toBe(looksOpen > 0 || jobsHeld > 0);
+        }
+        expect(backgroundWorkActive()).toBe(false);
+      }),
+      { numRuns: 100 },
     );
   }, 60_000);
 });

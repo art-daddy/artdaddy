@@ -18,6 +18,27 @@ const running: Record<BackgroundKind, number> = { whisper: 0, loudness: 0 };
 let waiters: Array<() => void> = [];
 /** Bumped by the tests' reset: a turn or look taken before it gives nothing back after it. */
 let generation = 0;
+const watchers = new Set<() => void>();
+
+/** Whether a look's whisper runs or waits, or a background job holds a turn: the one read-only view of this heavy local work, for the PC check, which never runs beside it. */
+export function backgroundWorkActive(): boolean {
+  return looks > 0 || running.whisper > 0 || running.loudness > 0;
+}
+
+/** Hears every change of {@link backgroundWorkActive}'s inputs. Returns the unsubscribe. A listener that throws is not heard of again by the gate and stops nothing. */
+export function subscribeBackgroundWork(fn: () => void): () => void {
+  watchers.add(fn);
+  return () => void watchers.delete(fn);
+}
+
+function stirred(): void {
+  for (const fn of [...watchers])
+    try {
+      fn();
+    } catch {
+      // A listener's failure is never the gate's.
+    }
+}
 
 function wake(): void {
   const now = waiters;
@@ -60,6 +81,7 @@ export async function lookWhisper<T>(
   signal?: AbortSignal,
 ): Promise<T | null> {
   looks++;
+  stirred();
   const gen = generation;
   const before = lookTail;
   let done!: () => void;
@@ -74,6 +96,7 @@ export async function lookWhisper<T>(
     before.finally(done).catch(() => undefined);
     if (gen === generation) {
       looks--;
+      stirred();
       if (looks === 0) wake();
     }
   }
@@ -115,12 +138,14 @@ export function adoptTurn(kind: BackgroundKind): () => void {
 
 function hold(kind: BackgroundKind): () => void {
   running[kind]++;
+  stirred();
   const gen = generation;
   let released = false;
   return () => {
     if (released || gen !== generation) return;
     released = true;
     running[kind]--;
+    stirred();
     wake();
   };
 }
@@ -134,5 +159,6 @@ export function __resetWorkGate(): void {
   running.whisper = 0;
   running.loudness = 0;
   busyListeners.clear();
+  stirred();
   wake();
 }
