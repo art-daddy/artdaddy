@@ -213,6 +213,12 @@ export const KEEP_GOING_NOTE =
 export const SWITCHING_NOTE = "Switching to Quick export. The export starts again.";
 export const ASSISTANT_SLOW_NOTE =
   "This export is running slower than expected. Tell the person how long is left and, if quick_available is true, that Switch to Quick export is on the card. Do not cancel it and start another.";
+/** The same guidance while Quick is not on offer: nothing about a button that is not there. */
+export const ASSISTANT_SLOW_NOTE_NO_QUICK =
+  "This export is running slower than expected. Tell the person how long is left. Do not cancel it and start another.";
+/** What Keep going says when it was pressed as the export ended: the export has ended, or its render is over and it is being checked and saved. */
+export const KEEP_GOING_ENDED = "This export has already ended.";
+export const KEEP_GOING_FINISHING = "This export is already finishing.";
 export const ASSISTANT_SWITCHED_NOTE =
   "The person switched this export to Quick export (a smaller picture and a lower frame rate), so it started again. It is the same export (same job_id): do not start another.";
 const GO_FASTER = "To go faster, cancel, use fewer layers or clips, and export again.";
