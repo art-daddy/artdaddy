@@ -18,6 +18,7 @@ import { __resetProjectJobs } from "../tools/genJobs";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../tools/store";
 import { admissionEstimateHere, setOpenTimelineReader } from "./estimateDeps";
 import * as estimator from "./estimator";
+import { attempts } from "./exportAttempts";
 import {
   __resetExportQueue,
   cancelExport,
@@ -32,6 +33,7 @@ import {
 } from "./exportQueue";
 import {
   EXPORT_SPEED_REVISION,
+  LONG_EXPORT_SECONDS,
   estimateExport,
   expectationOf,
   type ExportCalibration,
@@ -43,7 +45,7 @@ import { setPcCheckService } from "./pcCheckHandle";
 import { writePcCheck, type PcCheckRecord, type StorageLike } from "./pcClass";
 import { describeEstimateLine } from "./estimateWords";
 import type { RenderWorkload } from "./renderPlan";
-import { __resetRouteEstimatesMemo } from "./routeEstimates";
+import { __resetRouteEstimatesMemo, type AdmissionInput } from "./routeEstimates";
 
 const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
 vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
@@ -483,6 +485,154 @@ describe("a pessimistic estimate does not stop an export that 0.27.0 let through
       /cancelled before submission/,
     );
     expect(asked).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("an export the app starts again by itself is never asked about its time", () => {
+  const OUTPUT = { width: 1920, height: 1080, fps: 30 };
+  const inputAt = (rung: 0 | 1): AdmissionInput => ({
+    workload: WORKLOAD,
+    output: OUTPUT,
+    quality: "medium",
+    engine: "file-sequence-v1",
+    encoder: "x264-crf",
+    ...(rung ? { rung } : {}),
+  });
+  const pricedAt = (rHat: number, rung: 0 | 1): number =>
+    admissionEstimateHere(inputAt(rung), {
+      speedCheck: () => checkRecord({ rHat }),
+      cores: () => 8,
+    })!.estimate.seconds;
+  /** The speed of a PC (its `rHat`) at which the honest estimate of the export, at this rung, is `target` seconds. */
+  function rHatFor(rung: 0 | 1, target: number): number {
+    let low = 0.05;
+    let high = 900;
+    for (let step = 0; step < 60; step++) {
+      const middle = (low + high) / 2;
+      if (pricedAt(middle, rung) < target) low = middle;
+      else high = middle;
+    }
+    return high;
+  }
+  /** A PC on which the export at its normal setting is not a long one and, a rung gentler, is: the honest estimate prices the gentler setting, 0.27.0's guess priced both alike. */
+  function slowerAfterARung(): number {
+    const rHat = rHatFor(1, 1.25 * LONG_EXPORT_SECONDS);
+    expect(pricedAt(rHat, 0), "the export itself is not a long one").toBeLessThan(
+      LONG_EXPORT_SECONDS,
+    );
+    expect(pricedAt(rHat, 1), "the gentler setting is").toBeGreaterThanOrEqual(LONG_EXPORT_SECONDS);
+    const guess = estimateExport(WORKLOAD, OUTPUT, "medium", "file-sequence-v1", [], "x264-crf");
+    expect(guess.seconds, "0.27.0 priced both attempts alike, under the line").toBeLessThan(
+      LONG_EXPORT_SECONDS,
+    );
+    return rHat;
+  }
+  const RESTARTS = {
+    memory: {
+      calibration: () => descriptorOf({ rung: 1 }),
+      meta: { reason: "memory_short", restarted: "gentler_setting", failedRung: 0 },
+    },
+    // the chip failed and the export goes on the processor: the same rung, a slower encoder
+    chip: {
+      calibration: () => descriptorOf(),
+      meta: { reason: "chip_failed", restarted: "processor", failedRung: 0 },
+    },
+  } as const;
+  const VIAS = ["menu", "chat", "mcp", "other"] as const;
+  /** The request an automatic restart makes: the attempt it continues is a failed one the chain has already registered as waiting. */
+  const restarting = (
+    store: ProjectStoreAccess,
+    kind: keyof typeof RESTARTS,
+    via: (typeof VIAS)[number],
+    over: Record<string, unknown> = {},
+  ) => {
+    attempts.begin("first-attempt");
+    expect(attempts.registerPending("first-attempt", "auto")).toBe(true);
+    return described(store, {
+      ...(via === "other" ? {} : { via }),
+      meta: metaOf({ calibration: RESTARTS[kind].calibration() }),
+      restart: { kind: "auto", from: "first-attempt", meta: RESTARTS[kind].meta },
+      ...over,
+    });
+  };
+
+  describe.each(Object.keys(RESTARTS) as (keyof typeof RESTARTS)[])(
+    "the restart after a %s failure",
+    (kind) => {
+      it.each(VIAS)(
+        "via %s: starts, and finishes, though the honest estimate of the new attempt is a long one",
+        async (via) => {
+          const { fs, store } = await fresh();
+          checked(
+            checkRecord({
+              rHat: kind === "memory" ? slowerAfterARung() : rHatFor(0, 1.25 * LONG_EXPORT_SECONDS),
+            }),
+          );
+          const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+          __setExportConfirmationForTests(asked);
+          const submitted = submitWithDependencies(
+            restarting(store, kind, via, { run: quickRun(fs) }),
+          );
+          await expect(
+            submitted,
+            "an export the app starts again is not refused",
+          ).resolves.toMatchObject({ job_id: expect.any(String) });
+          const sub = await submitted;
+          await whenExportsSettle();
+          expect(asked, "nobody is asked").not.toHaveBeenCalled();
+          const record = listExportRecords().find((r) => r.job_id === sub.job_id) as Any;
+          expect(record).toMatchObject({
+            state: "done",
+            attempt: 2,
+            restarted: RESTARTS[kind].meta.restarted,
+          });
+          // the card and the assistant still say what this attempt costs, honestly, though nobody was asked about it
+          expect(record.estimate.seconds).toBeGreaterThanOrEqual(LONG_EXPORT_SECONDS);
+          expect(record.expected.seconds).toBe(record.estimate.seconds);
+        },
+      );
+    },
+  );
+
+  describe("the others are asked, as they were", () => {
+    /** The first attempt asks for a long export, and so does a person's Try again or Switch: the honest estimate speaks to a person who can answer. */
+    const CASES = {
+      "a first attempt": () => ({ rung: 0 as const, over: {} }),
+      "a person's Try again": () => ({
+        rung: 1 as const,
+        over: { retry: { from: 0, to: 1 } },
+      }),
+      "a person's Switch": () => {
+        attempts.begin("first-attempt");
+        return {
+          rung: 1 as const,
+          over: {
+            restart: { kind: "switch", from: "first-attempt", meta: { restarted: "quick" } },
+          },
+        };
+      },
+    };
+    it.each(Object.keys(CASES) as (keyof typeof CASES)[])(
+      "%s, over mcp: the question about a long export is put",
+      async (name) => {
+        const { fs, store } = await fresh();
+        const { rung, over } = CASES[name]();
+        checked(checkRecord({ rHat: rHatFor(rung, 1.25 * LONG_EXPORT_SECONDS) }));
+        const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
+        __setExportConfirmationForTests(asked);
+        await submitWithDependencies(
+          described(store, {
+            via: "mcp",
+            meta: metaOf({ calibration: descriptorOf(rung ? { rung } : {}) }),
+            run: quickRun(fs),
+            ...over,
+          }),
+        );
+        await whenExportsSettle();
+        expect(asked).toHaveBeenCalledTimes(1);
+        expect(asked.mock.calls[0][0]).toMatch(/long time/);
+      },
+    );
   });
 });
 

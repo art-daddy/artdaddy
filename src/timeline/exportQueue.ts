@@ -1451,14 +1451,17 @@ function workloadOf(spec: ExportSpec): RenderWorkload {
  *  not. The ONE reading of the estimate: the pre-start check and the expectation the export is admitted with both come
  *  from here, so what a person was told before it started and what the card says while it runs cannot disagree. Nothing
  *  for an export no plan describes (a copy). With the new estimate on, the time is the honest one (see estimateAdmission.ts):
- *  the sizes and the memory are still 0.27.0's. */
-function estimateRead(spec: ExportSpec): { estimates: ExportEstimates; read: Admission3c } {
+ *  the sizes and the memory are still 0.27.0's. `legacy` is 0.27.0's figures alone (see {@link estimateOf}). */
+function estimateRead(spec: ExportSpec): {
+  estimates: ExportEstimates;
+  read: Admission3c;
+  legacy: ExportEstimates;
+} {
   const descriptor = spec.meta?.calibration;
-  if (!descriptor)
-    return {
-      estimates: { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null },
-      read: NOT_ADMITTED_3C,
-    };
+  if (!descriptor) {
+    const none = { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+    return { estimates: none, read: NOT_ADMITTED_3C, legacy: none };
+  }
   const workload = workloadOf(spec);
   const legacy = estimateExport(
     workload,
@@ -1468,18 +1471,26 @@ function estimateRead(spec: ExportSpec): { estimates: ExportEstimates; read: Adm
     useExportJob.getState().calibrations,
     descriptor.encoder,
   );
-  return withHonestTime(legacy, {
-    workload,
-    output: descriptor.output,
-    quality: descriptor.quality,
-    engine: descriptor.engine,
-    encoder: descriptor.encoder,
-    rung: descriptor.rung,
-  });
+  return {
+    ...withHonestTime(legacy, {
+      workload,
+      output: descriptor.output,
+      quality: descriptor.quality,
+      engine: descriptor.engine,
+      encoder: descriptor.encoder,
+      rung: descriptor.rung,
+    }),
+    legacy,
+  };
 }
 
+/** What the pre-start check judges an export on. An export the app starts again by itself is judged on 0.27.0's own
+ *  figure for its time: the honest one prices the gentler setting (or the slower encoder after a chip failure) it goes
+ *  to, which would put a time question to a request nobody is there to answer, and a question refuses an automatic
+ *  restart. Its card and the assistant still say the honest time (the record is made from {@link estimateRead}). */
 function estimateOf(spec: ExportSpec): ExportEstimates {
-  return estimateRead(spec).estimates;
+  const { estimates, legacy } = estimateRead(spec);
+  return spec.restart?.kind === "auto" ? legacy : estimates;
 }
 
 /** Measure the PC and the requested exports and say what the check found. Everything is read afresh,
