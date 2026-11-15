@@ -2135,6 +2135,8 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   let unfollow: (() => void) | undefined;
   let watchTimer: ReturnType<typeof setInterval> | undefined;
   let begun = false;
+  // When the render ended, however it ended: the estimate is taught that, and not the file's check and saving after it, which no watch sees.
+  let renderEndedAt: number | undefined;
   // The export's turn has come (the supervisor started it, or it runs in the page): the story says
   // how long it waited, and a watch on its run starts. Once.
   const begin = (): void => {
@@ -2188,6 +2190,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   const endWatch = (): void => {
     if (watchTimer !== undefined) clearInterval(watchTimer);
     watchTimer = undefined;
+    if (renderEndedAt === undefined) renderEndedAt = Date.now();
     endHelp3c(jobId);
     if (story?.watch && story.longestGapS === undefined) story.longestGapS = story.watch.finish();
   };
@@ -2277,6 +2280,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     batch: spec.batch,
     run,
     story,
+    renderEndedAt,
   });
 }
 
@@ -2301,6 +2305,8 @@ interface Settle {
   story?: ExportStory;
   /** A later launch of the app is finishing this export; see `finishAdopted`. */
   recovered?: boolean;
+  /** When the render ended (absent for an adopted export, which only knows when it settles). */
+  renderEndedAt?: number;
 }
 
 /** Commit the file, then the project's records. The one path for an export this page ran and for
@@ -2389,7 +2395,9 @@ async function settle(x: Settle): Promise<void> {
     hung: x.story?.stalledOut !== undefined && !isCeilingStop(error ?? undefined),
     produced: error ? (live ? producedFraction(live) : 0) : 1,
     runSeconds:
-      (Date.now() - (records.find((r) => r.job_id === x.jobId)?.ranAt ?? x.startedAt)) / 1000,
+      ((x.renderEndedAt ?? Date.now()) -
+        (records.find((r) => r.job_id === x.jobId)?.ranAt ?? x.startedAt)) /
+      1000,
     beforeFirstPicture: !!error && cancelled && !(live && live.frame >= 1),
   });
   if (chipFailure) {

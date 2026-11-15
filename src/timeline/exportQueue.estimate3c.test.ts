@@ -726,10 +726,19 @@ describe("what the estimate learns when a run ends", () => {
     jump?: number;
     calibrations?: ExportCalibration[];
     destPath?: string;
+    /** The PC sits this long (the clock jumps) after the render has ended and before its file has been checked: the stages that have no watch. */
+    gapAfterRender?: number;
   }) {
     const { fs, store, jobs } = await fresh();
     if (over.calibrations) useExportJob.setState({ calibrations: over.calibrations });
     const delivery = localDeliveryPort(store);
+    if (over.gapAfterRender) {
+      const verify = delivery.verify.bind(delivery);
+      delivery.verify = async (id) => {
+        vi.setSystemTime(Date.now() + over.gapAfterRender!);
+        return verify(id);
+      };
+    }
     jobs.delivery = delivery;
     const dest = over.destPath ?? DEST;
     const stage = `${dest}.part-x`;
@@ -872,6 +881,27 @@ describe("what the estimate learns when a run ends", () => {
   it("a chip's export teaches the chip's log and never the processor's", async () => {
     await run({ seconds: 300, fraction: 0.25, end: "cancel", descriptor: { encoder: "chip-amd" } });
     expect(paceEntries().map((entry: Any) => entry.family)).toEqual(["chip"]);
+  });
+
+  it("is taught the time the render took: the file's check and its saving, which no watch sees, are not part of the lesson", async () => {
+    const door = admissionEstimateHere({
+      workload: WORKLOAD,
+      output: { width: 1920, height: 1080, fps: 30 },
+      quality: "medium",
+      engine: "file-sequence-v1",
+      encoder: "x264-crf",
+    })!;
+    // the render ends at 10 minutes; the lid is closed at "Checking" and the PC wakes two hours later
+    const { record } = await run({
+      seconds: 600,
+      fraction: 1,
+      end: "finish",
+      gapAfterRender: 2 * 3_600_000,
+    });
+    expect(record.state).toBe("done");
+    const entries = paceEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].ratio).toBeCloseTo(600 / door.uncorrected!.seconds, 2);
   });
 
   it("is told against the model's own figure, so a correction it has learned is not learned again on top of itself", async () => {
