@@ -1014,6 +1014,13 @@ describe("after a long break the assistant is not woken", () => {
       await landAll(turn(1, ["m_1"]));
       await pass(2 * MIN);
       sleep(5 * 60 * MIN);
+      expect(
+        wakeViewOf(CHAT).ready,
+        "the card reads the clock now, it does not wait for the next minute",
+      ).toEqual({
+        files: 1,
+        held: "idle",
+      });
       await pass(MIN); // the next tick looks again
       expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
       useComposer.getState().setDraft(false);
