@@ -55,7 +55,7 @@ const RELEASED_FLAG_NAMES = [
   "chip_restart",
 ];
 // Appended after the release decision (disable-only, each with its own entry in the comment block above).
-const LATER_FLAG_NAMES = ["speech_wake"];
+const LATER_FLAG_NAMES = ["speech_wake", "speech_word_times"];
 
 beforeEach(() => __resetExportFlags());
 afterEach(() => {

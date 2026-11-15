@@ -91,6 +91,10 @@
 //   speech_wake
 //               the assistant is brought back, once, when the words of the files it was told were not ready have
 //               landed (off: as in 0.27.0 nothing brings it back and the person has to ask again)
+//   speech_word_times
+//               a word's time is the one the engine's own alignment found for its sound, so the first words of a clip
+//               that begins with silence start where they are said; this release ships the behaviour off, so the
+//               switch changes nothing yet (off: 0.27.0: whisper's own word times, the engine started as before)
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -130,6 +134,7 @@ export const EXPORT_FLAG_NAMES = [
   "export_help",
   "chip_restart",
   "speech_wake",
+  "speech_word_times",
 ] as const;
 export type ExportFlagName = (typeof EXPORT_FLAG_NAMES)[number];
 
@@ -166,6 +171,7 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   export_help: true,
   chip_restart: true,
   speech_wake: true,
+  speech_word_times: true,
 };
 
 /** The two cut-offs that turn this PC's speed-test score into fast / OK / weak (`ok_over` and `weak_over` on the
