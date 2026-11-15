@@ -209,7 +209,7 @@ async function replayWatcher(run: RunCapture, liveStop = true): Promise<WatcherR
 /** What a replay says about when it stopped, as the time of the output it stopped at. */
 const stoppedAtMs = (r: MonitorReplay): number | null => r.stoppedAt?.tMs ?? null;
 
-describe.each(CAPTURES)("the capture %s", (_name, cap) => {
+describe.each(CAPTURES)("the capture %s", (name, cap) => {
   const stats = segmentStats(cap.chunks);
   const full = replayMonitor(cap, { liveStop: false });
 
@@ -280,6 +280,50 @@ describe.each(CAPTURES)("the capture %s", (_name, cap) => {
     expect(full.final.snapshot.backend).toBe(cap.engine.backend === "cpu" ? "cpu" : "gpu");
     expect(full.final.snapshot.noGpu).toBe(cap.engine.backend === "cpu");
   });
+
+  it.skipIf(name.startsWith("generated"))(
+    "reports the numbers of the proof's note, every one of them a number",
+    () => {
+      const round = (n: number | null | undefined, places = 1): number | null =>
+        n === null || n === undefined ? null : Math.round(n * 10 ** places) / 10 ** places;
+      const times = stats.burstTimesMs;
+      const gaps = times.slice(1).map((t, i) => (t - times[i]) / 1000);
+      const sorted = [...gaps].sort((a, b) => a - b);
+      const engineRate =
+        cap.stderrFacts.totalMs === undefined
+          ? null
+          : cap.stderrFacts.totalMs / 1000 / (cap.stderrFacts.audioS ?? cap.audioS);
+      const rate = full.final.snapshot.rate;
+      const note = {
+        audioS: round(cap.audioS),
+        wallS: round(wallS(cap)),
+        outputs: cap.chunks.length,
+        bursts: stats.bursts,
+        firstWordsS: round(times[0] / 1000),
+        measuredStartupS: round(full.final.snapshot.startupS),
+        engineLoadS: round(
+          cap.stderrFacts.loadMs === undefined ? null : cap.stderrFacts.loadMs / 1000,
+        ),
+        monitorRate: round(rate, 3),
+        engineRate: round(engineRate, 3),
+        rateErrorPercent: round(
+          rate === null || engineRate === null ? null : (100 * (rate - engineRate)) / engineRate,
+        ),
+        medianSecondsBetweenBursts: round(sorted[Math.floor(sorted.length / 2)]),
+        longestSecondsBetweenBursts: round(sorted[sorted.length - 1]),
+        killedAtMs: cap.killed?.exit.killedAtMs ?? null,
+        secondsOfAudioWhenKilled: round(
+          cap.killed ? replayMonitor(cap.killed, { liveStop: false }).final.snapshot.doneS : null,
+        ),
+        killToDeathMs: cap.killed?.exit.deathMs ?? null,
+        appRunStoppedBy: cap.app?.exit.stoppedBy ?? null,
+        chipSamples: cap.app?.chip.length ?? null,
+      };
+      console.info(`[speechLive note] ${name}: ${JSON.stringify(note)}`); // eslint-disable-line no-console
+      for (const [key, value] of Object.entries(note))
+        if (typeof value === "number") expect(Number.isFinite(value), key).toBe(true);
+    },
+  );
 
   describe("the live stop on this capture's own cadence", () => {
     it("never stops the run as it was: the PC that made it finished in time", () => {
