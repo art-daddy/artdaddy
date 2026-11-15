@@ -1,0 +1,141 @@
+{
+ "schema": "speech-live-capture-v1",
+ "textPolicy": "Segment text is blanked: every segment line keeps its two timestamps and the placeholder replaces the words, so the file holds no speech; the log has its paths removed.",
+ "engine": {
+  "backend": "cpu",
+  "threads": 8,
+  "model": "small",
+  "args": [
+   "-m",
+   "ggml-small.bin",
+   "-f",
+   "<audio>",
+   "-ojf",
+   "-of",
+   "<scratch>",
+   "-t",
+   "8",
+   "-l",
+   "en",
+   "-mc",
+   "0",
+   "-ng"
+  ]
+ },
+ "audioS": 1500,
+ "chunks": [
+  { "tMs": 12200, "text": "\n[00:00:00.000 --> 00:00:15.000]  [text blanked]\n[00:00:15.000 --> 00:00:30.000]  [text blanked]\n" },
+  { "tMs": 21200, "text": "[00:00:30.000 --> 00:00:45.000]  [text blanked]\n[00:00:45.000 --> 00:01:00.000]  [text blanked]\n" },
+  { "tMs": 30200, "text": "[00:01:00.000 --> 00:01:15.000]  [text blanked]\n[00:01:15.000 --> 00:01:30.000]  [text blanked]\n" },
+  { "tMs": 39200, "text": "[00:01:30.000 --> 00:01:45.000]  [text blanked]\n[00:01:45.000 --> 00:02:00.000]  [text blanked]\n" },
+  { "tMs": 48200, "text": "[00:02:00.000 --> 00:02:15.000]  [text blanked]\n[00:02:15.000 --> 00:02:30.000]  [text blanked]\n" },
+  { "tMs": 57200, "text": "[00:02:30.000 --> 00:02:45.000]  [text blanked]\n[00:02:45.000 --> 00:03:00.000]  [text blanked]\n" },
+  { "tMs": 66200, "text": "[00:03:00.000 --> 00:03:15.000]  [text blanked]\n[00:03:15.000 --> 00:03:30.000]  [text blanked]\n" },
+  { "tMs": 75200, "text": "[00:03:30.000 --> 00:03:45.000]  [text blanked]\n[00:03:45.000 --> 00:04:00.000]  [text blanked]\n" },
+  { "tMs": 84200, "text": "[00:04:00.000 --> 00:04:15.000]  [text blanked]\n[00:04:15.000 --> 00:04:30.000]  [text blanked]\n" },
+  { "tMs": 93200, "text": "[00:04:30.000 --> 00:04:45.000]  [text blanked]\n[00:04:45.000 --> 00:05:00.000]  [text blanked]\n" },
+  { "tMs": 102200, "text": "[00:05:00.000 --> 00:05:15.000]  [text blanked]\n[00:05:15.000 --> 00:05:30.000]  [text blanked]\n" },
+  { "tMs": 111200, "text": "[00:05:30.000 --> 00:05:45.000]  [text blanked]\n[00:05:45.000 --> 00:06:00.000]  [text blanked]\n" },
+  { "tMs": 120200, "text": "[00:06:00.000 --> 00:06:15.000]  [text blanked]\n[00:06:15.000 --> 00:06:30.000]  [text blanked]\n" },
+  { "tMs": 129200, "text": "[00:06:30.000 --> 00:06:45.000]  [text blanked]\n[00:06:45.000 --> 00:07:00.000]  [text blanked]\n" },
+  { "tMs": 138200, "text": "[00:07:00.000 --> 00:07:15.000]  [text blanked]\n[00:07:15.000 --> 00:07:30.000]  [text blanked]\n" },
+  { "tMs": 147200, "text": "[00:07:30.000 --> 00:07:45.000]  [text blanked]\n[00:07:45.000 --> 00:08:00.000]  [text blanked]\n" },
+  { "tMs": 156200, "text": "[00:08:00.000 --> 00:08:15.000]  [text blanked]\n[00:08:15.000 --> 00:08:30.000]  [text blanked]\n" },
+  { "tMs": 165200, "text": "[00:08:30.000 --> 00:08:45.000]  [text blanked]\n[00:08:45.000 --> 00:09:00.000]  [text blanked]\n" },
+  { "tMs": 174200, "text": "[00:09:00.000 --> 00:09:15.000]  [text blanked]\n[00:09:15.000 --> 00:09:30.000]  [text blanked]\n" },
+  { "tMs": 183200, "text": "[00:09:30.000 --> 00:09:45.000]  [text blanked]\n[00:09:45.000 --> 00:10:00.000]  [text blanked]\n" },
+  { "tMs": 192200, "text": "[00:10:00.000 --> 00:10:15.000]  [text blanked]\n[00:10:15.000 --> 00:10:30.000]  [text blanked]\n" },
+  { "tMs": 201200, "text": "[00:10:30.000 --> 00:10:45.000]  [text blanked]\n[00:10:45.000 --> 00:11:00.000]  [text blanked]\n" },
+  { "tMs": 210200, "text": "[00:11:00.000 --> 00:11:15.000]  [text blanked]\n[00:11:15.000 --> 00:11:30.000]  [text blanked]\n" },
+  { "tMs": 219200, "text": "[00:11:30.000 --> 00:11:45.000]  [text blanked]\n[00:11:45.000 --> 00:12:00.000]  [text blanked]\n" },
+  { "tMs": 228200, "text": "[00:12:00.000 --> 00:12:15.000]  [text blanked]\n[00:12:15.000 --> 00:12:30.000]  [text blanked]\n" },
+  { "tMs": 237200, "text": "[00:12:30.000 --> 00:12:45.000]  [text blanked]\n[00:12:45.000 --> 00:13:00.000]  [text blanked]\n" },
+  { "tMs": 246200, "text": "[00:13:00.000 --> 00:13:15.000]  [text blanked]\n[00:13:15.000 --> 00:13:30.000]  [text blanked]\n" },
+  { "tMs": 255200, "text": "[00:13:30.000 --> 00:13:45.000]  [text blanked]\n[00:13:45.000 --> 00:14:00.000]  [text blanked]\n" },
+  { "tMs": 264200, "text": "[00:14:00.000 --> 00:14:15.000]  [text blanked]\n[00:14:15.000 --> 00:14:30.000]  [text blanked]\n" },
+  { "tMs": 273200, "text": "[00:14:30.000 --> 00:14:45.000]  [text blanked]\n[00:14:45.000 --> 00:15:00.000]  [text blanked]\n" },
+  { "tMs": 282200, "text": "[00:15:00.000 --> 00:15:15.000]  [text blanked]\n[00:15:15.000 --> 00:15:30.000]  [text blanked]\n" },
+  { "tMs": 291200, "text": "[00:15:30.000 --> 00:15:45.000]  [text blanked]\n[00:15:45.000 --> 00:16:00.000]  [text blanked]\n" },
+  { "tMs": 300200, "text": "[00:16:00.000 --> 00:16:15.000]  [text blanked]\n[00:16:15.000 --> 00:16:30.000]  [text blanked]\n" },
+  { "tMs": 309200, "text": "[00:16:30.000 --> 00:16:45.000]  [text blanked]\n[00:16:45.000 --> 00:17:00.000]  [text blanked]\n" },
+  { "tMs": 318200, "text": "[00:17:00.000 --> 00:17:15.000]  [text blanked]\n[00:17:15.000 --> 00:17:30.000]  [text blanked]\n" },
+  { "tMs": 327200, "text": "[00:17:30.000 --> 00:17:45.000]  [text blanked]\n[00:17:45.000 --> 00:18:00.000]  [text blanked]\n" },
+  { "tMs": 336200, "text": "[00:18:00.000 --> 00:18:15.000]  [text blanked]\n[00:18:15.000 --> 00:18:30.000]  [text blanked]\n" },
+  { "tMs": 345200, "text": "[00:18:30.000 --> 00:18:45.000]  [text blanked]\n[00:18:45.000 --> 00:19:00.000]  [text blanked]\n" },
+  { "tMs": 354200, "text": "[00:19:00.000 --> 00:19:15.000]  [text blanked]\n[00:19:15.000 --> 00:19:30.000]  [text blanked]\n" },
+  { "tMs": 363200, "text": "[00:19:30.000 --> 00:19:45.000]  [text blanked]\n[00:19:45.000 --> 00:20:00.000]  [text blanked]\n" },
+  { "tMs": 372200, "text": "[00:20:00.000 --> 00:20:15.000]  [text blanked]\n[00:20:15.000 --> 00:20:30.000]  [text blanked]\n" },
+  { "tMs": 381200, "text": "[00:20:30.000 --> 00:20:45.000]  [text blanked]\n[00:20:45.000 --> 00:21:00.000]  [text blanked]\n" },
+  { "tMs": 390200, "text": "[00:21:00.000 --> 00:21:15.000]  [text blanked]\n[00:21:15.000 --> 00:21:30.000]  [text blanked]\n" },
+  { "tMs": 399200, "text": "[00:21:30.000 --> 00:21:45.000]  [text blanked]\n[00:21:45.000 --> 00:22:00.000]  [text blanked]\n" },
+  { "tMs": 408200, "text": "[00:22:00.000 --> 00:22:15.000]  [text blanked]\n[00:22:15.000 --> 00:22:30.000]  [text blanked]\n" },
+  { "tMs": 417200, "text": "[00:22:30.000 --> 00:22:45.000]  [text blanked]\n[00:22:45.000 --> 00:23:00.000]  [text blanked]\n" },
+  { "tMs": 426200, "text": "[00:23:00.000 --> 00:23:15.000]  [text blanked]\n[00:23:15.000 --> 00:23:30.000]  [text blanked]\n" },
+  { "tMs": 435200, "text": "[00:23:30.000 --> 00:23:45.000]  [text blanked]\n[00:23:45.000 --> 00:24:00.000]  [text blanked]\n" },
+  { "tMs": 444200, "text": "[00:24:00.000 --> 00:24:15.000]  [text blanked]\n[00:24:15.000 --> 00:24:30.000]  [text blanked]\n" },
+  { "tMs": 453200, "text": "[00:24:30.000 --> 00:24:45.000]  [text blanked]\n[00:24:45.000 --> 00:25:00.000]  [text blanked]\n" }
+ ],
+ "stderrHead": "ggml_vulkan: Found 1 Vulkan devices:\nload_backend: loaded Vulkan backend from <path>\nload_backend: loaded CPU backend from <path>\nwhisper_init_from_file_with_params_no_state: loading model from '<path>'\nwhisper_init_with_params_no_state: use gpu    = 0\nwhisper_init_with_params_no_state: flash attn = 1\nwhisper_model_load: loading model\nwhisper_model_load: type          = 3 (small)\nwhisper_model_load: model size    =  487.01 MB\nwhisper_backend_init_gpu: no GPU found\nwhisper_init_state: kv self size  =   18.87 MB\nread_audio_data: reading audio data from '<path>' ...\nsystem_info: n_threads = 8 / 16 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : AVX = 1 | AVX2 = 1 |\nmain: processing '<path>' (24000000 samples, 1500.0 sec), 8 threads, 1 processors, 5 beams + best of 5, lang = en, task = transcribe, timestamps = 1 ...\n\noutput_json: saving output to '<path>'\n\nwhisper_print_timings:     load time =    480.00 ms\nwhisper_print_timings:     fallbacks =   0 p /   0 h\nwhisper_print_timings:    total time = 452400.00 ms\n",
+ "stderrFacts": {
+  "totalMs": 452400,
+  "loadMs": 480,
+  "audioS": 1500
+ },
+ "finalJson": {
+  "segments": 100,
+  "lastEndS": 1500
+ },
+ "exit": {
+  "code": 0,
+  "wallMs": 453450,
+  "launches": 1
+ },
+ "killed": {
+  "engine": {
+   "backend": "cpu",
+   "threads": 8,
+   "model": "small",
+   "args": [
+    "-m",
+    "ggml-small.bin",
+    "-f",
+    "<audio>",
+    "-ojf",
+    "-of",
+    "<scratch>",
+    "-t",
+    "8",
+    "-l",
+    "en",
+    "-mc",
+    "0",
+    "-ng"
+   ]
+  },
+  "audioS": 1500,
+  "chunks": [
+   { "tMs": 12200, "text": "\n[00:00:00.000 --> 00:00:15.000]  [text blanked]\n[00:00:15.000 --> 00:00:30.000]  [text blanked]\n" },
+   { "tMs": 21200, "text": "[00:00:30.000 --> 00:00:45.000]  [text blanked]\n[00:00:45.000 --> 00:01:00.000]  [text blanked]\n" },
+   { "tMs": 30200, "text": "[00:01:00.000 --> 00:01:15.000]  [text blanked]\n[00:01:15.000 --> 00:01:30.000]  [text blanked]\n" },
+   { "tMs": 39200, "text": "[00:01:30.000 --> 00:01:45.000]  [text blanked]\n[00:01:45.000 --> 00:02:00.000]  [text blanked]\n" },
+   { "tMs": 48200, "text": "[00:02:00.000 --> 00:02:15.000]  [text blanked]\n[00:02:15.000 --> 00:02:30.000]  [text blanked]\n" },
+   { "tMs": 57200, "text": "[00:02:30.000 --> 00:02:45.000]  [text blanked]\n[00:02:45.000 --> 00:03:00.000]  [text blanked]\n" },
+   { "tMs": 66200, "text": "[00:03:00.000 --> 00:03:15.000]  [text blanked]\n[00:03:15.000 --> 00:03:30.000]  [text blanked]\n" },
+   { "tMs": 75200, "text": "[00:03:30.000 --> 00:03:45.000]  [text blanked]\n[00:03:45.000 --> 00:04:00.000]  [text blanked]\n" },
+   { "tMs": 84200, "text": "[00:04:00.000 --> 00:04:15.000]  [text blanked]\n[00:04:15.000 --> 00:04:30.000]  [text blanked]\n" }
+  ],
+  "stderrHead": "ggml_vulkan: Found 1 Vulkan devices:\nload_backend: loaded Vulkan backend from <path>\nload_backend: loaded CPU backend from <path>\nwhisper_init_from_file_with_params_no_state: loading model from '<path>'\nwhisper_init_with_params_no_state: use gpu    = 0\nwhisper_init_with_params_no_state: flash attn = 1\nwhisper_model_load: loading model\nwhisper_model_load: type          = 3 (small)\nwhisper_model_load: model size    =  487.01 MB\nwhisper_backend_init_gpu: no GPU found\nwhisper_init_state: kv self size  =   18.87 MB\nread_audio_data: reading audio data from '<path>' ...\nsystem_info: n_threads = 8 / 16 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : AVX = 1 | AVX2 = 1 |\nmain: processing '<path>' (24000000 samples, 1500.0 sec), 8 threads, 1 processors, 5 beams + best of 5, lang = en, task = transcribe, timestamps = 1 ...\n",
+  "stderrFacts": {
+   "audioS": 1500
+  },
+  "exit": {
+   "code": -1,
+   "wallMs": 90040,
+   "killedAtMs": 90000,
+   "stoppedBy": "person",
+   "deathMs": 40,
+   "outputFileLeft": false,
+   "launches": 1
+  }
+ }
+}
