@@ -486,6 +486,26 @@ describe("summarizeCostShape: what the shape counts", () => {
     expect(featureTotals(shapeOf(one({ glow: { amount: 0 } }))).glow).toBeUndefined();
   });
 
+  it("reads only the effect and transition names the price table owns: a name that is an inherited object property emits nothing", () => {
+    const names = ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"];
+    const stack = (effects: Clip["effects"]) => shapeOf(one({ effects }));
+    const plain = stack([]);
+    for (const type of names) {
+      const shape = stack([{ type, params: {} }]);
+      expect(featureTotals(shape)).toEqual({});
+      expect(shape.unpricedFeatures).toBe(plain.unpricedFeatures);
+      expect(Object.keys(shape.clips[0].loads)).toEqual(Object.keys(plain.clips[0].loads));
+      // The exporter renders an unknown transition kind as a crossfade, so that is the whole price of one.
+      const unknownKind = twoClips({
+        kind: type,
+        duration: 12,
+      } as unknown as Clip["transition_in"]);
+      expect(featureTotals(shapeOf(unknownKind))).toEqual(
+        featureTotals(shapeOf(twoClips({ kind: "crossfade", duration: 12 }))),
+      );
+    }
+  });
+
   it("counts the source frames a speed change decodes", () => {
     expect(featureTotals(shapeOf(one({ speed: 2 }))).speed_change).toMatchObject({ frames: 120 });
     expect(featureTotals(shapeOf(one({ speed: 0.5 }))).speed_change).toMatchObject({ frames: 60 });

@@ -281,7 +281,7 @@ function effectFeatures(clip: Clip): { features: CostFeature[]; unpriced: number
     if (!isRecord(effect) || effect.enabled === false) continue;
     const type = String(effect.type ?? "");
     const params = isRecord(effect.params) ? effect.params : {};
-    if (type in EFFECT_FEATURES) features.push(EFFECT_FEATURES[type]);
+    if (Object.hasOwn(EFFECT_FEATURES, type)) features.push(EFFECT_FEATURES[type]);
     else if (type === "clarity") {
       const clarity = isNum(params.clarity) ? params.clarity : 0;
       const dehaze = isNum(params.dehaze) ? params.dehaze : 0;
@@ -446,7 +446,10 @@ function summarize(
       );
 
     const transition = pc.transition;
-    const transitionFeature = transition ? TRANSITION_FEATURE[transition.kind] : undefined;
+    const transitionFeature =
+      transition && Object.hasOwn(TRANSITION_FEATURE, transition.kind)
+        ? TRANSITION_FEATURE[transition.kind]
+        : undefined;
     if (transition && transitionFeature) {
       const lead = transition.durSec / 2;
       const windowFrom = Math.ceil((pc.visibility.inSec - lead) * fps - 1e-6);
