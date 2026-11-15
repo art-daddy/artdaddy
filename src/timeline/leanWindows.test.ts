@@ -145,6 +145,8 @@ function audit(
   times: (k: number) => number[],
   /** the frames whose slack counts: the frames the clip is drawn on (the audited range reaches past them, where only SUPERSET matters) */
   counted: (k: number) => boolean = () => true,
+  /** a frame that needs the filter only at a float step of its time still needs it: a curve may touch 1 on one isolated frame, and the window then rightly holds that frame alone */
+  anyReading = false,
 ): Audit {
   const evaluate = window === null ? null : reference(window);
   const isOpen = (T: number) => evaluate === null || Math.abs(evaluate({ T })) >= 0.5;
@@ -159,12 +161,13 @@ function audit(
       open: isOpen(exact) && others.every(isOpen),
     };
   });
-  const idleRows = rows.filter((r) => r.openExact && !r.neededExact && counted(r.k));
+  const anchors = (r: (typeof rows)[number]): boolean => (anyReading ? r.needed : r.neededExact);
+  const idleRows = rows.filter((r) => r.openExact && !anchors(r) && counted(r.k));
   return {
     missed: rows.filter((r) => r.needed && !r.open).map((r) => r.k),
     idle: idleRows.length,
     far: idleRows
-      .filter((r) => !rows.some((o) => o.neededExact && Math.abs(o.k - r.k) <= 2))
+      .filter((r) => !rows.some((o) => anchors(o) && Math.abs(o.k - r.k) <= 2))
       .map((r) => r.k),
   };
 }
@@ -789,6 +792,7 @@ function auditOpacity(run: OpacityRun, window: string | null): Audit {
     window,
     floatTimes(run.fps),
     (k) => k >= run.first && k < run.end,
+    true,
   );
 }
 
@@ -875,11 +879,24 @@ describe("opacityWindow", () => {
     fc.assert(
       fc.property(opacityCase, (c) => {
         const run = opacityRun(c);
-        expect(opacityFaults(run, run.real), JSON.stringify({ c, window: run.real })).toEqual([]);
+        const faults = opacityFaults(run, run.real);
+        expect(faults, JSON.stringify({ c, window: run.real, faults })).toEqual([]);
       }),
       {
         numRuns: 250,
         examples: [
+          // found by the class check (16 Nov), clean repeat on the tip: two keys, an eased fall to a value that prints as 1
+          [
+            {
+              fps: 24,
+              tin: 0,
+              len: 20,
+              keys: [
+                { t: 5, v: 1.1501079, ease: "ease-in-out" },
+                { t: 6, v: 1.0000004, ease: "linear" },
+              ],
+            },
+          ],
           // found by the class check (16 Nov), fourth repeat: a hold key between a ramp and a drop to 0, then below 0
           [
             {
