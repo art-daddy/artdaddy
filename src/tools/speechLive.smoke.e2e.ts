@@ -537,21 +537,39 @@ describe.skipIf(missing.length > 0)(`the live speech proof${FAKE ? " (fake engin
         launches: full!.trace.launches,
       }),
     };
+    // A run that did not give a usable record is left out, saying so, and what the other runs made is still written:
+    // the engine's time is the dear thing, and a section that cannot be one is the finding, in the log of this test.
     const k = results.kill;
-    if (k)
+    const killUsable =
+      k !== undefined &&
+      k.trace.closeAt !== null &&
+      k.trace.abortAt !== null &&
+      !k.trace.survived &&
+      k.audioS > 0;
+    if (k && !killUsable)
+      console.log(
+        "[speechLive] run 2 is left out of the capture: it made no usable record of a kill",
+      ); // eslint-disable-line no-console
+    if (k && killUsable)
       capture.killed = runCapture(k, {
         code: k.trace.code,
         wallMs: wallMs(k.trace),
-        ...(k.trace.abortAt === null ? {} : { killedAtMs: k.trace.abortAt - k.trace.launchAt }),
+        killedAtMs: k.trace.abortAt! - k.trace.launchAt,
         ...(k.outcome === "cancelled" ? { stoppedBy: "person" as const } : {}),
-        ...(k.trace.abortAt === null || k.trace.closeAt === null
-          ? {}
-          : { deathMs: k.trace.closeAt - k.trace.abortAt }),
+        deathMs: k.trace.closeAt! - k.trace.abortAt!,
         outputFileLeft: existsSync(`${flagValue(k.trace.args, "-of")}.json`),
         launches: k.trace.launches,
       });
     const a = results.app;
-    if (a) {
+    const appUsable =
+      a !== undefined &&
+      (a.outcome === "done" || a.outcome === "too_slow") &&
+      a.trace.closeAt !== null &&
+      a.trace.chunks.length > 0 &&
+      a.audioS > 0;
+    if (a && !appUsable)
+      console.log(`[speechLive] run 3 is left out of the capture: it ended as "${a.outcome}"`); // eslint-disable-line no-console
+    if (a && appUsable) {
       const app: AppRunCapture = {
         ...runCapture(a, {
           code: a.trace.code,
