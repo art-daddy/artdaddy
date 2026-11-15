@@ -8,6 +8,9 @@
 //   flag      speech_wake off: nothing is registered, and one released before it was turned off is dropped (0.27.0)
 //   chat      only the chat that was told "not ready" is woken, not another, not a new one, not one reopened
 //   unread    something must still be unread: the person's own turn, or a later look, may have fetched the words
+//   quiet     no model turn in this chat for more than 30 minutes: the vendor's prompt cache has gone cold and one wake
+//             would cost about eleven times a warm round. Nobody is woken; the card says the words are ready and the
+//             person asks when he wants it. Read at the moment the wake would be sent, so it comes before the rest.
 //   credits   no wake while the account is out of credits (a wake is a billed round); held until they are back
 //   cap       at most 5 wakes per chat in a rolling hour; past that the person is told to ask, and nothing starts
 //   draft     never while the person has text in the box: held until it is sent or cleared
@@ -40,6 +43,10 @@ import {
 export const WAKE_CAP_PER_HOUR = 5;
 /** No two wakes for words of one chat closer than this. */
 export const WAKE_COOL_DOWN_MS = 60_000;
+/** A chat with no model turn for MORE than this is not woken (the owner's decision of 15 Nov: after a long break the
+ *  app only leaves a note). The vendor's prompt cache goes cold after about half an hour without a request, and then
+ *  one wake is a round at about eleven times the price of a warm one. Exactly this long is not yet a long break. */
+export const WAKE_LONG_IDLE_MS = 30 * 60_000;
 const HOUR_MS = 3_600_000;
 /** How long a plain note stays on the card when nobody dismisses it. */
 export const NOTE_SHOWN_MS = 10 * 60_000;
@@ -92,6 +99,10 @@ const releases = new Map<string, Release>();
 /** Released batches the hourly cap refused, and when: the card tells the person to ask, until the assistant speaks
  *  again or the note's time is up. */
 const capped = new Map<string, number>();
+/** Released batches that were not woken because their chat had been quiet for too long. The card tells the person to
+ *  ask, and keeps telling him until the assistant has spoken, the words are read or the chat is gone: a note for
+ *  someone who was away must still be there when he is back, so it has no time limit of its own. */
+const longIdle = new Set<string>();
 const factNoted = new Set<string>();
 const notes = new Map<string, WakeNote[]>();
 const wakes = new Map<string, number[]>();
@@ -113,6 +124,41 @@ function wakeNow(): number {
   awakeMs += Math.min(Math.max(real - clockAt, 0), MAX_CLOCK_STEP_MS);
   clockAt = real;
   return awakeMs + 1;
+}
+
+/** THE IDLE GAP of a chat: the time since its last model turn began, resumed or ended. Each of those is a request to
+ *  the model, and a request is what keeps the vendor's prompt cache warm, so they count: a turn that begins (the
+ *  person's message, a wake, a Continue or Try again) and a turn that ends however it ends (done, Stop, an error, taken
+ *  over). These do not: typing in the box, opening or switching a project or a chat, an export, a generation or a speech
+ *  job finishing, the card, a look at the transcript cache. Another chat has its own cache, so it is not this chat's
+ *  activity. Unlike the wake's own clock above, a PC that slept DOES count: the cache expires in real time. */
+const lastTurnAt = new Map<string, { wall: number; mono: number }>();
+/** Chats with a model turn running right now: a chat that is working is not quiet, however long its turn takes. */
+const liveTurns = new Set<string>();
+const defaultMonotonic = (): number => (typeof performance !== "undefined" ? performance.now() : 0);
+let monotonicNow: () => number = defaultMonotonic;
+
+function touch(chat: ChatKey): void {
+  lastTurnAt.set(chatId(chat), { wall: Date.now(), mono: monotonicNow() });
+}
+
+/** How long a chat has been quiet, on two clocks read together: the wall clock (which a sleeping PC moves, and a clock
+ *  that is set back moves the wrong way) and a monotonic one (which no clock change can move). The larger gap wins, so
+ *  a clock set back can never make a long break look short; a clock set forward, or a sleep, reads as a long break,
+ *  which is right for a sleep and costs nothing for a clock change (the person is told to ask). A chat nobody has
+ *  touched, and a chat with a turn running, have no gap. */
+function chatQuietMs(chat: ChatKey): number {
+  const key = chatId(chat);
+  const at = lastTurnAt.get(key);
+  if (!at || liveTurns.has(key)) return 0;
+  const gaps = [Date.now() - at.wall, monotonicNow() - at.mono].filter((g) => Number.isFinite(g));
+  return Math.max(0, ...gaps);
+}
+
+/** Tests only: the monotonic clock (`performance.now` by default), so that a test can move it apart from the wall
+ *  clock, the way a clock that is set back or forward does. */
+export function __setMonotonicClock(now: (() => number) | null): void {
+  monotonicNow = now ?? defaultMonotonic;
 }
 
 /** Moves when anything the card shows may have changed. */
@@ -212,6 +258,20 @@ function tick(): void {
       finish(batchId);
       pruned = true;
     }
+  // Words that are held (a draft in the box, no credits, a cool-down) while their chat goes quiet for too long would
+  // be refused now: the queue is asked again, and it drops them with the note. Nothing else moves the card on time.
+  for (const r of [...releases.values()])
+    if (
+      !longIdle.has(r.batchId) &&
+      chatQuietMs({ dir: r.dir, session: r.session }) > WAKE_LONG_IDLE_MS
+    )
+      flushJobNotes(r.dir);
+  // The long-break note is done with when nothing is left unread (the person's own turn read the words).
+  for (const batchId of [...longIdle])
+    if (registry.unread(batchId).length === 0) {
+      finish(batchId);
+      pruned = true;
+    }
   if (registry.size() === 0 && releases.size === 0 && notes.size === 0 && ticker !== null) {
     clearInterval(ticker);
     ticker = null;
@@ -232,6 +292,7 @@ function finish(batchId: string): void {
   registry.resolve(batchId);
   releases.delete(batchId);
   capped.delete(batchId);
+  longIdle.delete(batchId);
 }
 
 /** How a batch of words is told to the assistant: how many files, and which references it knows them by. A file read
@@ -382,6 +443,8 @@ export function noteWordsFetched(
 /** A turn of a chat begins. The person's own turn also ends the plain notes of the last one. */
 export function wakeBeginTurn(chat: ChatKey | null, exec: number, system: boolean): void {
   if (!chat) return;
+  touch(chat);
+  liveTurns.add(chatId(chat));
   registry.beginTurn(chat, exec);
   if (!system) notes.delete(chatId(chat));
   bump();
@@ -391,6 +454,8 @@ export function wakeBeginTurn(chat: ChatKey | null, exec: number, system: boolea
  *  turn once more, so what it is told from here on is waited for. What it had registered before is not brought back. */
 export function wakeResumeTurn(chat: ChatKey | null, exec: number): void {
   if (!chat) return;
+  touch(chat);
+  liveTurns.add(chatId(chat));
   registry.resumeTurn(chat, exec);
 }
 
@@ -398,15 +463,21 @@ export function wakeResumeTurn(chat: ChatKey | null, exec: number): void {
  *  that took over) drops it: the person took over, and nothing must come back behind his back. */
 export function wakeEndTurn(chat: ChatKey | null, exec: number, how: TurnEnd): void {
   if (!chat) return;
+  touch(chat); // before anything is released: a batch that lands with this turn's end finds the chat active, not quiet
+  liveTurns.delete(chatId(chat));
   const turn = turnId(chat, exec);
   const asked = askedThisTurn.get(turn) ?? 0;
   askedThisTurn.delete(turn);
   if (asked > 0) note(how === "done" ? "registered" : "dropped", asked);
   apply(registry.endTurn(chat, exec, how, wakeNow()));
-  // The person was told to ask the assistant, and the assistant has spoken since: that is done with.
+  // The person was told to ask the assistant (the cap, or a long break), and the assistant has spoken since: that is
+  // done with.
   if (how === "done")
     for (const r of [...releases.values()])
-      if (chatId({ dir: r.dir, session: r.session }) === chatId(chat) && capped.has(r.batchId))
+      if (
+        chatId({ dir: r.dir, session: r.session }) === chatId(chat) &&
+        (capped.has(r.batchId) || longIdle.has(r.batchId))
+      )
         finish(r.batchId);
   bump();
 }
@@ -419,10 +490,18 @@ export function wakeDropChat(dir: string, session?: string): void {
     if (dirKey(r.dir) !== dirKey(dir) || (session !== undefined && r.session !== session)) continue;
     releases.delete(r.batchId);
     capped.delete(r.batchId);
+    longIdle.delete(r.batchId);
   }
   for (const key of [...notes.keys()]) {
     const [d, s] = key.split("\u0000");
     if (d === dirKey(dir) && (session === undefined || s === session)) notes.delete(key);
+  }
+  for (const key of [...lastTurnAt.keys()]) {
+    const [d, s] = key.split("\u0000");
+    if (d === dirKey(dir) && (session === undefined || s === session)) {
+      lastTurnAt.delete(key);
+      liveTurns.delete(key);
+    }
   }
   if (dropped > 0) note("dropped", dropped);
   bump();
@@ -449,6 +528,16 @@ export function admitWordsWake(dir: string, session: string | null, job: Settled
   if (files === 0) {
     note("skipped_fetched", rel.landed.length);
     finish(rel.batchId);
+    bump();
+    return "drop";
+  }
+  // A long break: the vendor's prompt cache for this chat has gone cold, so this wake would be a round at about eleven
+  // times the price of a warm one. Not woken, whatever else would hold or allow it (so before credits, cap and draft,
+  // none of which can make a cold wake cheap); the words stay ready, the card says so, nothing is counted against the
+  // cap. The gap is read NOW, when the wake would be sent, so words that were held past the threshold are refused too.
+  if (chatQuietMs(chat) > WAKE_LONG_IDLE_MS) {
+    longIdle.add(rel.batchId);
+    noteOnce(rel.batchId, "long_idle", files);
     bump();
     return "drop";
   }
@@ -511,13 +600,20 @@ export function wakeViewOf(chat: ChatKey): WakeChatView {
   const mine = [...releases.values()].filter(
     (r) => chatId({ dir: r.dir, session: r.session }) === chatId(chat),
   );
-  const held: HeldBy = mine.some((r) => capped.has(r.batchId))
-    ? "capped"
-    : getUsage().over
-      ? "credits"
-      : composerHasDraft()
-        ? "typing"
-        : null;
+  // After a long break nothing promises a wake: the reason the assistant is not carrying on is that it will not, until
+  // the person asks. That reads the clock now too, so words held for a draft or for credits stop saying that the
+  // assistant carries on the moment their chat has been quiet for too long.
+  const quiet = mine.length > 0 && chatQuietMs(chat) > WAKE_LONG_IDLE_MS;
+  const held: HeldBy =
+    quiet || mine.some((r) => longIdle.has(r.batchId))
+      ? "idle"
+      : mine.some((r) => capped.has(r.batchId))
+        ? "capped"
+        : getUsage().over
+          ? "credits"
+          : composerHasDraft()
+            ? "typing"
+            : null;
   const now = Date.now();
   return {
     total: v.total,
@@ -546,6 +642,10 @@ export function __resetWakeHost(): void {
   registry = new WakeRegistry();
   releases.clear();
   capped.clear();
+  longIdle.clear();
+  lastTurnAt.clear();
+  liveTurns.clear();
+  monotonicNow = defaultMonotonic;
   factNoted.clear();
   notes.clear();
   wakes.clear();

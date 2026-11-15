@@ -17,6 +17,7 @@ import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { clearFacts, readFacts, WAKE_FACT_EVENTS } from "../lib/localFacts";
 import type { ClientToolContext } from "../tools/context";
 import { SpeechCancelledError, TranscriptionFailure } from "../tools/speechFailure";
+import { cardView } from "../tools/speechTimeLine";
 import { __resetComposer, useComposer } from "./composer";
 import {
   __resetJobNotes,
@@ -28,6 +29,7 @@ import {
 } from "./jobNotes";
 import {
   __resetWakeHost,
+  __setMonotonicClock,
   admitWordsWake,
   dismissWakeNote,
   NOTE_SHOWN_MS,
@@ -43,6 +45,7 @@ import {
   wakeViewOf,
   WAKE_CAP_PER_HOUR,
   WAKE_COOL_DOWN_MS,
+  WAKE_LONG_IDLE_MS,
   type Settled,
 } from "./speechWakeHost";
 
@@ -604,7 +607,7 @@ describe("a turn taken up again", () => {
 });
 
 describe("a PC that slept, or a page that was frozen", () => {
-  it("does not count the sleep as waiting for words: no file expires, and the wake still comes", async () => {
+  it("does not count the sleep as waiting for words: no file expires, and the wake still comes when the chat took a turn since", async () => {
     const sink = chatSink();
     registerJobSink(DIR, sink);
     const runs = turn(1, ["m_1", "m_2"]);
@@ -614,10 +617,28 @@ describe("a PC that slept, or a page that was frozen", () => {
     await settle(2 * MIN);
     expect(wakeViewOf(CHAT).notes, "no false 'still not ready after 30 minutes'").toEqual([]);
     expect(facts()).not.toContain("expired");
+    wakeBeginTurn(CHAT, 2, false); // the person is back and says something else; the assistant answers
+    wakeEndTurn(CHAT, 2, "done");
     runs.get("m_2")!.land();
     await settle(SETTLE_WINDOW_MS + 10);
     expect(sink.words()).toHaveLength(1);
     expect(sink.words()[0].media_refs).toEqual(["m_1", "m_2"]);
+  });
+
+  it("does not count the sleep as waiting for words either way, but six hours with no turn are a long break: the words are ready and nobody is woken", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    const runs = turn(1, ["m_1", "m_2"]);
+    runs.get("m_1")!.land();
+    await settle(MIN);
+    vi.setSystemTime(Date.now() + 6 * 60 * MIN);
+    await settle(2 * MIN);
+    expect(wakeViewOf(CHAT).notes, "no false 'still not ready after 30 minutes'").toEqual([]);
+    runs.get("m_2")!.land();
+    await settle(SETTLE_WINDOW_MS + 10);
+    expect(sink.words()).toEqual([]);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 2, held: "idle" });
+    expect(facts()).not.toContain("expired");
   });
 });
 
@@ -664,7 +685,24 @@ describe("what cannot be made", () => {
     expect(wakeViewOf(CHAT).notes[0]).toMatchObject({ kind: "audio_extraction_failed", count: 1 });
   });
 
-  it("gives up on a file that never settles after 30 minutes without new words, and wakes for the rest", async () => {
+  it("gives up on a file that never settles after 30 minutes without new words, and wakes for the rest when the chat took a turn meanwhile", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    const runs = turn(1, ["m_1", "m_2"]);
+    runs.get("m_1")!.land();
+    await settle(20 * MIN);
+    wakeBeginTurn(CHAT, 2, false); // the person said something else, and the assistant answered
+    wakeEndTurn(CHAT, 2, "done");
+    await settle(9 * MIN);
+    expect(sink.words()).toEqual([]);
+    await settle(2 * MIN + SETTLE_WINDOW_MS);
+    expect(sink.words()).toHaveLength(1);
+    expect(sink.words()[0].media_refs).toEqual(["m_1"]);
+    expect(wakeViewOf(CHAT).notes.map((n) => n.kind)).toEqual(["expired"]);
+    expect(facts()).toContain("expired");
+  });
+
+  it("gives up on that file all the same, but with no turn meanwhile the chat has been quiet as long: the rest is ready, not a wake", async () => {
     const sink = chatSink();
     registerJobSink(DIR, sink);
     const runs = turn(1, ["m_1", "m_2"]);
@@ -672,10 +710,11 @@ describe("what cannot be made", () => {
     await settle(29 * MIN);
     expect(sink.words()).toEqual([]);
     await settle(2 * MIN + SETTLE_WINDOW_MS);
-    expect(sink.words()).toHaveLength(1);
-    expect(sink.words()[0].media_refs).toEqual(["m_1"]);
+    expect(sink.words()).toEqual([]);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
     expect(wakeViewOf(CHAT).notes.map((n) => n.kind)).toEqual(["expired"]);
     expect(facts()).toContain("expired");
+    expect(facts()).toContain("long_idle");
   });
 });
 
@@ -792,5 +831,302 @@ describe("what is kept about it on this PC", () => {
       expect(WAKE_FACT_EVENTS).toContain(fact.event);
       if (fact.files !== undefined) expect(["1", "2_4", "5_9", "10_plus"]).toContain(fact.files);
     }
+  });
+});
+
+// The owner's decision of 15 Nov: after a LONG BREAK (the chat had no model turn for more than 30 minutes, so the
+// vendor's prompt cache is cold and one wake costs about eleven times a warm round) the assistant is not woken. The
+// words are ready, the card says so, and the person asks when he wants it.
+describe("after a long break the assistant is not woken", () => {
+  let mono = 0;
+  beforeEach(() => {
+    mono = 0;
+    __setMonotonicClock(() => mono);
+  });
+  /** Real time passes: both clocks move and the wake's own timers run. */
+  const pass = async (ms: number): Promise<void> => {
+    mono += ms;
+    await settle(ms);
+  };
+  /** A PC that slept, or a clock set forward: the wall clock moves, the monotonic one does not, no timer runs. */
+  const sleep = (ms: number): void => void vi.setSystemTime(Date.now() + ms);
+  /** The words land so that the queue asks the host `gapMs` after the turn ended (the settling window is part of it). */
+  const landAfter = async (runs: Map<string, Run>, gapMs: number): Promise<void> => {
+    sleep(gapMs - SETTLE_WINDOW_MS);
+    await landAll(runs);
+  };
+  const cardLines = (
+    ready: ReturnType<typeof wakeViewOf>["ready"],
+  ): readonly string[] | undefined =>
+    cardView({
+      done: ready?.files ?? 0,
+      total: ready?.files ?? 0,
+      phase: null,
+      waitingForExport: false,
+      runningEtaS: null,
+      queuedS: 0,
+      slow: false,
+      download: null,
+      ready,
+      notes: [],
+    })?.lines;
+
+  it.each<[string, number, boolean]>([
+    ["five minutes", 5 * MIN, true],
+    ["a moment under the threshold", WAKE_LONG_IDLE_MS - 1, true],
+    ["exactly the threshold (not yet a long break)", WAKE_LONG_IDLE_MS, true],
+    ["a moment over the threshold", WAKE_LONG_IDLE_MS + 1, false],
+    ["an hour", 60 * MIN, false],
+  ])("a chat quiet for %s", async (_label, gapMs, woken) => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    await landAfter(turn(1, ["m_1"]), gapMs);
+    expect(sink.words()).toHaveLength(woken ? 1 : 0);
+    expect(wakeViewOf(CHAT).ready).toEqual(woken ? null : { files: 1, held: "idle" });
+    expect(facts().includes("woke")).toBe(woken);
+    expect(facts().includes("long_idle")).toBe(!woken);
+    expect(pendingJobNotes(DIR), "never kept to be sent later").toEqual([]);
+  });
+
+  it("says in plain words that the words are ready and the person can ask, and never that the assistant carries on", async () => {
+    registerJobSink(DIR, chatSink());
+    await landAfter(turn(1, ["m_1", "m_2", "m_3", "m_4"]), 45 * MIN);
+    const lines = cardLines(wakeViewOf(CHAT).ready);
+    expect(lines).toEqual([
+      "Words are ready for 4 files. It has been a while, so ask the assistant to continue.",
+    ]);
+    expect(lines?.join(" ")).not.toMatch(/carries on|carry on|about to|when you send/i);
+  });
+
+  it("leaves a note that stays until the assistant has spoken, however long the person stays away", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    await landAfter(turn(1, ["m_1", "m_2"]), 45 * MIN);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 2, held: "idle" });
+    await pass(NOTE_SHOWN_MS + 5 * MIN); // the cap's note has gone by now
+    expect(wakeViewOf(CHAT).ready, "no time limit of its own").toEqual({ files: 2, held: "idle" });
+    await pass(3 * 60 * MIN);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 2, held: "idle" });
+
+    // The person comes back and asks: the assistant looks at both files, and the note is done with.
+    wakeBeginTurn(CHAT, 9, false);
+    noteWordsFetched(ctxOf(9), "src-m_1");
+    noteWordsFetched(ctxOf(9), "src-m_2");
+    wakeEndTurn(CHAT, 9, "done");
+    expect(wakeViewOf(CHAT).ready).toBeNull();
+    expect(sink.words(), "nobody was ever woken").toEqual([]);
+    expect(facts()).not.toContain("woke");
+  });
+
+  it("is gone with the chat", async () => {
+    registerJobSink(DIR, chatSink());
+    await landAfter(turn(1, ["m_1"]), 45 * MIN);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+    wakeDropChat(DIR, SESSION);
+    expect(wakeViewOf(CHAT).ready).toBeNull();
+  });
+
+  it("counts from the chat's last turn, and a turn that ends restarts the clock", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    useComposer.getState().setDraft(true); // held, so that the words wait for the clock
+    await landAll(turn(1, ["m_1"]));
+    await pass(29 * MIN);
+    wakeBeginTurn(CHAT, 7, false); // the person says something else, and the assistant answers
+    wakeEndTurn(CHAT, 7, "done");
+    await pass(29 * MIN); // 58 minutes since the words landed, 29 since the chat's last turn
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "typing" });
+    useComposer.getState().setDraft(false);
+    expect(sink.words(), "the clock was restarted: it is an ordinary wake").toHaveLength(1);
+    expect(facts()).not.toContain("long_idle");
+  });
+
+  it("does not call a chat quiet while a turn of it is running, however long that takes", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    useComposer.getState().setDraft(true);
+    await landAll(turn(1, ["m_1"])); // held for the draft
+    wakeBeginTurn(CHAT, 2, false); // the person asks for something that takes 40 minutes
+    await pass(40 * MIN);
+    expect(wakeViewOf(CHAT).ready, "busy, not away").toEqual({ files: 1, held: "typing" });
+    expect(facts()).not.toContain("long_idle");
+    wakeEndTurn(CHAT, 2, "done");
+    useComposer.getState().setDraft(false);
+    expect(sink.words(), "the turn ended just now: an ordinary wake").toHaveLength(1);
+  });
+
+  it("does not count another chat's turns, which warm another cache", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    const runs = turn(1, ["m_1"]);
+    sleep(20 * MIN);
+    turn(5, [], "done", "chat-2");
+    await landAfter(runs, 31 * MIN - 20 * MIN + SETTLE_WINDOW_MS); // 31 minutes since chat-1's last turn
+    expect(sink.words()).toEqual([]);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+  });
+
+  describe("the clock", () => {
+    it("a PC that slept (only the wall clock moved) is a long break", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      const runs = turn(1, ["m_1"]);
+      sleep(2 * 60 * MIN);
+      expect(mono, "the monotonic clock did not move").toBe(0);
+      await landAll(runs);
+      expect(sink.words()).toEqual([]);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+    });
+
+    it("a clock set back cannot make a long break look short: the monotonic clock still counts", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      useComposer.getState().setDraft(true);
+      await landAll(turn(1, ["m_1"])); // held for the draft
+      await pass(20 * MIN);
+      vi.setSystemTime(Date.now() - 3 * 60 * MIN); // the clock is set back three hours: the wall gap is negative
+      await pass(11 * MIN); // 31 minutes in all, by the clock that cannot be set
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+      useComposer.getState().setDraft(false);
+      expect(sink.words(), "a negative wall gap is not a short one").toEqual([]);
+      expect(facts()).toContain("long_idle");
+    });
+
+    it("a clock set forward by a short real time is a long break too, which costs nothing: the person is told to ask", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      useComposer.getState().setDraft(true);
+      await landAll(turn(1, ["m_1"]));
+      await pass(2 * MIN);
+      sleep(5 * 60 * MIN);
+      await pass(MIN); // the next tick looks again
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+      useComposer.getState().setDraft(false);
+      expect(sink.words()).toEqual([]);
+    });
+  });
+
+  describe("the person is typing", () => {
+    it("under the threshold the hold is as it was: the draft holds, and clearing it sends the wake", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      useComposer.getState().setDraft(true);
+      await landAfter(turn(1, ["m_1"]), 29 * MIN);
+      expect(sink.words()).toEqual([]);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "typing" });
+      useComposer.getState().setDraft(false);
+      expect(sink.words()).toHaveLength(1);
+    });
+
+    it("over the threshold a draft changes nothing: the line says to ask, and clearing the draft sends nothing", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      useComposer.getState().setDraft(true);
+      await landAfter(turn(1, ["m_1"]), 31 * MIN);
+      expect(
+        wakeViewOf(CHAT).ready,
+        "no promise that the assistant carries on when the draft goes",
+      ).toEqual({
+        files: 1,
+        held: "idle",
+      });
+      expect(pendingJobNotes(DIR)).toEqual([]);
+      useComposer.getState().setDraft(false);
+      expect(sink.words()).toEqual([]);
+      expect(facts()).toContain("long_idle");
+      expect(facts()).not.toContain("held_typing");
+    });
+
+    it("words held for a draft while the chat goes quiet stop promising a wake, and are not sent when the draft goes", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      useComposer.getState().setDraft(true);
+      await landAll(turn(1, ["m_1"]));
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "typing" });
+      await pass(29 * MIN);
+      expect(wakeViewOf(CHAT).ready, "still inside the threshold").toEqual({
+        files: 1,
+        held: "typing",
+      });
+      await pass(2 * MIN);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+      expect(pendingJobNotes(DIR), "dropped from the queue, not kept").toEqual([]);
+      useComposer.getState().setDraft(false);
+      expect(sink.words()).toEqual([]);
+    });
+  });
+
+  describe("the cap and the credits", () => {
+    it("is refused as a long break, not as the cap, when both apply", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      for (let i = 1; i <= WAKE_CAP_PER_HOUR; i++) {
+        await landAll(turn(i, [`m_${i}`]));
+        await settle(WAKE_COOL_DOWN_MS);
+      }
+      expect(sink.words()).toHaveLength(WAKE_CAP_PER_HOUR);
+      await landAfter(turn(50, ["m_over"]), 40 * MIN); // still inside the hour of the five wakes
+      expect(sink.words()).toHaveLength(WAKE_CAP_PER_HOUR);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+      expect(facts()).toContain("long_idle");
+      expect(facts(), "the cap was not what stopped it").not.toContain("capped");
+    });
+
+    it("does not count against the cap: nobody was woken", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      for (let i = 1; i < WAKE_CAP_PER_HOUR; i++) {
+        await landAll(turn(i, [`m_${i}`]));
+        await settle(WAKE_COOL_DOWN_MS);
+      }
+      expect(sink.words()).toHaveLength(WAKE_CAP_PER_HOUR - 1);
+      await landAfter(turn(50, ["m_idle"]), 40 * MIN); // not woken
+      wakeBeginTurn(CHAT, 60, false); // the person asked
+      wakeEndTurn(CHAT, 60, "done");
+      await landAll(turn(70, ["m_next"])); // an ordinary wake: the last one the cap allows
+      expect(sink.words(), "the long break used none of the five").toHaveLength(WAKE_CAP_PER_HOUR);
+    });
+
+    it("says the long break, not the credits, when the account is out of credits too", async () => {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      usage.over = true;
+      await landAfter(turn(1, ["m_1"]), 45 * MIN);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+      expect(facts()).not.toContain("no_credits");
+    });
+  });
+
+  describe("a chat that was woken before", () => {
+    /** The first batch is woken; in the wake's own turn the assistant asks for one more file and is told "not ready". */
+    async function wokenOnce() {
+      const sink = chatSink();
+      registerJobSink(DIR, sink);
+      await landAll(turn(1, ["m_1"]));
+      expect(sink.words()).toHaveLength(1);
+      wakeBeginTurn(CHAT, 2, true);
+      const second = run();
+      registerPendingWords(wakeTargetOf(ctxOf(2), "src-m_2", "m_2")!, "2-m_2", 30, second.promise);
+      wakeEndTurn(CHAT, 2, "done");
+      await settle(WAKE_COOL_DOWN_MS);
+      return { sink, second };
+    }
+
+    it("is woken again when the wake's own turn ended less than the threshold ago", async () => {
+      const { sink, second } = await wokenOnce();
+      sleep(WAKE_LONG_IDLE_MS - WAKE_COOL_DOWN_MS - SETTLE_WINDOW_MS - 1000);
+      second.land();
+      await settle(SETTLE_WINDOW_MS + 10);
+      expect(sink.words()).toHaveLength(2);
+    });
+
+    it("is not woken again when the wake's own turn ended more than the threshold ago", async () => {
+      const { sink, second } = await wokenOnce();
+      sleep(WAKE_LONG_IDLE_MS - WAKE_COOL_DOWN_MS - SETTLE_WINDOW_MS + 1000);
+      second.land();
+      await settle(SETTLE_WINDOW_MS + 10);
+      expect(sink.words(), "one wake only: the first").toHaveLength(1);
+      expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+    });
   });
 });
