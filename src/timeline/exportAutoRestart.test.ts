@@ -12,6 +12,7 @@ import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob } from "../store/exportJob";
 import { __setExportConfirmationForTests } from "../lib/confirm";
+import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { agentToolContext } from "../tools/agentStore";
@@ -408,6 +409,35 @@ describe("the app starts an export again by itself when the PC ran short of memo
     expect(listExportRecords()[0].attempt).toBeUndefined(); // a new request, a new export
     t.jobs.exit(t.jobs.submitted[2].id, 0);
     await whenExportsSettle();
+  });
+
+  it("starts again even when the record of the failed attempt's end cannot be written: nothing between the decision and the start may strand it", async () => {
+    // The project's job record never rejects at the end of a job (best effort by contract), so this is a fault put in under the contract: a
+    // restart that is registered and never started would leave the row "starting again" for good, with a Cancel that has nothing to reach.
+    const ends = vi
+      .spyOn(JobLedger.prototype, "settle")
+      .mockRejectedValueOnce(new Error("the record could not be written"));
+    try {
+      const t = await setup();
+      const first = await t.exportNow();
+      await flush();
+      t.jobs.exit(first.job_id, -1, SHORT);
+      await flush(40);
+      await expect(ends.mock.results[0].value).rejects.toThrow("could not be written");
+      expect(t.jobs.submitted).toHaveLength(2);
+      expect(listExportRecords().map((r) => r.job_id)).toEqual([t.jobs.submitted[1].id]);
+      expect(listExportRecords()[0]).toMatchObject({
+        state: "running",
+        attempt: 2,
+        restarted: "gentler_setting",
+      });
+      expect(listExportRecords()[0].restarting).toBeUndefined();
+      t.jobs.exit(t.jobs.submitted[1].id, 0);
+      expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "done" });
+      await whenExportsSettle();
+    } finally {
+      ends.mockRestore();
+    }
   });
 
   describe("a Cancel", () => {

@@ -2335,16 +2335,22 @@ async function settle(x: Settle): Promise<void> {
   if (mediaRef) patch(x.jobId, { mediaRef });
   if (!publicationPending) reserved.delete(x.key);
 
-  await x.ledger.settle(
-    x.jobId,
-    error
-      ? {
-          status: cancelled ? "cancelled" : "failed",
-          error,
-          ...(stderrTail ? { stderr_tail: stderrTail } : {}),
-        }
-      : { status: "done" },
-  );
+  // The end of a job in the project's record is best effort by contract (it cannot reject). It is guarded all the same: from the decision to
+  // start the export again to its start nothing may throw, or the restart would be registered and never started.
+  try {
+    await x.ledger.settle(
+      x.jobId,
+      error
+        ? {
+            status: cancelled ? "cancelled" : "failed",
+            error,
+            ...(stderrTail ? { stderr_tail: stderrTail } : {}),
+          }
+        : { status: "done" },
+    );
+  } catch {
+    /* best effort: the next write of the record carries it */
+  }
   // Reported from HERE rather than from the export tool: the tool returns as soon as the job is
   // QUEUED, so anything measured there would describe an encode that had not happened yet. This
   // is also the one place every door ends up — menu, agent and MCP all queue through submitExport.
