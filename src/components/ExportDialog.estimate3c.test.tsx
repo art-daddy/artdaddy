@@ -406,6 +406,42 @@ describe("with the new estimate off the dialog says what 0.27.0 said", () => {
   });
 });
 
+describe("a switch the server turns while the dialog is open applies at the dialog's next draw", () => {
+  /** Something unrelated to the estimate moves, so the dialog draws again: the progress of an export that is running. */
+  const redraw = (speed: number) => act(() => useExportJob.setState({ speed }));
+
+  it("the estimate follows the new estimate being switched off and on: the line and the amber 'much longer' text", () => {
+    useEditor.setState({ timeline: null });
+    __resetRouteEstimatesMemo();
+    show();
+    expect(line().textContent).toMatch(/ to /);
+    expect(screen.getByTestId("estimate-much-longer")).toBeInTheDocument();
+    __setExportFlag("estimate_v2", false);
+    redraw(1);
+    expect(line().textContent).not.toMatch(/ to /);
+    expect(screen.queryByTestId("estimate-much-longer")).not.toBeInTheDocument();
+    __setExportFlag("estimate_v2", true);
+    redraw(2);
+    expect(line().textContent).toMatch(/ to /);
+    expect(screen.getByTestId("estimate-much-longer")).toBeInTheDocument();
+  });
+
+  it("the speed check being switched off takes the class out of the estimate at the next draw", async () => {
+    const world = checkWorld();
+    setPcCheckService(world.service);
+    world.service.requestRun({ reason: "dialog", force: true });
+    await act(async () => undefined);
+    world.runs[0].resolve({ record: done({ rHat: 6, cls: "weak" }), stored: false });
+    await act(async () => undefined);
+    show();
+    expect(line()).toHaveTextContent("from a quick check of this PC's speed.");
+    __setExportFlag("pc_check", false);
+    redraw(1);
+    expect(line()).toHaveTextContent("A rough guess: this PC's speed has not been checked yet.");
+    expect(line()).not.toHaveTextContent("from a quick check");
+  });
+});
+
 describe("it fails soft: the dialog opens and the export starts whatever the estimate or the check does", () => {
   it("a project that cannot be read has no line, and Export still starts", () => {
     const start = vi.fn();

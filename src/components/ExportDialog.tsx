@@ -110,8 +110,9 @@ export default function ExportDialog({
   // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it). While the PC's speed check runs
   // the line says so; the Export button never waits for it.
   const check = useSpeedCheck();
-  // The checking line belongs to the new estimate: with it switched off the line is 0.27.0's, whatever the check is doing.
-  const honestEstimate = flags3cNow().estimate_v2;
+  // The two switches the estimate is priced under, read at every draw so that one the server turns while the dialog is open applies at the next, as it does at
+  // the admission door. The checking line belongs to the new estimate: with it switched off the line is 0.27.0's, whatever the check is doing.
+  const { estimate_v2: honestEstimate, pc_check: checkOn } = flags3cNow();
   const estimated = useMemo(
     () =>
       dialogEstimate({
@@ -124,7 +125,18 @@ export default function ExportDialog({
         openTimeline: () => useEditor.getState().timeline,
       }),
     // `check.key` changes when the check's answer does, which is what the estimate is priced on.
-    [workload, resolution, quality, fps, mode, calibrations, decision, check.key],
+    [
+      workload,
+      resolution,
+      quality,
+      fps,
+      mode,
+      calibrations,
+      decision,
+      check.key,
+      honestEstimate,
+      checkOn,
+    ],
   );
   const expected = workload && honestEstimate && check.running ? CHECKING_LINE : estimated.line;
 
