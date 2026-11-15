@@ -102,6 +102,8 @@
 // export (a refresh runs beside it) and is not the compatibility gate, which can stop the app from working.
 import { apiBase } from "./config";
 import { authedFetch, hasSession } from "./auth";
+// TEMP (lane L6): the list of extra places to fetch the speech model from is read here until L2's lands.
+import { acceptModelSources } from "../tools/modelManifest";
 
 export const EXPORT_FLAG_NAMES = [
   "stall_stop",
@@ -227,6 +229,9 @@ let current: Record<ExportFlagName, boolean> = stored();
 /** Memory only, never written to storage: an app restart starts from the compiled pair and the first answer of the
  *  session retunes it. */
 let currentPcClass: Readonly<PcClassCutoffs> = COMPILED_PC_CLASS;
+/** Memory only, like the pair above: the extra places the answer named for fetching the speech model, as
+ *  `acceptModelSources` accepted them (the whole list or none). */
+let currentModelSources: readonly string[] = [];
 let askedAt = 0;
 let inflight: Promise<void> | null = null;
 
@@ -239,6 +244,13 @@ export function exportFlag(name: ExportFlagName): boolean {
  *  compiled one. */
 export function pcClass(): Readonly<PcClassCutoffs> {
   return currentPcClass;
+}
+
+/** The extra places, beyond the compiled-in one, that the server last named for fetching the speech model this
+ *  session; none until it has. They only say where to ask: what arrives is checked against the compiled size and
+ *  SHA-256. */
+export function speechModelSources(): readonly string[] {
+  return currentModelSources;
 }
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
@@ -290,6 +302,10 @@ async function ask(options: RefreshOptions): Promise<void> {
     // A valid answer without a valid pair puts the compiled pair back: an operator who removes the section must undo
     // a retune. An answer that is not valid (above) leaves the pair alone, as it leaves the flags.
     currentPcClass = acceptPcClass((body as { pc_class?: unknown }).pc_class) ?? COMPILED_PC_CLASS;
+    // The same for the places: a valid answer that names none, or names any bad one, puts the list back to none.
+    currentModelSources = acceptModelSources(
+      (body as { speech_model_sources?: unknown }).speech_model_sources,
+    );
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     } catch {
@@ -312,6 +328,7 @@ export function __resetExportFlags(options: { keepStorage?: boolean } = {}): voi
   askedAt = 0;
   inflight = null;
   currentPcClass = COMPILED_PC_CLASS;
+  currentModelSources = [];
   if (!options.keepStorage) {
     try {
       localStorage.removeItem(STORAGE_KEY);

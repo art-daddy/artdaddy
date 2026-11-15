@@ -9,6 +9,7 @@ import {
   exportFlag,
   pcClass,
   refreshExportFlags,
+  speechModelSources,
 } from "./exportFlags";
 
 const reply = (body: unknown, status = 200): Response =>
@@ -485,5 +486,57 @@ describe("the PC class cut-offs the server may retune (pc_class)", () => {
     await retune();
     __resetExportFlags();
     expect(pcClass()).toEqual(COMPILED_PC_CLASS);
+  });
+});
+
+describe("the extra places for the speech model", () => {
+  const PLACE = "https://huggingface.co/some-org/some-copy/resolve/main/ggml-small.bin";
+  const answerWith = async (body: unknown) =>
+    refreshExportFlags({ fetcher: async () => rawReply(body), signedIn, force: true });
+  const naming = (sources: unknown) => ({ ...flags(), speech_model_sources: sources });
+
+  it("name no extra place until the server has said so", () => {
+    expect(speechModelSources()).toEqual([]);
+  });
+
+  it("take the places a good answer names, and only as a whole", async () => {
+    await answerWith(naming([PLACE]));
+    expect(speechModelSources()).toEqual([PLACE]);
+    await answerWith(naming([PLACE, "https://example.org/ggml-small.bin"]));
+    expect(speechModelSources()).toEqual([]);
+    await answerWith(naming([PLACE]));
+    await answerWith(naming("https://huggingface.co/a/ggml-small.bin"));
+    expect(speechModelSources()).toEqual([]);
+  });
+
+  it("put the places back to none when a good answer no longer names any", async () => {
+    await answerWith(naming([PLACE]));
+    await answerWith(flags());
+    expect(speechModelSources()).toEqual([]);
+  });
+
+  it("keep the last places for an answer that is not good, and never throw", async () => {
+    await answerWith(naming([PLACE]));
+    const failures: Array<() => Promise<Response>> = [
+      async () => reply("not json"),
+      async () => reply({ v: 2, flags: {}, speech_model_sources: [] }),
+      async () => reply({ v: 1, speech_model_sources: [] }),
+      async () => reply({}, 500),
+      async () => {
+        throw new Error("offline");
+      },
+    ];
+    for (const fetcher of failures) {
+      await expect(refreshExportFlags({ fetcher, signedIn, force: true })).resolves.toBeUndefined();
+      expect(speechModelSources()).toEqual([PLACE]);
+    }
+  });
+
+  it("keep the places in memory only: nothing of them is stored, and a restart starts with none", async () => {
+    await answerWith(naming([PLACE]));
+    for (let i = 0; i < localStorage.length; i++)
+      expect(localStorage.getItem(localStorage.key(i) ?? "") ?? "").not.toContain("huggingface");
+    __resetExportFlags({ keepStorage: true });
+    expect(speechModelSources()).toEqual([]);
   });
 });
