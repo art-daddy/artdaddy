@@ -37,6 +37,7 @@ const WAKE_EVENTS = [
   "held_typing",
   "skipped_fetched",
   "capped",
+  "long_idle",
   "no_credits",
   "expired",
   "dropped",

@@ -21,7 +21,7 @@ export interface CardNote {
   kind: CardNoteKind;
   count: number;
 }
-export type HeldBy = "typing" | "capped" | "credits" | null;
+export type HeldBy = "typing" | "capped" | "credits" | "idle" | null;
 
 export interface CardInput {
   /** Files of the chat's open batches that still count: done = words landed or already read; total
@@ -60,6 +60,8 @@ const HELD_WORDS: Readonly<Record<NonNullable<HeldBy>, string>> = {
   typing: "The assistant carries on when you send or clear your message.",
   capped: "Ask the assistant to carry on.",
   credits: "You are out of credits, so the assistant cannot carry on yet.",
+  // After a long break the assistant is not woken: nothing here may say that it carries on by itself.
+  idle: "It has been a while, so ask the assistant to continue.",
 };
 
 const NOTE_WORDS: Readonly<Record<CardNoteKind, (count: number) => string>> = {

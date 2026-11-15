@@ -142,6 +142,7 @@ const HELD_COPY: Record<NonNullable<HeldBy>, string> = {
   typing: "The assistant carries on when you send or clear your message.",
   capped: "Ask the assistant to carry on.",
   credits: "You are out of credits, so the assistant cannot carry on yet.",
+  idle: "It has been a while, so ask the assistant to continue.",
 };
 
 const READY: Row[] = [
@@ -164,6 +165,11 @@ const READY: Row[] = [
     "words ready, out of credits",
     { done: 8, total: 8, ready: { files: 3, held: "credits" } },
     ["Words are ready for 3 files. You are out of credits, so the assistant cannot carry on yet."],
+  ],
+  [
+    "words ready after a long break: the person is told to ask, and nothing promises a wake",
+    { done: 4, total: 4, ready: { files: 4, held: "idle" } },
+    ["Words are ready for 4 files. It has been a while, so ask the assistant to continue."],
   ],
   [
     "lines come in order: download, what follows it, then what is ready",
@@ -191,6 +197,12 @@ describe("the exact words of every state", () => {
       expect(linesOf({ done: 8, total: 8, ready: { files: 2, held: held as HeldBy } })).toEqual([
         `Words are ready for 2 files. ${sentence}`,
       ]);
+  });
+
+  it("never says that the assistant carries on by itself after a long break, whoever is typing or capped", () => {
+    const line = linesOf({ done: 4, total: 4, ready: { files: 4, held: "idle" } }).join(" ");
+    expect(line).not.toMatch(/carries on|carry on by itself|about to|will continue|when you send/i);
+    expect(line).toMatch(/ask the assistant to continue/i);
   });
 });
 
@@ -486,7 +498,7 @@ const secondsArb = fc.oneof(
   fc.double({ min: 0, max: 100_000, noNaN: true }),
 );
 const phaseArb = fc.constantFrom<CardInput["phase"]>(null, "waiting", "starting", "running");
-const heldArb = fc.constantFrom<HeldBy>(null, "typing", "capped", "credits");
+const heldArb = fc.constantFrom<HeldBy>(null, "typing", "capped", "credits", "idle");
 
 /** A state the app can be in: the export wait is only ever said of a job that waits. The model downloads
  *  in a minority of states, and files are left in most, so most have a progress line to check. */
