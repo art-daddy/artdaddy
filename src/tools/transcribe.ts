@@ -46,6 +46,13 @@ import { backendOfRun, recordSpeechRun } from "./speechPace";
 import { padded, playedSpan, spanWindows } from "./speechSpans";
 import { CAP_S } from "./speechPlan";
 import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
+import {
+  segmentFollowsWords,
+  settleWords,
+  tokenOnSound,
+  wordTimesArgs,
+  wordTimesOn,
+} from "./speechWordTimes";
 import { exportFlag } from "../api/exportFlags";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
@@ -138,6 +145,9 @@ interface WhisperToken {
   text?: string;
   offsets?: { from?: number; to?: number };
   p?: number;
+  /** The engine's own time for this token's sound, in units of 10 ms, from a run with `-dtw`; -1 where none was
+   *  made (a special token, or a run without it). */
+  t_dtw?: number;
 }
 interface WhisperSeg {
   offsets?: { from?: number; to?: number };
@@ -260,14 +270,81 @@ function cutWords(text: string, pieces: Piece[]): Cut[] | null {
 
 /** Reshape whisper.cpp `-ojf` JSON into the canonical transcript schema. Words
  *  are reconstructed by merging BPE tokens (a leading space starts a new word).
- *  A segment's text is kept whole; its annotations never become words. */
-export function parseWhisperCppJson(raw: string): ParsedTranscript {
-  return parseWhisperCpp(JSON.parse(raw) as WhisperCppJson);
+ *  A segment's text is kept whole; its annotations never become words.
+ *  `options.wordTimes` is for tests: whether the engine's own word times are used (see
+ *  {@link parseWhisperCpp}); absent, it is whether the behaviour is in use right now. */
+export function parseWhisperCppJson(
+  raw: string,
+  options: { wordTimes?: boolean } = {},
+): ParsedTranscript {
+  return parseWhisperCpp(JSON.parse(raw) as WhisperCppJson, options.wordTimes ?? wordTimesOn());
 }
 
 /** {@link parseWhisperCppJson} for whisper's JSON already read: what the app cache holds, so a
- *  change to how words are cut applies to every transcript already made. */
-function parseWhisperCpp(data: WhisperCppJson): ParsedTranscript {
+ *  change to how words are cut applies to every transcript already made.
+ *
+ *  With `wordTimes` the words are on the engine's own times for their sounds (speechWordTimes.ts), when the
+ *  JSON holds any: a token with a usable `t_dtw` is moved onto it, and the words are then put in order. Without it,
+ *  or for a JSON with no usable time (a run made without `-dtw`), this is exactly what 0.27.0 made of the JSON,
+ *  for any JSON: that is what makes turning the behaviour off a way back for transcripts already kept. */
+function parseWhisperCpp(
+  data: WhisperCppJson,
+  wordTimes: boolean = wordTimesOn(),
+): ParsedTranscript {
+  const onSound = wordTimes ? onSoundClock(data) : null;
+  return onSound ? settleTranscript(parseStoredTimes(onSound)) : parseStoredTimes(data);
+}
+
+/** `data` with every token that has a usable sound time moved onto it, or null when none has. A copy: the JSON is
+ *  what the app cache holds and every later parse reads it again, so it is never changed here. The defaults for a
+ *  token's stored times are those of {@link parseStoredTimes}. */
+function onSoundClock(data: WhisperCppJson): WhisperCppJson | null {
+  let moved = false;
+  const transcription = (data.transcription ?? []).map((seg) => {
+    const segFrom = seg.offsets?.from ?? 0;
+    const tokens = seg.tokens?.map((tok) => {
+      if (isSpecialToken(tok.text ?? "")) return tok;
+      const from = tok.offsets?.from ?? segFrom;
+      const at = tokenOnSound({ from, to: tok.offsets?.to ?? from }, tok.t_dtw);
+      if (!at) return tok;
+      moved = true;
+      return { ...tok, offsets: at };
+    });
+    return tokens ? { ...seg, tokens } : seg;
+  });
+  return moved ? { ...data, transcription } : null;
+}
+
+/** The words of a transcript parsed from times that moved with the sound, put in order and given their segments'
+ *  bounds (the rules are in speechWordTimes.ts). Changes `parsed`, which the caller has just made. */
+function settleTranscript(parsed: ParsedTranscript): ParsedTranscript {
+  const spans = settleWords(
+    parsed.words.map((w) => ({ start: w.start_seconds, end: w.end_seconds })),
+  );
+  parsed.words.forEach((w, i) => {
+    w.start_seconds = spans[i].start;
+    w.end_seconds = spans[i].end;
+    w.start_timestamp = fmtTimestampPrecise(w.start_seconds);
+    w.end_timestamp = fmtTimestampPrecise(w.end_seconds);
+  });
+  let duration = parsed.duration_seconds;
+  for (const seg of parsed.segments) {
+    const at = segmentFollowsWords(
+      { start: seg.start_seconds, end: seg.end_seconds },
+      seg.words.map((w) => ({ start: w.start_seconds, end: w.end_seconds })),
+    );
+    seg.start_seconds = at.start;
+    seg.end_seconds = at.end;
+    seg.start_timestamp = fmtTimestamp(at.start);
+    seg.end_timestamp = fmtTimestamp(at.end);
+    duration = Math.max(duration, at.end);
+  }
+  parsed.duration_seconds = duration;
+  return parsed;
+}
+
+/** The transcript of whisper's JSON read for the times it stores, as 0.27.0 read every JSON. */
+function parseStoredTimes(data: WhisperCppJson): ParsedTranscript {
   const trans = data.transcription ?? [];
   const language = data.result?.language ?? null;
   const segments: SegPayload[] = [];
@@ -988,7 +1065,10 @@ function scratchToken(): string {
 }
 
 /** whisper's JSON for a window extracted on its own starts at 0; move every offset onto the
- *  SOURCE timeline, where `-ot` on the whole file would have put it. */
+ *  SOURCE timeline, where `-ot` on the whole file would have put it. The engine's own word times
+ *  (`t_dtw`, units of 10 ms, -1 where none was made) are on the window's clock too and move with them:
+ *  left behind, every one of a window that starts 30 s in or later would be a whisper window away from its
+ *  token, and an earlier one would be wrong by the window's start. */
 function shiftWhisperJson(data: WhisperCppJson, shiftMs: number): void {
   const move = (o?: { from?: number; to?: number }): void => {
     if (!o) return;
@@ -997,7 +1077,10 @@ function shiftWhisperJson(data: WhisperCppJson, shiftMs: number): void {
   };
   for (const seg of data.transcription ?? []) {
     move(seg.offsets);
-    for (const tok of seg.tokens ?? []) move(tok.offsets);
+    for (const tok of seg.tokens ?? []) {
+      move(tok.offsets);
+      if (typeof tok.t_dtw === "number" && tok.t_dtw >= 0) tok.t_dtw += shiftMs / 10;
+    }
   }
 }
 
@@ -1283,23 +1366,29 @@ async function runWhisperOnce(
         });
         if (admission?.plan === "ondemand") throw new SpeechDeferredError(admission);
       }
-      const { engine, release } = await engineFor(ctx, args, meta, {
-        purpose,
-        label: fileLabel(src),
-        work: [
-          {
-            source: src,
-            language: normLanguage(language),
-            window: win.key === "" ? null : { start, end },
-          },
-        ],
-        spanS,
-        threads: Number(whisperThreads()) || null,
-        // Only a whole file that the background started by itself can be stopped for being too slow:
-        // what a request asked for (a look, captions, get_transcript) runs until it is done or Cancelled.
-        liveStop: ctx.background === true && win.key === "",
-        several: false,
-      });
+      const { engine, release } = await engineFor(
+        ctx,
+        args,
+        meta,
+        {
+          purpose,
+          label: fileLabel(src),
+          work: [
+            {
+              source: src,
+              language: normLanguage(language),
+              window: win.key === "" ? null : { start, end },
+            },
+          ],
+          spanS,
+          threads: Number(whisperThreads()) || null,
+          // Only a whole file that the background started by itself can be stopped for being too slow:
+          // what a request asked for (a look, captions, get_transcript) runs until it is done or Cancelled.
+          liveStop: ctx.background === true && win.key === "",
+          several: false,
+        },
+        size,
+      );
       try {
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
@@ -1406,6 +1495,20 @@ function eitherSignal(
   };
 }
 
+/** What `engineFor` is given to make jobs of: one transcription's meta, or a run over several files' (each file's own
+ *  meta, as the page that started the run wrote them). */
+type JobMeta = TranscriptJobMeta | { kind: "transcripts"; items: TranscriptJobMeta[] };
+
+/** Say on each transcription's meta whether this launch carries the engine's word times, before the job is made from
+ *  it: the page that ran it and a page that takes it over after a crash both read it when the words are kept. It is
+ *  written only when true, so a launch without them leaves the meta exactly as 0.27.0 made it. */
+function noteWordTimes(meta: JobMeta, on: boolean): void {
+  for (const m of meta.kind === "transcripts" ? meta.items : [meta]) {
+    if (on) m.wordTimes = true;
+    else delete m.wordTimes;
+  }
+}
+
 /** The engine for one run of whisper-cli with `args`, and the way to let go of it afterwards.
  *
  *  In the app, whisper is a job of the app process: a crash of the page neither stops it nor loses its
@@ -1423,8 +1526,10 @@ function eitherSignal(
 async function engineFor(
   ctx: ClientToolContext,
   args: string[],
-  meta: object,
+  meta: JobMeta,
   info: RunInfo,
+  /** The model the run is made with: the engine's word times are measured for one model only. */
+  size: string,
 ): Promise<{ engine: () => Promise<EngineRun>; release: () => Promise<void> }> {
   const sup = await jobSupervisor();
   const jobs: string[] = [];
@@ -1433,7 +1538,9 @@ async function engineFor(
   const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
     const id = `whisper-${scratchToken()}`;
     jobs.push(id);
-    const run = cpuOnly ? [...args, "-ng"] : args;
+    const wordTimes = wordTimesArgs({ size, cpuOnly });
+    noteWordTimes(meta, wordTimes.length > 0);
+    const run = cpuOnly ? [...args, "-ng", ...wordTimes] : args;
     const own = new AbortController();
     const both = eitherSignal(ctx.signal, own.signal);
     const watch = watchSpeechRun({
@@ -1546,6 +1653,10 @@ interface TranscriptJobMeta {
   label?: string;
   purpose?: SpeechPurpose;
   spanS?: number | null;
+  /** True when the engine was launched with the word-times arguments (speechWordTimes.ts), so its output is read
+   *  the way it was made, by the page that ran it and by one that adopts it. LOCAL, like the three above: written
+   *  only when true, so a launch without them leaves the meta as it was, and never sent anywhere. */
+  wordTimes?: boolean;
 }
 
 /** A run of whisper made into its transcript and kept: the one finish, for the page that ran it
@@ -1615,7 +1726,8 @@ async function finishWhisper(
     )
       throw new WeakDecodeError(detected, meta.beam);
     shiftWhisperJson(data, meta.shiftMs);
-    const parsed = parseWhisperCpp(data);
+    // Read the way the run was made, and as 0.27.0 read it when the behaviour has been switched off since.
+    const parsed = parseWhisperCpp(data, meta.wordTimes === true && wordTimesOn());
     // Kept outside the project, so it is kept even when the project closed while whisper ran.
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
     if (!batch) {
@@ -2094,6 +2206,7 @@ async function runTogether(
           // Each file's segments restart at 0: the run has no one position to read a speed from.
           several: true,
         },
+        size,
       );
       const missed: number[] = [];
       try {
