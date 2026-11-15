@@ -140,7 +140,7 @@ describe("a token's own sound time", () => {
           expect(typeof value).toBe("number");
           expect(Number.isFinite(value)).toBe(true);
           expect(value as number).toBeGreaterThanOrEqual(0);
-          expect(moved.from).toBe(Math.round((value as number) * 10));
+          expect(moved.from === Math.round((value as number) * 10)).toBe(true);
           expect(moved.to - moved.from).toBe(length);
           expect(Math.abs(moved.from - from)).toBeLessThanOrEqual(WINDOW_MS);
         },

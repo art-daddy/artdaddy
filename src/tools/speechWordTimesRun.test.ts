@@ -329,6 +329,45 @@ describe("one run over several files", () => {
   });
 });
 
+describe("what a launch records on its job", () => {
+  async function jobOf(processor: boolean, flag = true) {
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    if (processor) hold();
+    configure(true, flag);
+    const rig = engineRig();
+    jobs.onStart = (spec) =>
+      void setTimeout(() => {
+        const out = `${spec.args[spec.args.indexOf("-of") + 1]}.json`;
+        rig.files.add(out);
+        rig.texts.set(out, spec.args.includes("-dtw") ? CLIP : CLIP_NO_DTW);
+        jobs.exit(spec.id, 0, "");
+      }, 0);
+    const transcript = await runWhisper(rig.ctx(), freshSource(), "small", "en");
+    return { spec: jobs.submitted[0], transcript };
+  }
+
+  it("carries nothing and records nothing for a launch on the graphics chip, with both switches on", async () => {
+    const { spec, transcript } = await jobOf(false);
+    expect(spec.args).not.toContain("-ng");
+    expect(spec.args).not.toContain("-dtw");
+    expect(spec.args).not.toContain("-nfa");
+    expect(spec.meta).not.toHaveProperty("wordTimes");
+    expect(transcript.words[0].start_seconds).toBe(STORED);
+  });
+
+  it("records it on the job of a launch on the processor, and only then", async () => {
+    const on = await jobOf(true);
+    expect(on.spec.args.slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
+    expect(on.spec.meta).toMatchObject({ wordTimes: true });
+    expect(on.transcript.words[0].start_seconds).toBe(SOUND);
+    const off = await jobOf(true, false);
+    expect(off.spec.args.slice(-1)).toEqual(["-ng"]);
+    expect(off.spec.meta).not.toHaveProperty("wordTimes");
+    expect(off.transcript.words[0].start_seconds).toBe(STORED);
+  });
+});
+
 describe("a run a crashed page left in the app process is read the way it was made", () => {
   /** The first page launches a run on the processor (the chip is held off) and dies; the next page adopts it. */
   async function adopted(
