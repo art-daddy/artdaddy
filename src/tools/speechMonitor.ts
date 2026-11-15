@@ -45,12 +45,14 @@ const KEEP_TAIL = 160;
 // run's ACTIVE time and not the clock's: the clock goes on while a laptop sleeps or the app is frozen, and
 // a run killed for that loses all its work and teaches the pace a lie (F1). Each of these says what it is
 // for; changing one changes how soon a slow run is stopped, and how sure the app must be before it kills one.
-/** The most that the time between two outputs (or from the launch to the first) counts as the engine's work.
- *  A longer stretch is a sleep or a stall of the app, or a window so slow that the PC is far over the cap
- *  anyway: either way it is not trusted. It counts for this much, the speed is read again from after it,
- *  and the run's pace is not kept if it is stopped (a pace sample with a gap in it could be several times
- *  too slow). A PC that takes longer than this for each 30 s of audio (over 4 s of work per second) is
- *  therefore never read, and never stopped by this check. */
+/** The longest that the time between two outputs (or from the launch to the first) is trusted as the engine's work.
+ *  A longer stretch is a sleep or a stall of the app, or a window so slow that the PC is far over the cap anyway:
+ *  either way it is not trusted. It counts for NOTHING (a sleep adds no time to what the run is projected to take:
+ *  counted for any of it, a run that fits in twice the cap was stopped by a sleep early in it on the first real
+ *  capture, whose early windows run slower than its average, 15 Nov), the speed is read again from after it, and
+ *  the run's pace is not kept if it is stopped (a pace sample with a gap in it could be several times too slow).
+ *  A PC that takes longer than this for each 30 s of audio (over 4 s of work per second) is therefore never read,
+ *  and never stopped by this check. */
 export const MAX_GAP_S = 120;
 /** Audio the speed must rest on before the check may act: three decoded windows, not one (the first window
  *  alone, which also pays the engine's start-up, is not a speed). */
@@ -94,8 +96,9 @@ export interface MonitorSnapshot {
 export interface LiveReading {
   /** How many outputs with segments have arrived: a reading is new only when this has grown. */
   bursts: number;
-  /** Seconds the run has been ACTIVE: the time between its outputs, each stretch counted for at most
-   *  {@link MAX_GAP_S}. The same as the time since launch when no stretch was that long. */
+  /** Seconds the run has been ACTIVE: the time between its outputs, each stretch counted whole unless it was
+   *  longer than {@link MAX_GAP_S} (a sleep or a stall), which counts for nothing. The same as the time since
+   *  launch when no stretch was that long. */
   activeS: number;
   /** Seconds of audio the speed below rests on: since the first burst, or since the last stretch that was
    *  too long to be trusted as work. */
@@ -157,15 +160,19 @@ export function createSpeechMonitor(options: MonitorOptions): SpeechMonitor {
   let liveBase: Point | null = null;
 
   /** An output with segments arrived at `now`: count the time since the one before it. True when that
-   *  stretch was too long to be trusted as work. A clock that went back adds nothing. */
+   *  stretch was too long to be trusted as work, and then it counts for NOTHING: a sleep or a stall is not the
+   *  engine's work, and a run is stopped on what the engine did, so an untrusted stretch can only make a stop
+   *  later, never sooner. A clock that went back adds nothing. */
   const tick = (now: number): boolean => {
     const gap = now - prevAt;
     prevAt = now;
     if (!(gap > 0)) return false;
-    activeMs += Math.min(gap, MAX_GAP_S * 1000);
-    if (gap <= MAX_GAP_S * 1000) return false;
-    clamped = true;
-    return true;
+    if (gap > MAX_GAP_S * 1000) {
+      clamped = true;
+      return true;
+    }
+    activeMs += gap;
+    return false;
   };
 
   const scan = (text: string, now: number): number => {

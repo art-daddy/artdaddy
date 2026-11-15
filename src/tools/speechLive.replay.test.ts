@@ -119,10 +119,11 @@ function windowStretchesMs(c: RunCapture): number[] {
   return kept.map((t, i) => t - (i === 0 ? 0 : kept[i - 1]));
 }
 
-/** The run's active time at its last output, by the rule the check is built on: a stretch counts for at most
- *  MAX_GAP_S (a sleep or a stall is not the engine's work). Plain arithmetic over the capture's times. */
+/** The run's active time at its last output, by the rule the check is built on: a stretch counts whole, unless it
+ *  is longer than MAX_GAP_S (a sleep or a stall is not the engine's work), and then it counts for nothing. Plain
+ *  arithmetic over the capture's times. */
 function handActiveS(c: RunCapture): number {
-  return stretchesMs(c).reduce((n, g) => n + Math.min(Math.max(g, 0), MAX_GAP_S * 1000), 0) / 1000;
+  return stretchesMs(c).reduce((n, g) => n + (g > MAX_GAP_S * 1000 ? 0 : Math.max(g, 0)), 0) / 1000;
 }
 
 /** The judge of the live check, written again from its rule and not from its code: stop at the first output
@@ -401,16 +402,16 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     const at = burstTimes[Math.floor(burstTimes.length / 2)];
     const GAP_MS = 5 * 60_000;
 
-    it("is not a stop for a fast run, is counted for MAX_GAP_S of the run's time, and the speed after it is the speed of what came after it", () => {
+    it("is not a stop for a fast run, is not counted in the run's time, and the speed after it is the speed of what came after it", () => {
       const slept = withGap(cap, at, GAP_MS);
       const replay = replayMonitor(slept);
       expect(replay.stoppedAt, "a sleep stopped a run that fits").toBeNull();
       const last = replay.final.live;
       expect(last.clamped).toBe(true);
-      // the run's own time: every stretch counted for at most MAX_GAP_S, worked out from the times
+      // the run's own time: every stretch counted whole, but one longer than MAX_GAP_S counted for nothing, worked out from the times
       expect(last.activeS).toBeCloseTo(handActiveS(slept), 6);
-      expect(last.activeS, "the sleep is not in the run's time past MAX_GAP_S").toBeLessThan(
-        slept.exit.wallMs / 1000 - (GAP_MS / 1000 - MAX_GAP_S) + 1e-6,
+      expect(last.activeS, "the sleep is not in the run's time").toBeLessThan(
+        slept.exit.wallMs / 1000 - GAP_MS / 1000 + 1e-6,
       );
       // the speed after it: the work between the first output after the sleep and the last, per audio second
       const bursts = segmentBursts(slept.chunks);
@@ -420,40 +421,39 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
       expect(last.rate!).toBeCloseTo(after, 9);
     });
 
-    it("does not make a run that is not over the cap into one that is: a sleep adds at most MAX_GAP_S to what it will take", () => {
-      // A run the check lets finish on its own, put to sleep for 5 minutes in its middle: counted whole the sleep
-      // would take it past twice the cap (a stop), counted for MAX_GAP_S it stays under. A real run is not even
-      // (the real capture's first third runs up to 48% slower than its average, so the check projects it too long
-      // early and stops it BY ITSELF from 80% of twice the cap, with no sleep at all): the run is the slowest of the
-      // shares below for which the replay of the capture itself lets it finish, never a number chosen for another
-      // capture. A capture with no such share cannot show a sleep.
-      const share = [0.78, 0.76].find(
-        (s) => replayMonitor(scaleCapture(cap, kFor(cap, s * DOUBLE_CAP_S))).stoppedAt === null,
-      );
+    it("does not make a run that is not over the cap into one that is: a sleep adds nothing to what it will take, wherever in the run it comes", () => {
+      // A run the check lets finish on its own, put to sleep for 5 minutes: counted whole, or for any part of it
+      // that is long enough, the sleep would take it past twice the cap (a stop); counted for nothing it stays under.
+      // A real run is not even (the real capture's first third runs up to 48% slower than its average, so the
+      // check projects it too long early and stops it BY ITSELF from 80% of twice the cap, with no sleep at all):
+      // the run is the slowest of the shares below that the replay of the capture itself lets finish with 4% of
+      // twice the cap to spare, never a number chosen for another capture. A capture with none cannot show a sleep.
+      const lets = (s: number): boolean =>
+        replayMonitor(scaleCapture(cap, kFor(cap, s * DOUBLE_CAP_S))).stoppedAt === null;
+      const share = [0.95, 0.9, 0.85, 0.8, 0.76, 0.72].find((s) => lets(s) && lets(s + 0.04));
       expect(
         share,
-        "the check stops this capture by itself from 76% of twice the cap: it cannot show a sleep (make it more even)",
+        "the check stops this capture by itself below 72% of twice the cap: it cannot show a sleep (make it more even)",
       ).toBeDefined();
       const base = scaleCapture(cap, kFor(cap, share! * DOUBLE_CAP_S));
       expect(replayMonitor(base).stoppedAt, "the premise: the run alone is not stopped").toBeNull();
-      const baseAt = segmentBursts(base.chunks)[Math.floor(stats.bursts * 0.4)].tMs;
-      const slept = withGap(base, baseAt, GAP_MS);
       expect(
-        wallS(slept),
-        "the premise: unclamped, the sleep passes twice the cap",
+        wallS(base) + GAP_MS / 1000,
+        "the premise: counted whole, the sleep passes twice the cap",
       ).toBeGreaterThan(DOUBLE_CAP_S);
-      expect(wallS(base) + MAX_GAP_S, "the premise: clamped, it does not").toBeLessThan(
-        DOUBLE_CAP_S,
-      );
-      expect(
-        replayMonitor(slept).stoppedAt,
-        "the sleep was taken for the engine's work",
-      ).toBeNull();
+      // early, in the middle, late, and right after an output (a sleep is always injected just after one)
+      for (const where of [0.03, 0.05, 0.1, 0.15, 0.3, 0.4, 0.6, 0.75, 0.9]) {
+        const baseAt = segmentBursts(base.chunks)[Math.floor(stats.bursts * where)].tMs;
+        expect(
+          replayMonitor(withGap(base, baseAt, GAP_MS)).stoppedAt,
+          `the sleep after ${where} of the run was taken for the engine's work (the run is ${share} of twice the cap)`,
+        ).toBeNull();
+      }
     });
 
-    it("adds at most MAX_GAP_S to the run's time at every output after it, wherever in the run it comes", () => {
-      // the plain arithmetic of the rule, true of any run whatever its pace: a sleep is not the engine's work past
-      // MAX_GAP_S (the sleep early, in the middle, late, and right after an output)
+    it("takes nothing from the run's time at any output but the one that ends the sleep's stretch, wherever in the run it comes", () => {
+      // the plain arithmetic of the rule, true of any run whatever its pace: a sleep is not the engine's work, so
+      // the run's time after it is the plain run's less the stretch that held the sleep, and never more
       const plain = replayMonitor(cap, { liveStop: false });
       for (const where of [0.02, 0.2, 0.4, 0.6, 0.85, 0.98]) {
         const slept = replayMonitor(
@@ -465,8 +465,10 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
         expect(slept.steps).toHaveLength(plain.steps.length);
         plain.steps.forEach((step, i) => {
           const extra = slept.steps[i].live.activeS - step.live.activeS;
-          expect(extra, `output ${i}, sleep after ${where}`).toBeLessThanOrEqual(MAX_GAP_S + 1e-6);
-          expect(extra, `output ${i}, sleep after ${where}`).toBeGreaterThanOrEqual(-1e-6);
+          expect(extra, `output ${i}, sleep after ${where}`).toBeLessThanOrEqual(1e-6);
+          expect(extra, `output ${i}, sleep after ${where}`).toBeGreaterThanOrEqual(
+            -MAX_GAP_S - 1e-6,
+          );
         });
       }
     });

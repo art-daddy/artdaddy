@@ -359,13 +359,13 @@ describe("the run's own time, which the live check reads instead of the clock's 
     expect(m.live()).toMatchObject({ bursts: 3, activeS: 25 + 30 + MAX_GAP_S, clamped: false });
   });
 
-  it("counts a stretch longer than MAX_GAP_S for MAX_GAP_S, says so, and reads the speed again from after it", () => {
+  it("counts a stretch longer than MAX_GAP_S for nothing, says so, and reads the speed again from after it", () => {
     const m = createSpeechMonitor({ launchedAt: 0, spanS: 3600 });
     m.feed(line(0, 30), 25_000);
     m.feed(line(30, 60), 55_000);
     m.feed(line(60, 90), 55_000 + 1_800_000); // half an hour: a sleep
     const after = m.live();
-    expect(after.activeS).toBeCloseTo(25 + 30 + MAX_GAP_S, 9);
+    expect(after.activeS, "the sleep is not the engine's work").toBeCloseTo(25 + 30, 9);
     expect(after.clamped).toBe(true);
     expect(after, "the speed of the stretch with the gap in it is not read").toMatchObject({
       audioS: 0,
@@ -384,7 +384,7 @@ describe("the run's own time, which the live check reads instead of the clock's 
   it("counts the stretch from the launch to the first output like any other: a long start-up is not trusted either", () => {
     const m = createSpeechMonitor({ launchedAt: 0, spanS: 600 });
     m.feed(line(0, 30), 400_000);
-    expect(m.live()).toMatchObject({ activeS: MAX_GAP_S, clamped: true });
+    expect(m.live()).toMatchObject({ activeS: 0, clamped: true });
   });
 
   it("adds nothing for a clock that has gone back, and takes nothing away", () => {
@@ -396,7 +396,7 @@ describe("the run's own time, which the live check reads instead of the clock's 
     expect(m.live().activeS).toBeCloseTo(50, 9);
   });
 
-  it("is only ever the same as the clock's time or less, never more than MAX_GAP_S for an output, and never goes back", () => {
+  it("is only ever the same as the clock's time or less, never goes back, and never counts a stretch longer than MAX_GAP_S", () => {
     fc.assert(
       fc.property(
         fc.array(fc.integer({ min: -5_000, max: 400_000 }), { minLength: 1, maxLength: 40 }),
@@ -410,6 +410,9 @@ describe("the run's own time, which the live check reads instead of the clock's 
             const live = m.live();
             expect(live.activeS).toBeGreaterThanOrEqual(before);
             expect(live.activeS).toBeLessThanOrEqual((i + 1) * MAX_GAP_S + 1e-9);
+            // each output adds its own stretch whole or nothing: never a part of a long one
+            const added = live.activeS - before;
+            expect(added === 0 || added <= MAX_GAP_S + 1e-9).toBe(true);
             before = live.activeS;
           });
         },
@@ -569,7 +572,7 @@ describe("a run as a whole: the check and the monitor together (F1)", () => {
   // Every window is under MAX_GAP_S of work, so no stretch is long unless the PC slept.
   const rates = fc.double({ min: 0.2, max: 3.5, noNaN: true });
 
-  it("never stops a run that fits in twice the cap, whatever pauses it had: each pause adds at most MAX_GAP_S to what the run is projected to take", () => {
+  it("never stops a run that fits in twice the cap, whatever pauses it had: a pause adds nothing to what the run is projected to take", () => {
     fc.assert(
       fc.property(
         rates,
@@ -581,14 +584,27 @@ describe("a run as a whole: the check and the monitor together (F1)", () => {
           const windows = Math.ceil(spanS / 30);
           const pauses = new Map<number, number>();
           long.forEach((extra, i) => pauses.set((where[i] ?? 0) % windows, extra));
-          // each pause adds at most 120 s to what the run is projected to take (the number is MAX_GAP_S: it is
-          // written out here so that raising it is a decision this test makes somebody take)
-          fc.pre(startupS + rate * spanS + 120 * pauses.size < 2 * 600 - 1);
+          // a pause is a stretch longer than MAX_GAP_S: it counts for nothing, so the run is projected to take
+          // what it takes (the run's own time is its start-up and its work: no term for the pauses)
+          fc.pre(startupS + rate * spanS < 2 * 600 - 1);
           expect(steadyRun({ rate, startupS, spanS, pauses }).stoppedAt).toBeNull();
         },
       ),
       { numRuns: 300 },
     );
+  });
+
+  it("does not stop a run at 95% of twice the cap because the PC slept for five minutes in it (a pause counted for any of its length would)", () => {
+    // 1.9 s of work for each second of audio, 600 s of audio, 20 s to begin: 1,160 s in all, under twice the cap
+    // (1,200 s) by 40 s; the same run with a 120 s pause counted would be projected at 1,280 s
+    const run = { rate: 1.9, startupS: 20, spanS: 600 };
+    expect(run.startupS + run.rate * run.spanS).toBeLessThan(1200);
+    expect(steadyRun({ ...run, pauses: new Map() }).stoppedAt).toBeNull();
+    for (const window of [1, 4, 10, 15, 19])
+      expect(
+        steadyRun({ ...run, pauses: new Map([[window, 300]]) }).stoppedAt,
+        `a sleep before window ${window}`,
+      ).toBeNull();
   });
 
   it("stops a run that is over twice the cap, with no pauses, at the first burst 20 s of the run's time after its first reading, and never before", () => {
