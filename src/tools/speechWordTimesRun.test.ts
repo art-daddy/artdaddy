@@ -164,7 +164,8 @@ describe("which launches of the engine carry word times", () => {
 
   it("gives a model other than the one measured none of them, on the processor with both on", async () => {
     const models = WHISPER_MODELS as Record<string, unknown>;
-    models.tiny = WHISPER_MODELS.small;
+    // The manifest names a model's file, so a `tiny` that borrows `small`'s spec must say which file it is.
+    models.tiny = { ...WHISPER_MODELS.small, file: "ggml-tiny.bin" };
     try {
       const got = await transcribed(
         { gate: true, flag: true, processor: true },
