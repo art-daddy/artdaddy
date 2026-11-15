@@ -885,6 +885,36 @@ describe("opacityWindow", () => {
       {
         numRuns: 250,
         examples: [
+          // found by the real exports of the re-proof (16 Nov, closure G28), W1: a hold at 1 and a one-frame dip to 0.5 on key frame 97 of a clip that starts at project frame 158 (50 fps): at ffmpeg's own reading of project frame 255 (255 * (1 / 50), not 255 / 50) the curve is 0.5
+          [
+            {
+              fps: 50,
+              tin: 158,
+              len: 120,
+              keys: [
+                { t: 0, v: 1, ease: "hold" },
+                { t: 97, v: 0.5, ease: "ease-in" },
+                { t: 98, v: 1 },
+                { t: 103, v: 0.2 },
+              ],
+            },
+          ],
+          // ... W2: six keys ending at 1 after values above 1 (30 fps, clip from project frame 166): project frame 399 has the factor 0.9999999999999999 at the real reading
+          [
+            {
+              fps: 30,
+              tin: 166,
+              len: 310,
+              keys: [
+                { t: 83, v: 0.999999, ease: "ease-out" },
+                { t: 139, v: 0.44661795720458036, ease: "ease-in" },
+                { t: 142, v: 0.9867503125220538, ease: "ease-in-out" },
+                { t: 145, v: 1.0910286512225869, ease: "hold" },
+                { t: 227, v: 1.1138425134122374, ease: "ease-out" },
+                { t: 233, v: 1, ease: "linear" },
+              ],
+            },
+          ],
           // found by the class check (16 Nov), clean repeat on the tip: two keys, an eased fall to a value that prints as 1
           [
             {
@@ -942,6 +972,68 @@ describe("opacityWindow", () => {
       },
     );
   });
+
+  // The two curves on which REAL exports showed the window of 4b56e246 (and f0ad3c93) wrong (16 Nov re-proof, closure G28). ffmpeg's geq reads the time of frame k as k * (1 / fps), not k / fps (tested with the app's ffmpeg on 11 rates), and
+  // truncates (255 * 0.9999999999999999 is 254): the old window decided from k / fps and widened each marked frame by one, so an isolated frame that needs the filter only at the real reading was dropped. This test reads the frame time ONLY the way ffmpeg does,
+  // so it does not depend on the readings the property oracle tries.
+  const REAL_READING_WITNESSES: Array<{
+    name: string;
+    c: OpacityCase;
+    frame: number;
+    factor: number;
+  }> = [
+    {
+      name: "W1: a one-frame dip to 0.5 on project frame 255 (a clip from frame 158 at 50 fps, hold then ease-in): 0.27.0 draws that frame at half opacity",
+      c: {
+        fps: 50,
+        tin: 158,
+        len: 120,
+        keys: [
+          { t: 0, v: 1, ease: "hold" },
+          { t: 97, v: 0.5, ease: "ease-in" },
+          { t: 98, v: 1 },
+          { t: 103, v: 0.2 },
+        ],
+      },
+      frame: 255,
+      factor: 0.5,
+    },
+    {
+      name: "W2: the last key of a 30 fps curve (a clip from frame 166): project frame 399 has the factor 0.9999999999999999, alpha 254 instead of 255",
+      c: {
+        fps: 30,
+        tin: 166,
+        len: 310,
+        keys: [
+          { t: 83, v: 0.999999, ease: "ease-out" },
+          { t: 139, v: 0.44661795720458036, ease: "ease-in" },
+          { t: 142, v: 0.9867503125220538, ease: "ease-in-out" },
+          { t: 145, v: 1.0910286512225869, ease: "hold" },
+          { t: 227, v: 1.1138425134122374, ease: "ease-out" },
+          { t: 233, v: 1, ease: "linear" },
+        ],
+      },
+      frame: 399,
+      factor: 0.9999999999999999,
+    },
+  ];
+  for (const w of REAL_READING_WITNESSES)
+    it(`${w.name}: the window is open on every frame that needs the filter at ffmpeg's own reading of the frame time`, () => {
+      const run = opacityRun(w.c);
+      const factor = reference(run.full);
+      const evaluate = run.real === null ? null : reference(run.real);
+      const open = (T: number) => evaluate === null || Math.abs(evaluate({ T })) >= 0.5;
+      const closedAndNeeded: number[] = [];
+      for (let k = run.first; k < run.end; k += 1) {
+        const T = k * (1 / run.fps);
+        if (factor({ T }) !== 1 && !open(T)) closedAndNeeded.push(k);
+      }
+      expect(closedAndNeeded, `window ${run.real}`).toEqual([]);
+      // the witness frame: the quotient reading says 1 (which is what the old window believed), the real reading does not
+      expect(factor({ T: w.frame / run.fps })).toBe(1);
+      expect(factor({ T: w.frame * (1 / run.fps) })).toBe(w.factor);
+      expect(open(w.frame * (1 / run.fps))).toBe(true);
+    });
 
   it("walks every easing the contract allows, rising to 1 and falling from 1, and the window closes once the curve is at 1", () => {
     for (const ease of [...EASINGS, undefined, "not-an-easing"])
