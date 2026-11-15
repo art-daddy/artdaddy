@@ -602,6 +602,25 @@ const fadeCase: fc.Arbitrary<FadeCase> = fc.record({
 
 const edgesOf = (c: FadeCase) => Number(c.fin > 0) + Number(c.fout > 0);
 
+/** The whole frames of the clip on which a window is closed at the frame's own time (read the way ffmpeg reads `enable`); a null window closes none. */
+function closedFrames(run: FadeRun, window: string | null): number {
+  if (window === null) return 0;
+  const open = reference(window);
+  let n = 0;
+  for (let k = run.tin; k < run.tin + run.len; k++)
+    if (Math.abs(open({ T: k / run.fps })) < 0.5) n++;
+  return n;
+}
+
+/** A fade whose frame counts leave exactly `closed` whole frames between the two ramps (the first frame at or past a ramp's end is a frame it still touches), of each shape. */
+function closedWalk(fps: number, tin: number, closed: number): Record<string, FadeCase> {
+  return {
+    "out only": { fps, tin, len: closed + 3, fin: 0, fout: 3 },
+    "in only": { fps, tin, len: closed + 3 + 1, fin: 3, fout: 0 },
+    both: { fps, tin, len: closed + 3 + 3 + 1, fin: 3, fout: 3 },
+  };
+}
+
 describe("fadeWindow", () => {
   it("is open wherever the fade factor is not 1 (in only, out only, both, ramps that overlap, a fade longer than the clip) and closed in between", () => {
     fc.assert(
@@ -614,10 +633,22 @@ describe("fadeWindow", () => {
         const a = auditFade(run, run.real);
         expect(a, JSON.stringify({ c, window: run.real })).toMatchObject({ missed: [], far: [] });
         expect(a.idle, `${JSON.stringify(c)} ${run.real}`).toBeLessThanOrEqual(2 * edgesOf(c));
+        // a window is worth writing only when it closes two whole frames or more (a declined window is today's filter, and the tightness above bounds what it leaves idle)
+        if (run.real !== null)
+          expect(
+            closedFrames(run, run.real),
+            `${JSON.stringify(c)} ${run.real}`,
+          ).toBeGreaterThanOrEqual(2);
       }),
       {
         numRuns: 150,
         examples: [
+          // found by the real pre-push hook (16 Nov): no fade-in and a fade-out that leaves two frames at full opacity, so three frames have factor 1; the window was declined and all three stayed open
+          [{ fps: 30, tin: 0, len: 419, fin: 0, fout: 417 }],
+          [{ fps: 24, tin: 0, len: 4, fin: 0, fout: 2 }],
+          // its mirror, found by the walk below: a fade-in with one whole frame left closed was given a window when its clip's end printed a hair above its frame
+          [{ fps: 12, tin: 0, len: 5, fin: 3, fout: 0 }],
+          [{ fps: 12, tin: 0, len: 4, fin: 0, fout: 3 }],
           [{ fps: 30, tin: 0, len: 1800, fin: 30, fout: 30 }],
           [{ fps: 30, tin: 30, len: 600, fin: 15, fout: 0 }],
           [{ fps: 30, tin: 30, len: 600, fin: 0, fout: 15 }],
@@ -637,6 +668,23 @@ describe("fadeWindow", () => {
     expect(fadeWindow(0, 60, 1, 1, 30)).toBe("lte(t,1.016667)+gte(t,58.983333)");
     expect(fadeWindow(0, 60, 1, 0, 30)).toBe("lte(t,1.016667)");
     expect(fadeWindow(0, 60, 0, 1, 30)).toBe("gte(t,58.983333)");
+  });
+
+  it("writes a window exactly when two whole frames stay closed, decided from the frame counts alone, wherever the clip's start prints (every start frame of one period of each rate)", () => {
+    for (const fps of [12, 24, 25, 30, 48, 50, 60, 120])
+      for (let tin = 0; tin < fps; tin++)
+        for (const closed of [0, 1, 2, 3, 4])
+          for (const [shape, c] of Object.entries(closedWalk(fps, tin, closed))) {
+            const run = fadeRun(c);
+            const where = `${shape} ${JSON.stringify(c)} ${run.real}`;
+            const a = auditFade(run, run.real);
+            expect(a, where).toMatchObject({ missed: [], far: [] });
+            expect(a.idle, where).toBeLessThanOrEqual(2 * edgesOf(c));
+            expect(
+              run.real !== null,
+              `${where}: ${closed} whole frames stay closed, so a window is written exactly when that is 2 or more`,
+            ).toBe(closed >= 2);
+          }
   });
 
   const FADE_MUTANTS: Record<string, (run: FadeRun) => string | null> = {

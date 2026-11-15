@@ -166,9 +166,10 @@ export function fadeWindow(
     const margin = 0.5 / fps;
     const inEdge = from + fin + margin;
     const outEdge = to - fout - margin;
-    const closedFrom = hasIn ? inEdge : from;
-    const closedTo = hasOut ? Math.min(outEdge, to) : to;
-    // the whole frames strictly between the two edges, inside the clip
+    // The whole frames the window closes lie strictly between its two edges, each half a frame past a ramp's end. A side without a ramp has no edge: its bound sits half a frame
+    // outside the clip, so the clip's own first (last) frame counts, and a time that prints a hair above or below its frame cannot move the count (a bound AT a frame is decided by rounding).
+    const closedFrom = hasIn ? inEdge : from - margin;
+    const closedTo = hasOut ? outEdge : to - margin;
     if (Math.ceil(closedTo * fps) - Math.floor(closedFrom * fps) - 1 < MIN_CLOSED_FRAMES)
       return null;
     const parts: string[] = [];
