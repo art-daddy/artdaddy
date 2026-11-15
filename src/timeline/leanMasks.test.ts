@@ -20,8 +20,20 @@ function bumped(x: number, ulps: number): number {
   return view.getFloat64(0);
 }
 
+/** True when x * x is exactly representable (an independent test from the product's: the exact square of the 53-bit significand has at most 53 significant bits), so every libm returns it exactly. */
+function exactSquare(x: number): boolean {
+  if (x === 0 || x === 1) return true;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const bits = view.getBigUint64(0);
+  const significand = (bits & 0xfffffffffffffn) | 0x10000000000000n;
+  let square = significand * significand;
+  while ((square & 1n) === 0n) square >>= 1n;
+  return square.toString(2).length <= 53;
+}
+
 /** The reference evaluator: the SAME text run as JavaScript (a test may; the product may not), with ffmpeg's functions defined independently.
- *  `powUlps` moves pow(x, 2), x other than 0 and 1, by that many floats: ffmpeg's own pow is the C library's and is one float off from x * x on 0.33 percent of inputs. */
+ *  `powUlps` moves pow(x, 2) by that many floats where x * x is not exact: ffmpeg's own pow is the C library's and is one float off from x * x on 0.33 percent of inputs. */
 function oracle(text: string, powUlps = 0): (T: number, W: number, H: number) => number {
   const fns = {
     _if: (c: number, a: number, b: number) => (c !== 0 ? a : b),
@@ -36,7 +48,7 @@ function oracle(text: string, powUlps = 0): (T: number, W: number, H: number) =>
     ceil: Math.ceil,
     abs: Math.abs,
     pow: (x: number, y: number) =>
-      powUlps !== 0 && y === 2 && x !== 0 && x !== 1 ? bumped(x * x, powUlps) : x ** y,
+      powUlps !== 0 && y === 2 && !exactSquare(x) ? bumped(x * x, powUlps) : x ** y,
     clip: (x: number, lo: number, hi: number) => Math.min(Math.max(x, lo), hi),
   };
   const body = text.replace(/\bif\(/g, "_if(");
@@ -103,6 +115,19 @@ describe("leanExpr: the safe evaluator", () => {
     expect(cRound(2.5)).toBe(3);
     expect(cRound(0.49999999999999994)).toBe(0);
     expect(cRound(-2.4999999999999996)).toBe(-2);
+  });
+
+  it("moves pow(x, 2) by a float when asked, and only where x * x is not exact (ffmpeg's own pow is the C library's: one float off x * x on 0.33 percent of inputs)", () => {
+    const at = (x: number, u: number) => compileLeanExpr("pow(T,2)", u)!({ T: x, W: 1, H: 1 });
+    for (const x of [0, 1, 0.5, 0.25, 0.75, 0.375, 2, 3])
+      for (const u of [-1, 1]) expect(at(x, u), `${x} (${u})`).toBe(x * x);
+    fc.assert(
+      fc.property(fc.double({ min: 1e-100, max: 1, noNaN: true }), (x) => {
+        expect(at(x, 0)).toBe(x * x);
+        for (const u of [-1, 1]) expect(at(x, u)).toBe(exactSquare(x) ? x * x : bumped(x * x, u));
+      }),
+      { numRuns: 2000 },
+    );
   });
 
   it("refuses anything outside its subset without throwing", () => {
@@ -263,20 +288,20 @@ describe("apertureRects: the rectangle is exactly what the geq keeps", () => {
       ],
       W: 3840,
       H: 1920,
-      frame: 24,
+      frame: 28,
     },
     {
       sizeW: [
-        { t: 0, v: 282, ease: "ease-in-out" },
-        { t: 3.6, v: 3760, ease: "linear" },
+        { t: 0, v: 1283, ease: "ease-in" },
+        { t: 0.2, v: 2795, ease: "hold" },
       ],
       sizeH: [
-        { t: 0, v: 3699, ease: "ease-out" },
-        { t: 0.9333333333333333, v: 1912, ease: "ease-in-out" },
+        { t: 0, v: 2281, ease: "ease-in" },
+        { t: 0.2, v: 4969, ease: "hold" },
       ],
-      W: 1440,
-      H: 1296,
-      frame: 54,
+      W: 2304,
+      H: 1920,
+      frame: 5,
     },
     {
       sizeW: [

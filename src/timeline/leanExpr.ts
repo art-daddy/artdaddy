@@ -34,6 +34,16 @@ export function stepUlps(x: number, ulps: number): number {
   return view.getFloat64(0);
 }
 
+/** True when x * x is exactly representable (the rounding error of the product is zero: Dekker's error-free product), so every libm returns it exactly: pow(0.5, 2) is 0.25 on any ffmpeg. */
+function squareIsExact(x: number): boolean {
+  if (!Number.isFinite(x) || Math.abs(x) > 1e100) return false;
+  const p = x * x;
+  const c = 134217729 * x; // 2^27 + 1: Veltkamp's split of x into two halves of 26 bits
+  const hi = c - (c - x);
+  const lo = x - hi;
+  return hi * hi - p + hi * lo + lo * hi + lo * lo === 0;
+}
+
 /** True when the text calls pow: the one function whose last bit is not the same on every ffmpeg (see `compileLeanExpr`). */
 export function usesPow(text: string): boolean {
   return /\bpow\(/.test(text);
@@ -196,13 +206,13 @@ class Parser {
     const name = t.name;
     if (this.peekOp("(")) {
       // pow(x, 2) is the C library's, and not always x * x: ffmpeg's own build differs from x * x by one unit in the last place on 0.33 percent of inputs (rig\tmp\probe\pow_probe.mjs, 2,000,000 values),
-      // and another platform's build may differ elsewhere. pow(0, 2) and pow(1, 2) are exact everywhere. A caller that must not depend on that last bit compiles the text again with powUlps of -1 and +1.
+      // and another platform's build may differ elsewhere. pow(x, 2) is exact everywhere where x * x is representable (0, 1, 0.5, 0.75 ...: squareIsExact). A caller that must not depend on that last bit compiles the text again with powUlps of -1 and +1.
       const spec =
         name === "pow" && this.powUlps !== 0
           ? {
               arity: 2,
               fn: (x: number, y: number) =>
-                y === 2 && x !== 0 && x !== 1
+                y === 2 && x !== 0 && x !== 1 && !squareIsExact(x)
                   ? stepUlps(x * x, this.powUlps)
                   : FUNCTIONS.pow.fn(x, y),
             }
