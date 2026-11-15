@@ -1,10 +1,11 @@
 // The first-word fix: a word's time is the one the engine's own alignment found for its sound (whisper-cli `-dtw`),
 // not the one whisper stores. Why: whisper puts the first word(s) of any audio at the START of that audio, early by
 // the silence in front of them, so `get_transcript` (a window of the clip's span plus a second each side) drops a
-// clip's first words and captions start their first cue early. In the speech study (240 clips, 20 languages, the
-// app's own flags) no first word was early by more than half a second with the alignment, against every clip with
-// about a second of silence without it; the median first word came 0.1 s after the sound began, the word error
-// moved by -0.13 points (inside the noise) and a run took about a tenth longer.
+// clip's first words and captions start their first cue early. In the speech study (170 clips with a quarter of a second
+// to two and a half seconds of silence in front, 20 languages, the app's own flags) no first word was early by more
+// than half a second with the alignment, against every clip with about a second of silence without it; the median
+// first word came 0.1 s after the sound began, the word error moved by -0.13 points (inside the noise) and a run took
+// about a tenth longer.
 //
 // SHIPPED DARK. This release carries the code and does not use it: `WORD_TIMES_SHIPPED` is off, so no launch of the
 // engine is changed and no transcript is read differently, whatever the server says. The remote switch
@@ -14,7 +15,8 @@
 // Not in this slice (each named so nobody assumes it):
 //   * the graphics-chip path: with a chip, `-dtw` needs flash attention off and nobody has measured that, and a
 //     failure there would be read by `isGpuCrash` as a crash of the chip and pause it for hours, so only a launch
-//     with `-ng` carries the arguments;
+//     with `-ng` carries the arguments (a PC whose chip has not crashed launches without `-ng`, even one with no
+//     usable chip, so it runs as in 0.27.0);
 //   * any model other than "small" (the other sizes need another alignment preset; "base" is not measured);
 //   * transcripts already kept are not repaired: one is made again only when its cache entry is gone;
 //   * the `trim` fallback (cut the window's leading silence, add the cut back), `clipWordFrames`' tolerance, any
