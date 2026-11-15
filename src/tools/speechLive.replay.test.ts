@@ -94,6 +94,10 @@ const KILL_LIMIT_MS = 5_000;
 /** The rate the monitor claims must be within this of what the engine's own total says (P1, 4). */
 const RATE_TOLERANCE = 0.2;
 const DOUBLE_CAP_S = 2 * CAP_S;
+/** The largest projection the tests scale a capture to; a run is scalable to it when no window of it, scaled, passes
+ *  MAX_GAP_S. A capture of N even windows scales a window to WORST_PROJECTION_S / N. */
+const WORST_PROJECTION_S = 1.5 * DOUBLE_CAP_S;
+const WINDOWS_NEEDED = 20;
 
 /** How long the run took, for choosing a k: the time to the end of a run nobody stopped. */
 const wallS = (c: RunCapture): number => c.exit.wallMs / 1000;
@@ -103,6 +107,16 @@ const wallS = (c: RunCapture): number => c.exit.wallMs / 1000;
 function stretchesMs(c: RunCapture): number[] {
   const times = segmentBursts(c.chunks).map((b) => b.tMs);
   return times.map((t, i) => t - (i === 0 ? 0 : times[i - 1]));
+}
+
+/** The same in windows: the engine writes a window's segments one after the other, each flushed as its own write,
+ *  so they arrive within a few milliseconds of each other. Outputs less than 50 ms apart are one window's (a real
+ *  window is seconds from the next: a 30 s window decoded at 3 s of work per second of audio takes a minute and a half). */
+function windowStretchesMs(c: RunCapture): number[] {
+  const kept: number[] = [];
+  for (const b of segmentBursts(c.chunks))
+    if (kept.length === 0 || b.tMs - kept[kept.length - 1] >= 50) kept.push(b.tMs);
+  return kept.map((t, i) => t - (i === 0 ? 0 : kept[i - 1]));
 }
 
 /** The run's active time at its last output, by the rule the check is built on: a stretch counts for at most
@@ -199,11 +213,21 @@ describe.each(CAPTURES)("the capture %s", (_name, cap) => {
   const stats = segmentStats(cap.chunks);
   const full = replayMonitor(cap, { liveStop: false });
 
-  it("is a capture the schema accepts, of enough audio for a rate to mean something", () => {
+  it("is a capture the schema accepts, of enough audio for a rate to mean something and for the live stop to be shown", () => {
     expect(validateCapture(cap)).toEqual([]);
-    // ten windows: a run of fewer is one or two bursts, which the monitor refuses to call a speed
-    expect(cap.audioS).toBeGreaterThanOrEqual(300);
+    // twenty windows: the live check must be shown a run over twice the cap by scaling this one, and the shortest
+    // run that can be scaled that far without a window of it passing MAX_GAP_S has about this many
+    expect(cap.audioS).toBeGreaterThanOrEqual(WINDOWS_NEEDED * 30);
     expect(cap.exit.code).toBe(0);
+  });
+
+  it("can be scaled to a PC that takes 1.5 times twice the cap and still be read: no stretch of it, the start-up included, scaled, passes MAX_GAP_S", () => {
+    const worst = Math.max(...windowStretchesMs(cap));
+    const k = kFor(cap, WORST_PROJECTION_S);
+    expect(
+      (worst * k) / 1000,
+      `its longest stretch is ${(worst / 1000).toFixed(1)} s; scaled by ${k.toFixed(1)} it passes MAX_GAP_S: this capture cannot show the live stop (make it longer, or more even)`,
+    ).toBeLessThanOrEqual(MAX_GAP_S);
   });
 
   it("is read live to its last segment, with the bursts the engine printed, and every segment of its final output seen", () => {
@@ -306,7 +330,7 @@ describe.each(CAPTURES)("the capture %s", (_name, cap) => {
         ).toBe(judgeAgain(readings));
         if (projectedS <= 0.7 * DOUBLE_CAP_S) expect(live.stoppedAt).toBeNull();
         // a PC so slow that every window passes MAX_GAP_S is out of the check's reach (tested below)
-        const readable = Math.max(...stretchesMs(slower)) <= MAX_GAP_S * 1000;
+        const readable = Math.max(...windowStretchesMs(slower).slice(1)) <= MAX_GAP_S * 1000;
         if (readable && projectedS >= 1.15 * DOUBLE_CAP_S) expect(live.stoppedAt).not.toBeNull();
       }
     });
@@ -373,7 +397,7 @@ describe.each(CAPTURES)("the capture %s", (_name, cap) => {
 
     it("keeps no pace from a run that had a gap in it, and does from the same run without one", async () => {
       // a slow run, over twice the cap, put to sleep early and stopped by the check some time after
-      const slow = scaleCapture(cap, kFor(cap, 2 * DOUBLE_CAP_S));
+      const slow = scaleCapture(cap, kFor(cap, WORST_PROJECTION_S));
       const early = segmentBursts(slow.chunks)[1].tMs;
       const plain = await replayWatcher(slow);
       expect(plain.stops).toHaveLength(1);
@@ -387,12 +411,16 @@ describe.each(CAPTURES)("the capture %s", (_name, cap) => {
   });
 
   it("is never stopped by the check on a PC so slow that every window takes more than MAX_GAP_S of work (the named residual: only admission protects such a PC)", () => {
-    const shortest = Math.min(...stretchesMs(cap));
-    const stalled = scaleCapture(cap, (MAX_GAP_S * 1000 + 1) / Math.max(shortest, 1) + 1);
+    const shortest = Math.max(1, Math.min(...windowStretchesMs(cap)));
+    const k = (MAX_GAP_S * 1000 + 1) / shortest + 1;
+    const stalled = scaleCapture(cap, k);
+    // the windows are the capture's own (the scaling stretches the milliseconds between one window's segments too)
+    expect(shortest * k, "the premise: every window passes MAX_GAP_S").toBeGreaterThan(
+      MAX_GAP_S * 1000,
+    );
     expect(wallS(stalled), "the premise: the run is far over the cap").toBeGreaterThan(
       DOUBLE_CAP_S,
     );
-    expect(Math.min(...stretchesMs(stalled))).toBeGreaterThan(MAX_GAP_S * 1000);
     const replay = replayMonitor(stalled);
     expect(replay.stoppedAt).toBeNull();
     expect(replay.final.live.clamped).toBe(true);
@@ -547,7 +575,8 @@ describe("the committed fake capture", () => {
   const file = path.join(FIXTURE_DIR, "speechLive.capture.fake.json");
 
   it("is what the generator makes for its options, so its shape is the generator's and nobody's hand", () => {
-    const text = readFileSync(file, "utf8");
+    // git may check the file out with the line endings of the machine; the JSON itself has no raw newline in a value
+    const text = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
     expect(parseCapture(text)).toEqual(fakeCapture(FAKE_FIXTURE_OPTIONS));
     expect(text).toBe(serializeCapture(fakeCapture(FAKE_FIXTURE_OPTIONS)));
   });
