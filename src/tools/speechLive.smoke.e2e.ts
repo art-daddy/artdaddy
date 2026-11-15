@@ -400,7 +400,7 @@ function runCapture(r: RunResult, exit: RunExit): RunCapture {
     },
     audioS: r.audioS,
     chunks: t.chunks,
-    stderrHead: redactPaths(t.stderr.slice(0, STDERR_HEAD_BYTES), needles()),
+    stderrHead: redactPaths(t.stderr, needles()).slice(0, STDERR_HEAD_BYTES),
     stderrFacts: readStderrFacts(t.stderr),
     ...(t.finalJson ? { finalJson: t.finalJson } : {}),
     exit,
@@ -584,13 +584,21 @@ describe.skipIf(missing.length > 0)(`the live speech proof${FAKE ? " (fake engin
     const problems = validateCapture(capture);
     expect(problems, "the capture passes its own schema check").toEqual([]);
     const text = serializeCapture(capture);
+    // What may hold a name or a path is the free text of the file: the log, the flags and the output. (The keys and the
+    // policy are fixed words, and a recording called "speech" would find itself there.)
+    const freeText = (c: RunCapture): string =>
+      [c.stderrHead, c.engine.args.join(" "), ...c.chunks.map((x) => x.text)].join("\n");
+    const searched = [capture, capture.killed, capture.app]
+      .map((c) => (c ? freeText(c) : ""))
+      .join("\n")
+      .toLowerCase();
     for (const needle of [
       ...needles(),
       path.basename(SPEECH_FILE, path.extname(SPEECH_FILE)),
       "PRIVATE-WORDS",
       "PRIVATE-OTHER",
     ])
-      expect(text.toLowerCase(), `the capture names ${needle.slice(0, 3)}...`).not.toContain(
+      expect(searched, `the capture names ${needle.slice(0, 3)}...`).not.toContain(
         needle.toLowerCase(),
       );
     await fsp.mkdir(path.dirname(OUT), { recursive: true });
