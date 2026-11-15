@@ -27,9 +27,12 @@ export const CAPTURE_SCHEMA = "speech-live-capture-v1";
 export const STDERR_HEAD_BYTES = 16 * 1024;
 /** What a segment's text is replaced by. */
 export const BLANKED = "[text blanked]";
+/** What a line of the engine's output that is not a segment line is replaced by. */
+export const OTHER_BLANKED = "[other output blanked]";
 export const TEXT_POLICY =
   "Segment text is blanked: every segment line keeps its two timestamps and the placeholder replaces the " +
-  "words, so the file holds no speech; the log has its paths removed.";
+  "words, any other line of the engine's output is replaced by a placeholder, so the file holds no speech; " +
+  "the log has its paths removed.";
 
 export interface StdoutChunk {
   /** Milliseconds from the launch of the engine to the arrival of this output. */
@@ -205,32 +208,54 @@ export function segmentStats(chunks: readonly StdoutChunk[]): SegmentStats {
 // ---------------------------------------------------------------------------------------------------------
 // What may be kept of a real run, and the check that it was.
 
-/** Keeps every timestamp of a segment line and replaces its words by {@link BLANKED}, reading the stream chunk
- *  by chunk (a line is cut wherever the pipe cut it, and the result is the same however it is cut). Lines that
- *  are not segment lines pass unchanged; the schema check refuses a file that holds one. */
+/** The longest segment timestamps are 35 characters (`[1234:59:59,999 --> 1234:59:59,999]`). */
+const HEAD_MAX = 40;
+
+/** Keeps every timestamp of a segment line and replaces its words by {@link BLANKED}; any other line of output
+ *  (which may be speech for all that is known of it) becomes {@link OTHER_BLANKED}; empty lines pass. Reads the
+ *  stream chunk by chunk, and the result is the same however the pipe cut it: a line that begins with `[` is held,
+ *  at most {@link HEAD_MAX} characters, until it is known whether it is a segment's timestamps. */
 export function createTextBlanker(): (chunk: string) => string {
-  let line = "";
-  let inText = false;
+  // start: at the beginning of a line. head: a line that began with "[", held until it is known what it is.
+  // drop: the rest of a line is thrown away.
+  let mode: "start" | "head" | "drop" = "start";
+  let held = "";
   return (chunk) => {
     let out = "";
     for (const ch of chunk) {
-      if (inText) {
+      if (mode === "drop") {
         if (ch === "\n") {
-          inText = false;
-          line = "";
+          mode = "start";
           out += "\n";
         }
         continue;
       }
-      out += ch;
-      if (ch === "\n") {
-        line = "";
+      if (mode === "start") {
+        if (ch === "\n" || ch === "\r") out += ch;
+        else if (ch === "[") {
+          mode = "head";
+          held = "[";
+        } else {
+          out += OTHER_BLANKED;
+          mode = "drop";
+        }
         continue;
       }
-      line += ch;
-      if (ch === "]" && SEGMENT_HEAD.test(line)) {
-        out += `  ${BLANKED}`;
-        inText = true;
+      if (ch === "\n") {
+        out += `${OTHER_BLANKED}\n`;
+        mode = "start";
+        held = "";
+        continue;
+      }
+      held += ch;
+      if (ch === "]") {
+        out += SEGMENT_HEAD.test(held) ? `${held}  ${BLANKED}` : OTHER_BLANKED;
+        mode = "drop";
+        held = "";
+      } else if (held.length > HEAD_MAX) {
+        out += OTHER_BLANKED;
+        mode = "drop";
+        held = "";
       }
     }
     return out;
@@ -347,12 +372,12 @@ function checkRun(run: unknown, prefix: string, problems: string[]): void {
       for (const raw of joined.split("\n")) {
         n++;
         const line = raw.replace(/\r$/, "");
-        if (line.trim() === "") continue;
+        if (line.trim() === "" || line === OTHER_BLANKED) continue;
         const m = SEGMENT_LINE.exec(line);
         if (!m)
           bad(
             "chunks",
-            `line ${n} of the output is not a segment line (${line.length} characters)`,
+            `line ${n} of the output is not a segment line or the placeholder (${line.length} characters)`,
           );
         else if (m[1] !== `  ${BLANKED}`)
           bad("chunks", `line ${n} carries speech (text other than the placeholder)`);

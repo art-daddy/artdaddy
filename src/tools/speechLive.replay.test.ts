@@ -195,7 +195,7 @@ async function replayWatcher(run: RunCapture, liveStop = true): Promise<WatcherR
     chip.push({
       tMs: c.tMs,
       phase: job.phase,
-      firstWordsMs: job.firstWordsAt === null ? null : job.firstWordsAt - job.startedAt,
+      firstWordsMs: job.firstWordsAt === null ? null : job.firstWordsAt - (job.startedAt ?? T0),
       doneS: job.doneS,
       rate: job.rate,
       etaS: job.etaS,

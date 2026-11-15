@@ -12,7 +12,7 @@
 //   ARTDADDY_LIVE_RUNS          which runs, default "full,kill,app" ("full" is always needed)
 //   ARTDADDY_LIVE_CORES         what the app is told the PC has (default: all of them)
 //   ARTDADDY_LIVE_FAKE_ENGINE=1 prove the harness with no engine: fakeWhisper.mjs, a made-up recording, a made-up model
-// It SKIPS, naming what is missing, unless the shipped sidecar, its libraries, the model, the recording and the output
+// It SKIPS, naming what is missing, unless the shipped sidecars, the engine's libraries, the model, the recording and the output
 // path are all there (or the fake engine is asked for). It never touches the network: fetch is replaced for its length.
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, promises as fsp } from "node:fs";
@@ -86,10 +86,12 @@ const SPEECH_FILE = FAKE
   ? path.join(SCRATCH, "inbox", "personal-name-marker.wav")
   : (process.env.ARTDADDY_LIVE_SPEECH_FILE ?? "");
 const whisper = FAKE ? null : shippedSidecar("whisper-cli");
+const ffmpeg = FAKE ? null : shippedSidecar("ffmpeg");
 
 const missing: string[] = [];
 if (!FAKE) {
   if (!whisper) missing.push("the shipped whisper-cli (src-tauri/binaries)");
+  if (!ffmpeg) missing.push("the shipped ffmpeg (src-tauri/binaries), which reads the recording");
   if (!existsSync(DLL_DIR)) missing.push(`its libraries at ${DLL_DIR}`);
   if (!existsSync(REAL_MODEL)) missing.push(`the small model at ${REAL_MODEL}`);
   if (!SPEECH_FILE || !existsSync(SPEECH_FILE))
@@ -268,7 +270,8 @@ function engineRunner(
             trace.chip.push({
               tMs,
               phase: j.phase,
-              firstWordsMs: j.firstWordsAt === null ? null : j.firstWordsAt - j.startedAt,
+              firstWordsMs:
+                j.firstWordsAt === null ? null : j.firstWordsAt - (j.startedAt ?? launchAt),
               doneS: j.doneS,
               rate: j.rate,
               etaS: j.etaS,
@@ -567,6 +570,7 @@ describe.skipIf(missing.length > 0)(`the live speech proof${FAKE ? " (fake engin
       ...needles(),
       path.basename(SPEECH_FILE, path.extname(SPEECH_FILE)),
       "PRIVATE-WORDS",
+      "PRIVATE-OTHER",
     ])
       expect(text.toLowerCase(), `the capture names ${needle.slice(0, 3)}...`).not.toContain(
         needle.toLowerCase(),

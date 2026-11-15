@@ -67,7 +67,7 @@ for (let w = 0; w < windows; w++) {
   await sleep(burstMs);
   const from = w * WINDOW_S;
   const to = Math.min(audioS, from + WINDOW_S);
-  if (w === 0) process.stdout.write("\n");
+  if (w === 0) process.stdout.write("\nprogress PRIVATE-OTHER-0\n");
   for (let i = 0; i < PER_WINDOW; i++) {
     const a = from + ((to - from) * i) / PER_WINDOW;
     const b = from + ((to - from) * (i + 1)) / PER_WINDOW;

@@ -12,6 +12,7 @@ import {
   BLANKED,
   CAPTURE_SCHEMA,
   OPTIONAL_FIELDS,
+  OTHER_BLANKED,
   createTextBlanker,
   fakeCapture,
   fakeRun,
@@ -243,22 +244,36 @@ describe("what the text blanker keeps and what it drops", () => {
   const word = fc.stringMatching(/^[A-Z]{6,18}$/);
   const lineOf = (from: number, to: number, text: string): string =>
     `[${stamp(from)} --> ${stamp(to)}]  ${text}\n`;
-  const stream = fc.array(
+  /** A line of a stdout: a segment line, or output of the engine that is not one (and may be speech for all the
+   *  blanker knows): words, a bracketed word that is not a time, an empty line. */
+  const line = fc.oneof(
     fc.record({
+      kind: fc.constant("segment" as const),
       from: fc.integer({ min: 0, max: 9000 }),
       len: fc.integer({ min: 1, max: 30 }),
       text: word,
     }),
-    { minLength: 1, maxLength: 25 },
+    fc.record({ kind: fc.constant("other" as const), text: word }),
+    fc.record({ kind: fc.constant("bracket" as const), text: word }),
+    fc.record({ kind: fc.constant("empty" as const) }),
   );
+  type Line = typeof line extends fc.Arbitrary<infer T> ? T : never;
+  const render = (l: Line): string =>
+    l.kind === "segment"
+      ? lineOf(l.from, l.from + l.len, l.text)
+      : l.kind === "other"
+        ? `progress ${l.text}\n`
+        : l.kind === "bracket"
+          ? `[${l.text}] and more ${l.text}\n`
+          : "\n";
 
-  it("keeps every timestamp and the line structure, and no letter of the speech, however the stream is cut", () => {
+  it("keeps every timestamp and the line structure, and no letter of anything else, however the stream is cut", () => {
     fc.assert(
       fc.property(
-        stream,
+        fc.array(line, { minLength: 1, maxLength: 25 }),
         fc.array(fc.integer({ min: 1, max: 70 }), { minLength: 1, maxLength: 80 }),
-        (segs, cuts) => {
-          const original = "\n" + segs.map((s) => lineOf(s.from, s.from + s.len, s.text)).join("");
+        (lines, cuts) => {
+          const original = "\n" + lines.map(render).join("");
           const blank = createTextBlanker();
           let out = "";
           let at = 0;
@@ -269,24 +284,41 @@ describe("what the text blanker keeps and what it drops", () => {
           out += blank(original.slice(at));
           const whole = createTextBlanker()(original);
           expect(out, "cutting the stream anywhere gives the same file").toBe(whole);
+          const segs = lines.filter((l) => l.kind === "segment");
           expect(segmentStats([{ tMs: 0, text: out }]).segments).toBe(segs.length);
-          expect(segmentStats([{ tMs: 0, text: out }]).lastEndS).toBeCloseTo(
-            Math.max(...segs.map((s) => s.from + s.len)),
-            2,
-          );
+          if (segs.length)
+            expect(segmentStats([{ tMs: 0, text: out }]).lastEndS).toBeCloseTo(
+              Math.max(...segs.map((s) => s.from + s.len)),
+              2,
+            );
           expect(out.split("\n")).toHaveLength(original.split("\n").length);
-          for (const s of segs) expect(out, `the words ${s.text}`).not.toContain(s.text);
-          expect(out).toContain(BLANKED);
+          for (const l of lines)
+            if ("text" in l) expect(out, `the words ${l.text}`).not.toContain(l.text);
+          expect(
+            out.split(OTHER_BLANKED).length - 1,
+            "one placeholder for each line of other output",
+          ).toBe(lines.filter((l) => l.kind === "other" || l.kind === "bracket").length);
         },
       ),
-      { numRuns: 150 },
+      { numRuns: 200 },
     );
   });
 
-  it("leaves a line that is not a segment line as it is: the engine's other output is not speech", () => {
+  it("blanks the words of a segment line and any other line of output, and leaves empty lines as they are", () => {
     const blank = createTextBlanker();
-    expect(blank("progress = 10%\n")).toBe("progress = 10%\n");
+    expect(blank("progress = 10%\n")).toBe(`${OTHER_BLANKED}\n`);
     expect(blank(lineOf(0, 3, "hello"))).toBe(`[${stamp(0)} --> ${stamp(3)}]  ${BLANKED}\n`);
+    expect(blank("\r\n")).toBe("\r\n");
+    expect(blank("[not a time] words\n")).toBe(`${OTHER_BLANKED}\n`);
+  });
+
+  it("reads a segment line the pipe cut anywhere, inside its timestamps too", () => {
+    const text = lineOf(65.5, 70.25, "words");
+    for (let cut = 1; cut < text.length; cut++) {
+      const blank = createTextBlanker();
+      const out = blank(text.slice(0, cut)) + blank(text.slice(cut));
+      expect(out, `cut at ${cut}`).toBe(`[${stamp(65.5)} --> ${stamp(70.25)}]  ${BLANKED}\n`);
+    }
   });
 });
 
@@ -430,6 +462,15 @@ describe("the schema check refuses what the file may not hold", () => {
     d.chunks[1] = { ...d.chunks[1], text: t.slice(0, cut) };
     d.chunks[2] = { ...d.chunks[2], text: "secret words\n" + d.chunks[2].text };
     expect(validateCapture(d).join(" ")).toContain("speech");
+  });
+
+  it("takes output that is not a segment line only as the placeholder: anything else may be speech", () => {
+    const ok = clone(fullSample());
+    ok.chunks[1].text = `${OTHER_BLANKED}\n` + ok.chunks[1].text;
+    expect(validateCapture(ok)).toEqual([]);
+    const bad = clone(fullSample());
+    bad.chunks[1].text = "progress = 10%\n" + bad.chunks[1].text;
+    expect(validateCapture(bad).join(" ")).toContain("not a segment line");
   });
 
   it("refuses a path of the PC anywhere in the file: the log, the flags, anything", () => {

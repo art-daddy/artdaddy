@@ -1,6 +1,6 @@
 {
  "schema": "speech-live-capture-v1",
- "textPolicy": "Segment text is blanked: every segment line keeps its two timestamps and the placeholder replaces the words, so the file holds no speech; the log has its paths removed.",
+ "textPolicy": "Segment text is blanked: every segment line keeps its two timestamps and the placeholder replaces the words, any other line of the engine's output is replaced by a placeholder, so the file holds no speech; the log has its paths removed.",
  "engine": {
   "backend": "cpu",
   "threads": 8,
