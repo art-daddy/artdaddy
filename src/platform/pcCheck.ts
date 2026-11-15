@@ -99,9 +99,10 @@ export interface PcCheckService {
   status(): { running: string | null; lastOutcome: Record<string, PcCheckOutcome> };
   subscribe(fn: () => void): () => void;
   setSignals(s: PcCheckSignals): void;
-  /** Holds the one slot while `fn` runs, so the chip test and the probes never overlap: waits behind a running probe or
-   *  another holder, and is never run when `signal` aborts first, or the service is disposed (`ran: false`). `fn`'s own
-   *  failure is the caller's: the slot is given back and the error passes on. */
+  /** Holds the one slot while `fn` runs, so the chip test and the probes never overlap: waits behind another holder or a running probe (a probe that
+   *  started by itself is told to stop, keeps nothing, and the turn comes once it has ended; one a person asked for finishes first), and is never run
+   *  when `signal` aborts first, or the service is disposed (`ran: false`). `fn`'s own failure is the caller's: the slot is given back and the error
+   *  passes on. */
   withSlot<T>(
     id: string,
     fn: () => Promise<T>,
@@ -596,6 +597,9 @@ export function createPcCheckService(deps: PcCheckDeps): PcCheckService {
         waiter.cleanup = () => signal.removeEventListener("abort", onAbort);
       }
       waiters.push(waiter);
+      // A check that started by itself gives the slot up to whoever waits for it (the chip test of an export being asked): it stops, keeps nothing,
+      // and takes the slot again at its next quiet moment. One a person asked for is finished first.
+      if (current && isAutomatic(current.reason)) abort(current);
       pump();
     });
   }

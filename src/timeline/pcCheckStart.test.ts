@@ -14,11 +14,13 @@ import { ExportMemFs } from "../test/timelineKit";
 import { __resetWorkGate, adoptTurn, lookWhisper } from "../tools/workGate";
 import { ProjectStoreAccess } from "../tools/store";
 import { __resetChipTests, findChip } from "./chipTest";
+import { decideExportEncoder, type ExportEncoderDecision } from "./exportChoice";
 import { __resetExportAsk, beginExportAsk, suspendExportAsk } from "./exportAsk";
 import { __resetExportQueue, submitExport, whenExportsSettle } from "./exportQueue";
 import { emptyTimeline } from "./model";
 import { pcCheckService, setPcCheckService } from "./pcCheckHandle";
 import { startPcCheck } from "./pcCheckStart";
+import type { RenderWorkload } from "./renderPlan";
 
 const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
 vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
@@ -31,6 +33,18 @@ vi.mock("../lib/attention", () => ({ askForAttention: vi.fn(async () => undefine
 
 const T0 = 1_700_000_000_000;
 const AGENT = { chatSessionId: "t1", branchId: 0, executionId: 1 };
+/** A two-minute project at 1080p30: what an export asked through the chat has to find a chip for. */
+const WORKLOAD: RenderWorkload = {
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  durationSeconds: 120,
+  visualClips: 1,
+  captionClips: 0,
+  audioClips: 0,
+  peakVisualLayers: 1,
+  peakMediaLayers: 1,
+};
 
 interface ProbeCall {
   kind: string;
@@ -355,19 +369,46 @@ describe("a check that cannot finish", () => {
 });
 
 describe("the chip test and the check take turns", () => {
-  it("a check under way holds the chip test back until it ends (here, because an export is asked), and the chip test then runs", async () => {
+  it("a chip test that an export asks for while the check is under way by itself stops that check and runs at once: the export is not late, and the check goes on afterwards", async () => {
     const world = begin();
     await untilRunning();
+    const run = world.checks()[0];
+    const chip = harness([amd]);
+    // What `encoderOptions` does for an export asked through the chat or MCP, before the queue has been told of it: look for the chip, and wait for it
+    // no longer than CHIP_WAIT_MS (20 s).
+    let decision: ExportEncoderDecision | undefined;
+    void decideExportEncoder(
+      { request: "auto", workload: WORKLOAD, settings: {}, history: [] },
+      (size, options) => findChip(size, options, chip.deps),
+    ).then((decided) => (decision = decided));
+    await advance(1_500);
+    expect(decision?.facts.chip, "the export has the chip: it did not wait for the check").toBe(
+      "amd",
+    );
+    expect(chip.calls.length, "the chip was tested").toBeGreaterThan(0);
+    expect(run.signal?.aborted, "the check was told to stop").toBe(true);
+    expect(outcome()).toBe("aborted");
+    expect(world.memory.size, "the check that was stopped kept nothing").toBe(0);
+    // Nothing is busy yet (the export has not reached the queue): the check goes on where it left off, and the export's admission stops it again.
+    await advance(3_000);
+    expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+  });
+
+  it("a check a person asked for (Check again) is not stopped by a chip test: the chip test waits for it, and an export being asked still stops it", async () => {
+    const world = begin();
+    pcCheckService()!.requestRun({ reason: "dialog", force: true, id: EXPORT_SPEED_PROBE_ID });
+    await advance(0);
+    expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+    const run = world.checks()[0];
     const chip = harness([amd]);
     const lookup = findChip("hd", { allowRun: true }, chip.deps);
     await advance(5_000);
-    expect(chip.calls, "the chip test waits for the check's slot").toEqual([]);
-    expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+    expect(run.signal?.aborted).toBe(false);
+    expect(chip.calls, "the chip test waits for the check the person is waiting for").toEqual([]);
     const ask = beginExportAsk();
     await advance(1_500);
     const found = await lookup;
-    expect(world.checks()[0].signal?.aborted).toBe(true);
-    expect(chip.calls.length).toBeGreaterThan(0);
+    expect(run.signal?.aborted).toBe(true);
     expect(found.chip).toMatchObject({ maker: "amd", ok: true });
     ask();
   });

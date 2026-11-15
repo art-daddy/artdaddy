@@ -12,6 +12,7 @@ import {
   createPcCheckService,
   unfinishedBackoffMs,
   type PcCheckDeps,
+  type PcCheckReason,
   type PcCheckService,
   type PcCheckSignals,
   type ProbeDefinition,
@@ -777,6 +778,154 @@ describe("the one slot: the chip test and the probes never overlap", () => {
   });
 });
 
+describe("a check that started by itself gives the slot to the chip test of an export that is being asked", () => {
+  // Whether a chip test that waits for the slot stops the check under way, by what started the check. A closed table over the reasons the
+  // service knows: a reason added to the type without a row here does not compile.
+  const STOPPED_BY_A_CHIP_TEST: Record<PcCheckReason, boolean> = {
+    idle: true,
+    update: true,
+    dialog: false,
+    question: false,
+  };
+  const REASONS = Object.keys(STOPPED_BY_A_CHIP_TEST) as PcCheckReason[];
+
+  /** A check under way, started the way `reason` says: by itself after the idle wait (`idle`, `update`), or at a person's asking (`dialog`, `question`). */
+  async function underWay(reason: PcCheckReason) {
+    const { w, service, speed } = quietService();
+    service.setSignals(signalsAt(w.now()));
+    if (reason === "dialog" || reason === "question") service.requestRun({ reason, force: true });
+    else {
+      if (reason === "update") service.requestRun({ reason, force: true });
+      await w.advance(IDLE_BEFORE_RUN_MS);
+    }
+    expect(speed.runs, reason).toHaveLength(1);
+    return { w, service, speed };
+  }
+
+  it.each(REASONS)(
+    "%s: the chip test is given its turn only when the probe has ended, and the probe is stopped for it exactly when it started by itself",
+    async (reason) => {
+      const { w, service, speed } = await underWay(reason);
+      let started = false;
+      const chip = service.withSlot("chip-test", async () => void (started = true));
+      expect(speed.runs[0].signal.aborted).toBe(STOPPED_BY_A_CHIP_TEST[reason]);
+      await w.flush();
+      expect(started, "the probe has not ended: one at a time").toBe(false);
+      // an answer that comes after the stop (a probe that was already past its last check) is thrown away with the run
+      speed.answer(record());
+      await w.flush();
+      await expect(chip).resolves.toEqual({ ran: true, value: undefined });
+      expect(started).toBe(true);
+      expect(service.result("speed") !== null, "a check that was stopped keeps nothing").toBe(
+        !STOPPED_BY_A_CHIP_TEST[reason],
+      );
+    },
+  );
+
+  it("stops at once, stores nothing, and tries again at its next quiet moment", async () => {
+    const { w, service, speed } = await underWay("idle");
+    let finishChip!: () => void;
+    const chip = service.withSlot("chip-test", () => new Promise<void>((r) => (finishChip = r)));
+    expect(speed.runs[0].abortedAt, "told to stop in the same moment the chip test asked").toBe(
+      w.now(),
+    );
+    speed.answer(null);
+    await w.flush();
+    expect(service.status()).toEqual({ running: "chip-test", lastOutcome: { speed: "aborted" } });
+    expect(w.store.bytes(), "nothing written for the run that was stopped").toBe("[]");
+    expect(service.pcClass()).toBe("unknown");
+    finishChip();
+    await chip;
+    await w.advance(0);
+    expect(
+      speed.runs,
+      "the editor is still quiet: the check goes on where it left off",
+    ).toHaveLength(2);
+    speed.answer(record());
+    await w.flush();
+    expect(service.pcClass()).toBe("ok");
+  });
+
+  it("is not stopped by a caller that has already given up waiting", async () => {
+    const { service, speed } = await underWay("idle");
+    const gone = new AbortController();
+    gone.abort();
+    await expect(
+      service.withSlot("chip-test", async () => 1, { signal: gone.signal }),
+    ).resolves.toEqual({ ran: false });
+    expect(speed.runs[0].signal.aborted).toBe(false);
+  });
+
+  it("ends a probe that ignores the stop at its time box, and then gives the slot to the chip test", async () => {
+    const { w, service } = quietService({ run: () => new Promise(() => undefined) });
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    expect(service.status().running).toBe("speed");
+    let started = false;
+    const chip = service.withSlot("chip-test", async () => void (started = true));
+    await w.advance(19_999);
+    expect(started).toBe(false);
+    await w.advance(1);
+    await expect(chip).resolves.toEqual({ ran: true, value: undefined });
+    expect(service.status().lastOutcome).toEqual({ speed: "aborted" });
+  });
+
+  it("never has a chip test and a probe going at once, whatever order chip tests arrive, probes answer and time passes in (property)", async () => {
+    const steps = fc.array(fc.constantFrom("chip", "answer", "finish", "quiet", "person"), {
+      maxLength: 16,
+    });
+    await fc.assert(
+      fc.asyncProperty(steps, async (script) => {
+        // a long box, so that only the steps below end a run
+        const { w, service, speed } = quietService({ budgetMs: 600_000 });
+        service.setSignals(signalsAt(w.now()));
+        const answered = new Set<number>();
+        const finishers: (() => void)[] = [];
+        const turns: Promise<{ ran: boolean }>[] = [];
+        let open = 0;
+        const probesGoing = () => speed.runs.filter((_, index) => !answered.has(index)).length;
+        const check = (where: string) => {
+          expect(open, `${where}: at most one chip test`).toBeLessThanOrEqual(1);
+          expect(open + probesGoing(), `${where}: one thing at a time`).toBeLessThanOrEqual(1);
+        };
+        const step = async (name: string) => {
+          if (name === "chip")
+            turns.push(
+              service.withSlot("chip-test", () => {
+                open++;
+                return new Promise<void>((resolve) =>
+                  finishers.push(() => {
+                    open--;
+                    resolve();
+                  }),
+                );
+              }),
+            );
+          if (name === "answer") {
+            const next = speed.runs.findIndex((_, index) => !answered.has(index));
+            if (next >= 0) {
+              answered.add(next);
+              speed.answer(record(), false, next);
+            }
+          }
+          if (name === "finish") finishers.shift()?.();
+          if (name === "quiet") await w.advance(IDLE_BEFORE_RUN_MS);
+          if (name === "person") service.requestRun({ reason: "dialog", force: true });
+          await w.flush();
+          check(name);
+        };
+        for (const name of script) await step(name);
+        // everything that is waiting is given its turn in the end, once what is under way has ended
+        for (let round = 0; round < 40; round++) {
+          for (const name of ["answer", "finish"]) await step(name);
+        }
+        for (const turn of turns) expect(await turn).toMatchObject({ ran: true });
+      }),
+      { numRuns: 60 },
+    );
+  });
+});
+
 describe("the time box", () => {
   it("ends a probe that never answers when its 20 seconds are over: stored as not finished, the slot free", async () => {
     const { w, service } = quietService({ run: () => new Promise(() => undefined) });
@@ -824,7 +973,8 @@ describe("the time box", () => {
     service.registerProbe(hung.def);
     service.registerProbe(next.def);
     service.setSignals(signalsAt(w.now()));
-    await w.advance(IDLE_BEFORE_RUN_MS);
+    // a check a person asked for, which a waiting chip test does not stop: the box is what ends it
+    service.requestRun({ reason: "dialog", force: true, id: "hung" });
     const chip = service.withSlot("chip-test", async () => "ok");
     await w.advance(20_000);
     await expect(chip).resolves.toEqual({ ran: true, value: "ok" });
