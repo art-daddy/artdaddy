@@ -10,14 +10,17 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CommandRunner } from "./command";
+import { __resetExportFlags, exportFlag, refreshExportFlags } from "../api/exportFlags";
+import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { inspectMediaTool } from "./inspect";
 import { measureLoudness } from "./loudness";
+import { currentPaceModel, recordSpeechRun } from "./speechPace";
+import { CAP_S } from "./speechPlan";
 import { joinPath } from "./store";
-import { getTranscriptTool, runWhisper, whisperModelPath } from "./transcribe";
+import { getTranscriptTool, runWhisper, transcriptRunning, whisperModelPath } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
 import { decodeCountingRunner, ff, libRef, longFixture, mkCtx, nodeFs, nodeRunner } from "./__e2e";
 
@@ -527,43 +530,231 @@ describe("transcript: never waited on when long", () => {
     return r;
   }
 
-  it("a whole 12-minute file returns at once with the transcript queued in the background", async () => {
-    const { file } = await longTalk();
-    const ref = await libRef(ctx, file, "audio");
-    const queued: Array<[string, string]> = [];
-    const measuring: Array<[string, number | null, number | null]> = [];
-    const unregister = registerBackgroundTranscriber(proj, {
-      prioritize: (s, l) => (queued.push([s, l]), true),
-      loudness: (s, a, b) => (
-        measuring.push([s, a, b]),
-        { first: true, result: new Promise(() => undefined) }
-      ),
-    });
-    let whisperRuns = 0;
-    const counting: CommandRunner = {
-      run(program, args, signal, cwd, onStdout) {
-        if (program === "whisper-cli") whisperRuns++;
-        return nodeRunner.run(program, args, signal, cwd, onStdout);
-      },
-    };
-    try {
-      const t0 = performance.now();
-      const r = (await inspectMediaTool({ media_ref: ref }, { ...ctx, runner: counting })) as Any;
-      const ms = performance.now() - t0;
-      expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
-      expect(r.transcript.status).toBe("in_progress");
-      expect(whisperRuns).toBe(0);
-      expect(queued).toHaveLength(1);
-      expect(queued[0][0].replace(/\\/g, "/")).toBe(file.replace(/\\/g, "/"));
-      // 12 minutes is over the loudness limit too (4g): measured in the background, whole.
-      expect(r.loudness.status).toBe("in_progress");
-      expect(measuring).toEqual([[queued[0][0], null, null]]);
-      // Never waited on: neither whisper nor the loudness pass ran in the look. 12 minutes inline
-      // would take minutes; the ceiling is far under that and survives a busy run.
-      expect(ms).toBeLessThan(LOOK_CEILING_MS);
-    } finally {
-      unregister();
+  /** What S2-11 changed for a whole file longer than ten minutes. With the remote switch `speech_cpu_cap` ON the limit
+   *  follows this PC's own measured pace: a file it can do inside the cap runs now (the look waits at most its bound and
+   *  says in_progress), one it cannot is refused at once with what would fit, and nothing is started or queued for it.
+   *  With the switch OFF it is 0.27.0 for one more release: the whole file goes to the front of the background queue,
+   *  whatever the PC. Each state is driven through the real tool on a real 12-minute file with the real ffmpeg. The
+   *  switch is set the way the app gets it (the server's answer, through the real refresh) and the pace the way the app
+   *  keeps it (`recordSpeechRun`); only the speech engine is stood in for, because what is under test is whether a run
+   *  STARTS: it counts its launches and stays busy until the call is stopped. Nothing here is timed: the machine is
+   *  shared, and a run that was wrongly started shows in `transcriptRunning` as soon as the look has returned. */
+  describe("a whole 12-minute file, with the remote switch speech_cpu_cap on and off (S2-11)", () => {
+    // A run needs the speech model, as the tests below do; the refusals and the queue do not.
+    const modelThere = existsSync(whisperModelPath(proj, "small"));
+    let file = "";
+    let ref = "";
+    let src = "";
+    beforeAll(async () => {
+      file = (await longTalk()).file;
+      ref = await libRef(ctx, file, "audio");
+      src = (await ctx.store.resolveRef(ref))!;
+    }, 120_000);
+
+    /** A Storage in memory: this lane runs in node, which has none, and the app keeps its pace in one. */
+    function memoryStorage(): Storage {
+      const m = new Map<string, string>();
+      return {
+        get length() {
+          return m.size;
+        },
+        clear: () => m.clear(),
+        getItem: (k) => m.get(k) ?? null,
+        key: (i) => [...m.keys()][i] ?? null,
+        removeItem: (k) => void m.delete(k),
+        setItem: (k, v) => void m.set(k, String(v)),
+      };
     }
+
+    /** The server's answer about the switch, taken through the app's own refresh (no network: the fetcher is the answer). */
+    async function serverSays(on: boolean): Promise<void> {
+      await refreshExportFlags({
+        force: true,
+        signedIn: async () => true,
+        fetcher: async () => new Response(JSON.stringify({ v: 1, flags: { speech_cpu_cap: on } })),
+      });
+      expect(exportFlag("speech_cpu_cap"), "the server's answer was taken").toBe(on);
+    }
+
+    /** This PC's own measured pace as the app keeps it (speechPace.ts): `startupS` to begin, then `rate` seconds of work
+     *  for each second of audio, on both backends so that whichever one would run is this one. */
+    function pcThatDoes(rate: number, startupS: number): void {
+      const storage = memoryStorage();
+      vi.stubGlobal("localStorage", storage);
+      for (const backend of ["gpu", "cpu"] as const)
+        recordSpeechRun(100, startupS + 100 * rate, backend, storage, startupS);
+      const kept = currentPaceModel();
+      expect(kept.rate, "this PC's pace was kept").toBeCloseTo(rate, 6);
+      expect(kept.startupS).toBe(startupS);
+    }
+
+    /** The look's runner: everything is real except the speech engine, whose launches are counted and which stays busy
+     *  until the call is stopped. */
+    function busyEngine(): { runner: CommandRunner; launches: string[][]; stop: AbortController } {
+      const stop = new AbortController();
+      const launches: string[][] = [];
+      const runner: CommandRunner = {
+        run(program, args, signal, cwd, onStdout) {
+          if (program !== "whisper-cli")
+            return nodeRunner.run(program, args, signal, cwd, onStdout);
+          launches.push(args);
+          return new Promise<CommandResult>((resolve) => {
+            const stopped = (): void => resolve({ code: -1, stdout: "", stderr: "cancelled" });
+            if (signal?.aborted) stopped();
+            else signal?.addEventListener("abort", stopped, { once: true });
+          });
+        },
+      };
+      return { runner, launches, stop };
+    }
+
+    let engine = busyEngine();
+    let queued: Array<[string, string]> = [];
+    let measuring: Array<[string, number | null, number | null]> = [];
+    let unregister: () => void = () => undefined;
+    const windowsAsked: Array<{ start: number; end: number }> = [];
+
+    beforeEach(() => {
+      engine = busyEngine();
+      queued = [];
+      measuring = [];
+      unregister = registerBackgroundTranscriber(proj, {
+        prioritize: (s, l) => (queued.push([s, l]), true),
+        loudness: (s, a, b) => (
+          measuring.push([s, a, b]),
+          { first: true, result: new Promise(() => undefined) }
+        ),
+      });
+    });
+
+    /** No run for this file is going (a stopped run lets go of its place at its own pace): a look made next would JOIN
+     *  one that is, and a join is never refused. */
+    const nothingRuns = (): Promise<void> =>
+      vi.waitFor(
+        async () => {
+          for (const w of [null, ...windowsAsked])
+            expect(await transcriptRunning(ctx, src, undefined, "", w), "a run is going").toBe(
+              false,
+            );
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+
+    afterEach(async () => {
+      engine.stop.abort();
+      await nothingRuns();
+      windowsAsked.length = 0;
+      unregister();
+      __resetExportFlags();
+      vi.unstubAllGlobals();
+    });
+
+    /** One look at the whole file (or a span of it), as the model makes it, waiting a second at most. */
+    const look = (args: Record<string, unknown> = {}): Promise<Any> => {
+      if (typeof args.start_seconds === "number" && typeof args.end_seconds === "number")
+        windowsAsked.push({ start: args.start_seconds, end: args.end_seconds });
+      return inspectMediaTool(
+        { media_ref: ref, wait_seconds: 1, ...args },
+        { ...ctx, runner: engine.runner, signal: engine.stop.signal },
+      ) as Promise<Any>;
+    };
+
+    it.each<[string, number, number]>([
+      ["a PC whose pace would fit it", 0.1, 3],
+      ["a PC whose pace would not", 2, 20],
+    ])(
+      "switch off (0.27.0): the whole file is queued at the front of the background queue and no run starts, on %s",
+      async (_pc, rate, startupS) => {
+        pcThatDoes(rate, startupS);
+        await serverSays(false);
+        const r = await look();
+        expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+        expect(r.transcript.status).toBe("in_progress");
+        expect(r.transcript.note, "the answer says it is queued").toMatch(/background/i);
+        expect(queued).toHaveLength(1);
+        expect(queued[0][0].replace(/\\/g, "/")).toBe(file.replace(/\\/g, "/"));
+        expect(engine.launches, "no run starts for the look").toHaveLength(0);
+        expect(await transcriptRunning(ctx, src, undefined, "", null), "nothing runs").toBe(false);
+        // 12 minutes is over the loudness limit too (4g): measured in the background, whole.
+        expect(r.loudness.status).toBe("in_progress");
+        expect(measuring).toEqual([[queued[0][0], null, null]]);
+      },
+    );
+
+    it.skipIf(!modelThere)(
+      "switch on, a PC whose pace fits: the whole file's run starts at once, the look says in_progress after its wait, and nothing is queued",
+      async () => {
+        pcThatDoes(0.1, 3); // 100 s of speech in 13 s: the 12-minute file would take about 80 s
+        await serverSays(true);
+        const r = await look();
+        expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+        expect(r.transcript.status, JSON.stringify(r.transcript).slice(0, 300)).toBe("in_progress");
+        expect(r.transcript.stage).toBe("transcribing");
+        // The engine is launched once the audio is extracted, so the launch is waited for, not timed.
+        await vi.waitFor(() => expect(engine.launches, "a run starts").toHaveLength(1), {
+          timeout: 60_000,
+          interval: 100,
+        });
+        const wav = engine.launches[0][engine.launches[0].indexOf("-f") + 1];
+        const probed = await nodeRunner.run("ffprobe", [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "csv=p=0",
+          wav,
+        ]);
+        expect(
+          Number(probed.stdout.trim()),
+          "it reads the whole file, not a window",
+        ).toBeGreaterThan(11 * 60);
+        expect(queued, "nothing is queued whole").toHaveLength(0);
+      },
+      120_000,
+    );
+
+    it("switch on, a PC whose stored pace does not fit: unavailable (too_long) with what would fit, and no run starts and nothing is queued", async () => {
+      pcThatDoes(2, 20); // 100 s of speech in 220 s: the 12-minute file would take about 25 minutes
+      await serverSays(true);
+      expect(await transcriptRunning(ctx, src, undefined, "", null), "premise").toBe(false);
+      const r = await look();
+      expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+      expect(r.transcript).toMatchObject({ status: "unavailable", reason: "too_long" });
+      // What it says follows from the pace that was stored and the cap: the file takes longer than the cap, and the span
+      // it offers is the longest that fits.
+      expect(r.transcript.would_take_s).toBeGreaterThan(CAP_S);
+      expect(Math.abs(r.transcript.would_take_s - (20 + 2 * r.duration_s))).toBeLessThanOrEqual(1);
+      const fits = r.transcript.fits_seconds as number;
+      expect(fits).toBeGreaterThan(0);
+      expect(fits).toBeLessThan(r.duration_s);
+      expect(20 + 2 * fits, "what it offers fits the cap").toBeLessThanOrEqual(CAP_S);
+      expect(20 + 2 * (fits + 1), "a second more would not").toBeGreaterThan(CAP_S);
+      expect(queued, "nothing is queued whole").toHaveLength(0);
+      expect(engine.launches, "no run starts").toHaveLength(0);
+      expect(await transcriptRunning(ctx, src, undefined, "", null), "nothing runs").toBe(false);
+    });
+
+    it.skipIf(!modelThere)(
+      "switch on: the span a refusal offers is run, and a second more is refused",
+      async () => {
+        pcThatDoes(2, 20);
+        await serverSays(true);
+        const fits = (await look()).transcript.fits_seconds as number;
+        expect(fits, "the refusal offers a span").toBeGreaterThan(0);
+        const over = await look({ start_seconds: 0, end_seconds: fits + 1 });
+        expect(over.transcript).toMatchObject({ status: "unavailable", reason: "too_long" });
+        expect(engine.launches, "the refused span starts nothing").toHaveLength(0);
+        const offered = await look({ start_seconds: 0, end_seconds: fits });
+        expect(offered.transcript.status).toBe("in_progress");
+        await vi.waitFor(() => expect(engine.launches, "the offered span runs").toHaveLength(1), {
+          timeout: 60_000,
+          interval: 100,
+        });
+        expect(queued, "nothing is queued whole").toHaveLength(0);
+      },
+      120_000,
+    );
   });
 
   const model = whisperModelPath(proj, "small");
