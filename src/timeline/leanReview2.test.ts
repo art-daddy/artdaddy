@@ -389,6 +389,9 @@ const fpsOfGraph = (graph: string): number =>
 describe("fix 2: every window over a wide grid, judged by a second evaluator", () => {
   const KINDS = ["crossfade", "whip", "wipe-l", "wipe-r", "dip-to-black", "dip-to-white", "custom"];
   const RATES = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60];
+  const CUTS = [0, 60, 60.5, 61, 90.25];
+  const LENGTHS = [1, 2, 3, 4, 5, 8, 15, 30];
+  const HAIRS = [0, 1e-7];
   const grid = (rate: number, cut: number, frames: number, hair: number, kind: string) => {
     const fps = Math.trunc(rate);
     const tin = cut / fps;
@@ -418,14 +421,17 @@ describe("fix 2: every window over a wide grid, judged by a second evaluator", (
     };
   };
 
-  it("no frame whose factor differs from 1 has its window closed, for any rate, cut, length, hair and kind (wipe-right is judged on the columns that still change)", () => {
-    let windows = 0;
-    let evaluated = 0;
-    for (const rate of RATES) {
-      for (const cut of [0, 60, 60.5, 61, 90.25]) {
-        for (const frames of [1, 2, 3, 4, 5, 8, 15, 30]) {
-          for (const hair of [0, 1e-7]) {
-            for (const kind of KINDS) {
+  // The grid is split into one test per (rate, kind): the union of the 56 is the whole cross product of RATES, CUTS, LENGTHS, HAIRS and KINDS (the loops below are the old test's, with
+  // the two outer ones turned into tests), and each takes about a second, so none holds a worker's event loop for long. The first form was ONE synchronous test of about 20 s alone and 67 s
+  // under the pre-push run's full parallel load; vitest's worker-to-runner call gives up after 60 s, and the real hook failed with "Timeout calling onTaskUpdate" although every test passed.
+  describe.each(RATES)("at %s fps", (rate) => {
+    it.each(KINDS)(
+      "%s: no frame whose factor differs from 1 has its window closed, for any cut, length and hair (wipe-right is judged on the columns that still change)",
+      (kind) => {
+        let windows = 0;
+        for (const cut of CUTS) {
+          for (const frames of LENGTHS) {
+            for (const hair of HAIRS) {
               const g = grid(rate, cut, frames, hair, kind);
               const plan = buildRenderCommand(g.project, OUT, { lean: { fades: true } });
               const fps = fpsOfGraph(plan.filterComplex);
@@ -443,7 +449,6 @@ describe("fix 2: every window over a wide grid, judged by a second evaluator", (
                     for (const W of [2, 1920])
                       for (const X of wipeRight ? [1, W >> 1, W - 1] : [0, 1, W >> 1, W - 1])
                         if (factor({ T, W, X }) !== 1) changes = true;
-                    evaluated += 1;
                     if (changes && window)
                       expect(
                         window({ T }),
@@ -456,11 +461,11 @@ describe("fix 2: every window over a wide grid, judged by a second evaluator", (
             }
           }
         }
-      }
-    }
-    console.info(`h5 fix2 grid: ${windows} windowed geq filters, ${evaluated} frames judged`);
-    expect(windows).toBeGreaterThan(8000);
-  }, 170_000);
+        // the grid must really have been judged: every clip carries a fade and an opacity curve, so each combination writes at least one windowed geq (9,170 in all, 160 to 170 in each of the 56 tests)
+        expect(windows).toBeGreaterThanOrEqual(CUTS.length * LENGTHS.length * HAIRS.length);
+      },
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
