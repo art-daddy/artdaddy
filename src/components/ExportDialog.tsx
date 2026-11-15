@@ -21,6 +21,7 @@ import {
   STATUS_REFRESH_MS,
   type ModeView,
 } from "../timeline/exportWords";
+import { flags3cNow } from "../timeline/flags3c";
 import type { RenderWorkload } from "../timeline/renderPlan";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
@@ -109,6 +110,8 @@ export default function ExportDialog({
   // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it). While the PC's speed check runs
   // the line says so; the Export button never waits for it.
   const check = useSpeedCheck();
+  // The checking line belongs to the new estimate: with it switched off the line is 0.27.0's, whatever the check is doing.
+  const honestEstimate = flags3cNow().estimate_v2;
   const estimated = useMemo(
     () =>
       dialogEstimate({
@@ -123,7 +126,7 @@ export default function ExportDialog({
     // `check.key` changes when the check's answer does, which is what the estimate is priced on.
     [workload, resolution, quality, fps, mode, calibrations, decision, check.key],
   );
-  const expected = workload && check.running ? CHECKING_LINE : estimated.line;
+  const expected = workload && honestEstimate && check.running ? CHECKING_LINE : estimated.line;
 
   const phase = useExportJob((s) => s.phase);
   const jobId = useExportJob((s) => s.jobId);

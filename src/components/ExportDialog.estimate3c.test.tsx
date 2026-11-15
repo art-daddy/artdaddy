@@ -1,6 +1,6 @@
 // What the Export dialog says about time before the click, with the honest estimate and the PC's speed check behind it: the words of every basis, the line while the check runs, the quiet line after it and
 // the action to run it again, and what the dialog does when the estimate or the check misbehaves. The dialog is rendered as the person sees it; the PC check is the real service with a probe the test answers by hand.
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
@@ -386,6 +386,23 @@ describe("with the new estimate off the dialog says what 0.27.0 said", () => {
     show();
     expect(screen.queryByTestId("speed-check")).not.toBeInTheDocument();
     expect(line()).toHaveTextContent("A rough guess: this PC's speed has not been checked yet.");
+  });
+
+  it("a speed check that is running does not replace 0.27.0's sentence with the checking line", async () => {
+    __setExportFlag("estimate_v2", false);
+    const world = checkWorld();
+    setPcCheckService(world.service);
+    show();
+    act(() => world.service.requestRun({ reason: "dialog", force: true }));
+    await act(async () => undefined);
+    expect(world.service.status().running).toBe(SPEED);
+    expect(line().textContent).toBe(legacyLine([]));
+    expect(line()).not.toHaveTextContent("Checking this PC's speed");
+    // the same check, with the new estimate on, is said as it runs
+    cleanup();
+    __setExportFlag("estimate_v2", true);
+    show();
+    expect(line()).toHaveTextContent("Checking this PC's speed… (about 10 seconds)");
   });
 });
 
