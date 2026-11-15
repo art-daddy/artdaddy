@@ -50,6 +50,22 @@ function asPrinted(x: number): number {
   return Number(printed(x));
 }
 
+/** The next float above (up) or below a number. */
+function stepUlp(x: number, up: boolean): number {
+  if (x === 0) return up ? Number.MIN_VALUE : -Number.MIN_VALUE;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  view.setBigInt64(0, view.getBigInt64(0) + (x > 0 === up ? 1n : -1n));
+  return view.getFloat64(0);
+}
+
+/** The times frame k can be read at: k / fps and k * (1 / fps), the two ways to compute it (a presentation time is a count times the time base), and one float step either side of each. */
+function frameReadings(k: number, fps: number): number[] {
+  const a = k / fps;
+  const b = k * (1 / fps);
+  return [a, b, stepUlp(a, true), stepUlp(a, false), stepUlp(b, true), stepUlp(b, false)];
+}
+
 function usableSeconds(x: number): boolean {
   return Number.isFinite(x) && Math.abs(x) <= MAX_SECONDS;
 }
@@ -185,7 +201,8 @@ export function fadeWindow(
  *  No reasoning about easing curves: the curve is EVALUATED, with the same arithmetic ffmpeg uses (leanExpr.ts), at T = k/fps for the frames
  *  firstFrame-2 through endFrame+1. A frame is marked when its factor is not exactly 1 (a value that is NaN is marked too). Each run of marked
  *  frames is widened by one frame on each side, so that a frame whose time ffmpeg computes one float step off (pts times the time base) still lands
- *  inside, and runs that touch are merged. Each run becomes `between(t,a,b)` with a and b half a frame outside its first and last frame. A run that
+ *  inside, and runs that touch are merged. A frame that is fine at k/fps but not at another reading of its time (k * (1/fps), or a float step either
+ *  side of either) is covered as it is, one frame, not widened. Each run becomes `between(t,a,b)` with a and b half a frame outside its first and last frame. A run that
  *  includes the first (last) evaluated frame is left OPEN on that side (`lte` / `gte`): the stream may hold clones beyond the clip's span.
  *
  *  null when the curve cannot be evaluated or is not a function of T alone, when no frame is marked (the filter is then a no-op the caller may
@@ -224,18 +241,32 @@ function opacityWindowOf(
   const lo = firstFrame - 2;
   const count = endFrame - firstFrame + 4;
   const marked = new Uint8Array(count);
-  // clip((curve),0,1) is exactly 1 only when the curve is at or above 1; a NaN fails the comparison and is marked
-  for (let i = 0; i < count; i += 1)
-    marked[i] = curve({ T: (lo + i) / fps, W: 1, H: 1 }) >= 1 ? 0 : 1;
-  const runs: Array<[first: number, last: number]> = [];
+  const noisy = new Uint8Array(count);
+  // clip((curve),0,1) is exactly 1 only when the curve is at or above 1; a NaN fails the comparison and is marked. A frame is `marked` when that fails at its own time. A frame whose
+  // own time is fine but another reading of it is not (frameReadings: a time is only known to a float step, and a curve printed to six places can dip a hair below 1 one step before a key,
+  // or jump there, a hold) is `noisy`: the window covers it, and, because the readings are already the float steps, it is not widened.
+  for (let i = 0; i < count; i += 1) {
+    const readings = frameReadings(lo + i, fps);
+    if (!(curve({ T: readings[0], W: 1, H: 1 }) >= 1)) marked[i] = 1;
+    else if (!readings.every((T) => curve({ T, W: 1, H: 1 }) >= 1)) noisy[i] = 1;
+  }
+  const widened: Array<[first: number, last: number]> = [];
   for (let i = 0; i < count; i += 1) {
     if (marked[i] === 0) continue;
     let j = i;
     while (j + 1 < count && marked[j + 1] === 1) j += 1;
-    const previous = runs[runs.length - 1];
+    const previous = widened[widened.length - 1];
     if (previous && i - 1 <= previous[1] + 1) previous[1] = j + 1;
-    else runs.push([i - 1, j + 1]);
+    else widened.push([i - 1, j + 1]);
     i = j;
+  }
+  for (let i = 0; i < count; i += 1) if (noisy[i] === 1) widened.push([i, i]);
+  widened.sort((x, y) => x[0] - y[0]);
+  const runs: Array<[first: number, last: number]> = [];
+  for (const run of widened) {
+    const previous = runs[runs.length - 1];
+    if (previous && run[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], run[1]);
+    else runs.push([run[0], run[1]]);
   }
   if (runs.length === 0 || runs.length > MAX_INTERVALS) return null;
   // the frames the clip is drawn on, firstFrame .. endFrame-1, sit at indexes 2 .. count-3
@@ -245,8 +276,8 @@ function opacityWindowOf(
   if (open > MAX_OPEN_SHARE * (count - 4)) return null;
   const terms: string[] = [];
   for (const [n, [first, last]] of runs.entries()) {
-    const openLeft = n === 0 && marked[0] === 1;
-    const openRight = n === runs.length - 1 && marked[count - 1] === 1;
+    const openLeft = n === 0 && marked[0] + noisy[0] > 0;
+    const openRight = n === runs.length - 1 && marked[count - 1] + noisy[count - 1] > 0;
     if (openLeft && openRight) return null;
     const a = printed((lo + first - 0.5) / fps);
     const b = printed((lo + last + 0.5) / fps);
