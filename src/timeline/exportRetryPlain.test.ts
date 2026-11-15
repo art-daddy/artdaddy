@@ -769,6 +769,21 @@ describe("the export tool: the retry builds 0.27.0's command", () => {
     expect((report.trace as Any[]).find((e) => e.e === "retry")).toMatchObject({ n: 0, m: 1 });
     expect(await t.fs.exists("C:/Users/test/Downloads/a.mp4")).toBe(true);
   });
+
+  it("with the held-picture switch off the zoom mask is not built either: the first try is 0.27.0's graph, nothing is asked of ffmpeg, and the record names the switch", async () => {
+    const t = await world();
+    leanSwitches(true);
+    __setExportFlag("lean_stills" as never, false); // the server switched the held pictures off for a field problem; the zoom switch is still on
+    const started = await t.exportNow("a");
+    expect(started.ok, JSON.stringify(started)).toBe(true);
+    await flush();
+    const tried = await t.look(t.jobs.submitted[0]);
+    expect(tried.lean?.ran ?? []).not.toContain("zoom");
+    expect(tried.lean?.kept).toContain("flag_off");
+    expect(tried.graph).not.toContain("alphamerge");
+    expect(tried.graph).toBe(await t.todaysGraph());
+    expect(t.probes).toHaveLength(0);
+  });
 });
 
 // The chain: the card keeps offering Try again on every export it starts, so a project that failed with a lean path may be tried again several times (down the

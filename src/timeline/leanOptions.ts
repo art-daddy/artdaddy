@@ -54,11 +54,15 @@ export interface LeanOptions {
   budget?: LeanMaskBudget;
 }
 
-/** The six switches as they stand now: the compiled default is ON (every flag gives a way back) and the server can only switch one off (exportFlags.ts). */
+/** The six switches as they stand now: the compiled default is ON (every flag gives a way back) and the server can only switch one off (exportFlags.ts).
+ *  One switch depends on another, so that no state of the switches is hungrier than 0.27.0: on the reported reel the zoom mask alone peaked at 6,634 MiB of
+ *  working set where 0.27.0 peaked at 6,298 MiB, over the 6,400 MiB the app allows that PC's export, and only the held pictures of `lean_stills` more than repay
+ *  it (all six on: 3,823 MiB). So the mask runs only while `lean_stills` is on: switching the held pictures off for a field problem puts the zoom back to 0.27.0's
+ *  recipe too, and no state leaves the mask without them. */
 export function readLeanFlags(): Pick<LeanOptions, LeanFix> {
   const on = (fix: LeanFix): boolean => exportFlag(LEAN_FLAG_NAMES[fix]);
   return {
-    zoom: on("zoom"),
+    zoom: on("zoom") && on("stills"),
     fades: on("fades"),
     dip: on("dip"),
     stills: on("stills"),

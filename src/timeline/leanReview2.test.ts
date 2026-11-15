@@ -972,12 +972,15 @@ describe("Q4: the probe path through buildLeanRenderCommand", () => {
     expect(plan.lean?.ran).toEqual([]);
   });
 
-  it("stills OFF, zoom ON: the one probe is the mask's; both OFF: ffmpeg is not asked at all", async () => {
+  it("stills OFF with the zoom switch still ON: the mask is off with it (it needs the held pictures), so ffmpeg is not asked and the zoom keeps 0.27.0's geq; both OFF: the same", async () => {
     __setExportFlag("lean_stills", false);
-    const mask = runnerWith("ok");
-    const plan = await buildLeanRenderCommand(mask.ctx, zoomPicture, OUT, {});
-    expect(mask.calls).toHaveLength(1);
-    expect(plan.lean?.ran).toEqual(["zoom"]);
+    const run = runnerWith("ok");
+    const plan = await buildLeanRenderCommand(run.ctx, zoomPicture, OUT, {});
+    expect(run.calls).toHaveLength(0);
+    expect(plan.lean?.ran ?? []).not.toContain("zoom");
+    expect(plan.lean?.kept).toContain("flag_off");
+    expect(plan.filterComplex).toContain("gte(X,(W-");
+    expect(plan.filterComplex).not.toContain("alphamerge");
     __setExportFlag("lean_zoom", false);
     const none = runnerWith("ok");
     await buildLeanRenderCommand(none.ctx, zoomPicture, OUT, {});
