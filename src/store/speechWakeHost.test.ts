@@ -918,6 +918,21 @@ describe("after a long break the assistant is not woken", () => {
     expect(facts()).not.toContain("woke");
   });
 
+  it("is done with once the assistant has spoken, even without reading the words; a turn that was stopped is not that", async () => {
+    registerJobSink(DIR, chatSink());
+    await landAfter(turn(1, ["m_1"]), 45 * MIN);
+    expect(wakeViewOf(CHAT).ready).toEqual({ files: 1, held: "idle" });
+    wakeBeginTurn(CHAT, 9, false);
+    wakeEndTurn(CHAT, 9, "stopped");
+    expect(wakeViewOf(CHAT).ready, "the assistant has not spoken").toEqual({
+      files: 1,
+      held: "idle",
+    });
+    wakeBeginTurn(CHAT, 10, false);
+    wakeEndTurn(CHAT, 10, "done");
+    expect(wakeViewOf(CHAT).ready).toBeNull();
+  });
+
   it("is gone with the chat", async () => {
     registerJobSink(DIR, chatSink());
     await landAfter(turn(1, ["m_1"]), 45 * MIN);
@@ -1096,6 +1111,44 @@ describe("after a long break the assistant is not woken", () => {
       expect(facts()).not.toContain("no_credits");
     });
   });
+
+  // The rule, not the order of the checks: a wake is never sent into a cold cache, so words that are held (a draft in
+  // the box, no credits) are sent when the hold goes only if the chat's last turn ended no more than the threshold
+  // before that moment.
+  describe.each(["draft", "credits"] as const)(
+    "whatever holds the words (%s), no wake is sent into a cold cache",
+    (hold) => {
+      const holdOn = (): void => {
+        if (hold === "draft") useComposer.getState().setDraft(true);
+        else usage.over = true;
+      };
+      const holdOff = (): void => {
+        if (hold === "draft") useComposer.getState().setDraft(false);
+        else {
+          usage.over = false;
+          usage.listeners.forEach((fn) => fn());
+        }
+      };
+      it.each<[string, number, number, boolean]>([
+        ["a moment before the threshold", 5 * MIN, WAKE_LONG_IDLE_MS - 1, true],
+        ["exactly the threshold", 5 * MIN, WAKE_LONG_IDLE_MS, true],
+        ["a moment after the threshold", 5 * MIN, WAKE_LONG_IDLE_MS + 1, false],
+        ["hours after", 5 * MIN, 3 * 60 * MIN, false],
+        ["words that landed after the threshold already", 45 * MIN, 46 * MIN, false],
+      ])("the hold goes %s", async (_label, landedAfterMs, goesAfterMs, woken) => {
+        const sink = chatSink();
+        registerJobSink(DIR, sink);
+        holdOn();
+        await landAfter(turn(1, ["m_1"]), landedAfterMs);
+        await pass(goesAfterMs - landedAfterMs - 10); // landAll's settling moved the clock 10 ms past the landing
+        holdOff();
+        expect(sink.words()).toHaveLength(woken ? 1 : 0);
+        expect(facts().includes("woke")).toBe(woken);
+        expect(facts().includes("long_idle")).toBe(!woken);
+        expect(pendingJobNotes(DIR), "never kept to be sent later").toEqual([]);
+      });
+    },
+  );
 
   describe("a chat that was woken before", () => {
     /** The first batch is woken; in the wake's own turn the assistant asks for one more file and is told "not ready". */
