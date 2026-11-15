@@ -411,9 +411,9 @@ describe("the watcher of one run", () => {
         w.onStdout(stretch(180, 210));
         expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
         const end = w.finish(-1, "too_slow");
-        // 25 s to start, 30 s, the sleep as the 120 s it is counted for, and 4 windows of 30 s; 3,390 s left
+        // 25 s to start, 30 s, the sleep counted for nothing, and 4 windows of 30 s; 3,390 s left
         expect(end.liveProjectedS, "the sleep is not in the time the run would take").toBeCloseTo(
-          25 + 30 + 120 + 120 + 3390,
+          25 + 30 + 120 + 3390,
           6,
         );
         expect(readPace(), "a run that had a gap in it shows nothing of the PC's pace").toEqual([]);
