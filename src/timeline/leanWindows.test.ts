@@ -838,8 +838,9 @@ const opacityCase: fc.Arbitrary<OpacityCase> = fc.record({
 /** How many separate stretches need the filter (frames at most three apart belong to one), and the share of the drawn frames lying more than two frames from any that does. */
 function slackOf(run: OpacityRun): { stretches: number; share: number } {
   const factor = reference(run.full);
-  const times = floatTimes(run.fps);
-  const needed = opacityFrames(run).filter((k) => times(k).some((T) => factor({ T }) !== 1));
+  // A frame needs the filter when its factor is not 1 at its own time (the window function's own marking rule). A frame that only a float step of its time moves is covered by the
+  // widening of a neighbour that does; where there is none (the curve leaves 1 exactly on the frame after the last one the function looks at) no drawn frame needs the filter.
+  const needed = opacityFrames(run).filter((k) => factor({ T: k / run.fps }) !== 1);
   let stretches = 0;
   let previous = -Infinity;
   for (const k of needed) {
@@ -877,7 +878,23 @@ describe("opacityWindow", () => {
         const run = opacityRun(c);
         expect(opacityFaults(run, run.real), JSON.stringify({ c, window: run.real })).toEqual([]);
       }),
-      { numRuns: 250 },
+      {
+        numRuns: 250,
+        examples: [
+          // found by the class check (16 Nov): the curve leaves 1 exactly on the frame after the last frame the window function looks at, so only a float step of that frame's time is not 1 and no drawn frame needs the filter
+          [
+            {
+              fps: 25,
+              tin: 0,
+              len: 114,
+              keys: [
+                { t: 115, v: 1, ease: "linear" },
+                { t: 116, v: 0, ease: "linear" },
+              ],
+            },
+          ],
+        ],
+      },
     );
   });
 
