@@ -121,17 +121,22 @@ export interface RunEnd3c {
   hung: boolean;
   /** How much of the project had been made, 0 to 1 (1 for a finished run). */
   produced: number;
+  /** The render is made in steps (the parts, then the final encode): its bar covers only part of the time, so a run that stopped part-way says nothing of how long the whole takes. */
+  stepped: boolean;
   runSeconds: number;
   /** It was cancelled before it had made a picture. */
   beforeFirstPicture: boolean;
 }
 
-/** Teach the pace log what the run showed, under the rules of what a run may teach (the log refuses a hung run, a cancel before the first picture, a run a sleep crossed, a short run and one that made too little). Never throws. */
+/** Teach the pace log what the run showed, under the rules of what a run may teach (the log refuses a hung run, a cancel before the first picture, a run a sleep crossed, a short run and one that made too little).
+ *  Nothing is learned once the new estimate is switched off, though the run was admitted with it on, and nothing from a stepped run that did not finish. Never throws. */
 export function learnFromRun3c(end: RunEnd3c): void {
   try {
     const entry = pending.get(end.jobId);
     pending.delete(end.jobId);
     if (!entry || entry.measured || entry.predictedTotalSeconds === null) return;
+    if (!flags3cNow().estimate_v2) return;
+    if (end.stepped && end.ended !== "done") return;
     recordPace(estimateDepsNow().storage(), {
       family: entry.family,
       runSeconds: end.runSeconds,

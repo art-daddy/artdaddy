@@ -2394,6 +2394,8 @@ async function settle(x: Settle): Promise<void> {
     ended: error ? (cancelled ? "cancelled" : "failed") : "done",
     hung: x.story?.stalledOut !== undefined && !isCeilingStop(error ?? undefined),
     produced: error ? (live ? producedFraction(live) : 0) : 1,
+    // The bar of a render made in steps covers its parts only (see producedFraction), so one that stopped part-way cannot say how long the whole takes.
+    stepped: typeof live?.steps === "number" && live.steps > 1,
     runSeconds:
       ((x.renderEndedAt ?? Date.now()) -
         (records.find((r) => r.job_id === x.jobId)?.ranAt ?? x.startedAt)) /

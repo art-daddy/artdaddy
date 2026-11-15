@@ -726,6 +726,8 @@ describe("what the estimate learns when a run ends", () => {
     jump?: number;
     calibrations?: ExportCalibration[];
     destPath?: string;
+    /** The render is made in steps (the parts, then the final encode): the card's bar covers the parts only, and the run reports which step it is on. */
+    steps?: number;
     /** The PC sits this long (the clock jumps) after the render has ended and before its file has been checked: the stages that have no watch. */
     gapAfterRender?: number;
   }) {
@@ -764,6 +766,7 @@ describe("what the estimate learns when a run ends", () => {
           frame: Math.max(1, Math.round(over.fraction * 7200)),
           speed: 1,
           etaSec: 100,
+          ...(over.steps ? { step: 0, steps: over.steps } : {}),
         });
         let cpuMs = 0;
         const mark = () => jobs.stdout(id, formatActivityMark({ cpuMs, readBytes: 0 }));
@@ -904,6 +907,21 @@ describe("what the estimate learns when a run ends", () => {
     expect(entries[0].ratio).toBeCloseTo(600 / door.uncorrected!.seconds, 2);
   });
 
+  it("learns nothing from a multi-step run that stopped part-way (its bar is not the whole export), and everything it did before from a run in one step, or a multi-step run that finished", async () => {
+    // the parts 64 % made (the bar at 32 %), 7.5 minutes in: the final encode is still to come, so the time per fraction says nothing of the total
+    await run({ seconds: 450, fraction: 0.32, end: "cancel", steps: 2 });
+    expect(paceEntries()).toEqual([]);
+    __resetExportQueue();
+    await run({ seconds: 450, fraction: 0.32, end: "fail", steps: 2, destPath: "C:/out/b.mp4" });
+    expect(paceEntries()).toEqual([]);
+    __resetExportQueue();
+    await run({ seconds: 450, fraction: 0.64, end: "cancel", destPath: "C:/out/c.mp4" });
+    expect(paceEntries()).toHaveLength(1);
+    __resetExportQueue();
+    await run({ seconds: 600, fraction: 1, end: "finish", steps: 2, destPath: "C:/out/d.mp4" });
+    expect(paceEntries()).toHaveLength(2);
+  });
+
   it("is told against the model's own figure, so a correction it has learned is not learned again on top of itself", async () => {
     await run({ seconds: 300, fraction: 0.25, end: "cancel" });
     __resetExportQueue();
@@ -912,13 +930,13 @@ describe("what the estimate learns when a run ends", () => {
     expect(second.ratio).toBeCloseTo(first.ratio, 6);
   });
 
-  it("learns nothing with the new estimate off, and the switch is read once, when the export was admitted: a flip mid-run changes nothing", async () => {
+  it("learns nothing with the new estimate off, and nothing once the server switches it off while the export runs, though the export itself was admitted with it on", async () => {
     __setExportFlag("estimate_v2", false);
     await run({ seconds: 300, fraction: 0.25, end: "cancel" });
     expect(paceEntries()).toEqual([]);
     __resetExportQueue();
     __setExportFlag("estimate_v2", true);
-    // admitted with the switch on, switched off while it runs: the decision at admission stands
+    // admitted with the switch on, switched off while it runs: what was said at admission stands, and nothing is learned meanwhile
     const { fs, store, jobs } = await fresh();
     const delivery = localDeliveryPort(store);
     jobs.delivery = delivery;
@@ -954,7 +972,12 @@ describe("what the estimate learns when a run ends", () => {
     cancelExport(sub.job_id, "person_card");
     flip();
     await whenExportsSettle();
-    expect(paceEntries()).toHaveLength(1);
+    expect(paceEntries()).toEqual([]);
+    const record = listExportRecords().find((r) => r.job_id === sub.job_id) as Any;
+    expect(
+      record.estimate,
+      "the estimate it was admitted with is still on its record",
+    ).toBeDefined();
   });
 
   it("fails soft: a store that cannot be read or written leaves the export ending as it would have", async () => {
