@@ -421,9 +421,21 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     });
 
     it("does not make a run that is not over the cap into one that is: a sleep adds at most MAX_GAP_S to what it will take", () => {
-      // a run projected at 82% of twice the cap, put to sleep for 5 minutes in its middle: counted whole the
-      // sleep would take it past twice the cap (a stop), counted for MAX_GAP_S it stays under
-      const base = scaleCapture(cap, kFor(cap, 0.82 * DOUBLE_CAP_S));
+      // A run the check lets finish on its own, put to sleep for 5 minutes in its middle: counted whole the sleep
+      // would take it past twice the cap (a stop), counted for MAX_GAP_S it stays under. A real run is not even
+      // (the real capture's first third runs up to 48% slower than its average, so the check projects it too long
+      // early and stops it BY ITSELF from 80% of twice the cap, with no sleep at all): the run is the slowest of the
+      // shares below for which the replay of the capture itself lets it finish, never a number chosen for another
+      // capture. A capture with no such share cannot show a sleep.
+      const share = [0.78, 0.76].find(
+        (s) => replayMonitor(scaleCapture(cap, kFor(cap, s * DOUBLE_CAP_S))).stoppedAt === null,
+      );
+      expect(
+        share,
+        "the check stops this capture by itself from 76% of twice the cap: it cannot show a sleep (make it more even)",
+      ).toBeDefined();
+      const base = scaleCapture(cap, kFor(cap, share! * DOUBLE_CAP_S));
+      expect(replayMonitor(base).stoppedAt, "the premise: the run alone is not stopped").toBeNull();
       const baseAt = segmentBursts(base.chunks)[Math.floor(stats.bursts * 0.4)].tMs;
       const slept = withGap(base, baseAt, GAP_MS);
       expect(
@@ -437,6 +449,26 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
         replayMonitor(slept).stoppedAt,
         "the sleep was taken for the engine's work",
       ).toBeNull();
+    });
+
+    it("adds at most MAX_GAP_S to the run's time at every output after it, wherever in the run it comes", () => {
+      // the plain arithmetic of the rule, true of any run whatever its pace: a sleep is not the engine's work past
+      // MAX_GAP_S (the sleep early, in the middle, late, and right after an output)
+      const plain = replayMonitor(cap, { liveStop: false });
+      for (const where of [0.02, 0.2, 0.4, 0.6, 0.85, 0.98]) {
+        const slept = replayMonitor(
+          withGap(cap, burstTimes[Math.floor(burstTimes.length * where)], GAP_MS),
+          {
+            liveStop: false,
+          },
+        );
+        expect(slept.steps).toHaveLength(plain.steps.length);
+        plain.steps.forEach((step, i) => {
+          const extra = slept.steps[i].live.activeS - step.live.activeS;
+          expect(extra, `output ${i}, sleep after ${where}`).toBeLessThanOrEqual(MAX_GAP_S + 1e-6);
+          expect(extra, `output ${i}, sleep after ${where}`).toBeGreaterThanOrEqual(-1e-6);
+        });
+      }
     });
 
     it("keeps no pace from a run that had a gap in it, and does from the same run without one", async () => {
