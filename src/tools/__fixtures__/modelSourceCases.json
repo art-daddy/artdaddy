@@ -1,0 +1,627 @@
+{
+  "about": "The cases of acceptModelSources(raw, hosts) in src/tools/modelManifest.ts, which decides the extra places a remote answer may name for fetching the speech model. Two readers must give exactly these answers: the TypeScript test (src/tools/modelManifest.test.ts, which also checks that max_sources, max_length and allowed_hosts are the function's own, that every accept_entry is written the way the parser writes it, and that an answer holds only entries that were in the list it was given) and the server's Python twin.\n\nTHE RULES. The answer is a list of strings, worked out like this:\n1. raw must be a list (a JSON array). Anything else (null, a string, an object, a number, true) gives [].\n2. The list may hold at most max_sources entries, counted BEFORE repeats are removed. More gives [].\n3. EVERY entry must be acceptable (rules 4 to 11). If one is not, the answer is [] (a list is never trusted in part).\n4. An acceptable entry is a string. A number, null, true, an object or a nested list is not.\n5. It is at most max_length characters long, counted as JavaScript counts them (UTF-16 code units, the string as given). Rule 11 leaves only ASCII strings, so for any string that can pass, UTF-16 code units, code points and bytes are the same count.\n6. It is an https address: the scheme is https (not http, ftp, wss, file, data or javascript; an address with no scheme is refused too).\n7. It has no user-info (nothing like name@ or name:password@ before the host), no port (not 8443, and not even 443 or an empty port after a colon) and no fragment (no # anywhere, not even a bare # at the end; %23 is just an escape and is fine).\n8. Its host (for a string that passes rule 11, the text between https:// and the next slash) is a public name: at least two labels (the parts between dots), none of them empty (no leading dot, no trailing dot, no two dots in a row), every label made only of the lower-case letters a to z, digits and hyphens, not starting or ending with a hyphen and not starting with xn-- (no internationalised names), the last label not made only of digits (that is an IPv4 address in disguise), not localhost and not a name under localhost, and not an IPv6 address in brackets.\n9. The host is one of allowed_hosts or a name under one (it ends with a dot and then that name). allowed_hosts are lower case.\n10. Nothing else about the path or the query is limited: a query is allowed (an empty one too), and capitals, dots, dashes, underscores, at signs and escapes in them are fine.\n11. CANONICAL: the string is already written exactly the way the WHATWG URL parser writes it. In JavaScript: new URL(entry).href === entry. An address that needed any cleaning up is refused, never repaired, so that no other program has to reproduce the parser to agree with this one.\n12. The entries that pass come back exactly as given, in the order given, each once: an entry equal character for character to an earlier one is dropped and the first is kept. Two entries that differ only in the capitals of their path are two places.\n\nCANONICAL FORM, in plain words. The string is ASCII only: printable characters from ! to ~, so no space, no control character, no tab or newline (not even at the ends) and nothing outside ASCII. The scheme and the host are in lower case (capitals in the path and the query are kept by the parser and are fine). The host is written the way the parser writes it: a letter outside ASCII, a full-width letter, an ideographic full stop, a soft hyphen or a zero-width space in a host is rewritten or dropped by the parser, so it is not canonical. There is no default port (no :443, no empty port). There is a path and it starts with a slash: https://huggingface.co is not canonical, https://huggingface.co/ is, and so is a slash followed by a query. There are no dot segments: no path segment that is . or .., and a dot written as the escape %2e (in either letter case) counts as a dot, so %2e, .%2E, %2e. and %2E%2e are dot segments too; a segment such as ... or b..c or .d is fine. Only forward slashes: a backslash is rewritten to a slash. Every character the parser would percent-encode is written as an escape with UPPER-case hex digits: a space is %20, a letter outside ASCII is its UTF-8 bytes (%C3%A9), and the same goes for control characters, DEL and, in the path, the characters double quote, less-than, greater-than, left brace, right brace and backtick, and, in the query, double quote, less-than, greater-than and the apostrophe. An escape that is ALREADY in the string is left alone by the parser whatever its hex digits (%2f, %2F and %c3%a9 are all canonical, and they are different strings), so is an escape of a plain letter (%41), and so is a % that starts no escape. A reader that has no URL parser decides rule 11 with a pattern, and must never accept a string that is not canonical. Where the parser's behaviour is exotic and no case in this file shows it (for example the other ASCII characters the parser keeps in a path, such as ^ or |), a reader that cannot be sure must refuse: refusing a place the function would take is harmless, taking one it refuses is not.\n\nHOW A READER USES THE DATA, with hosts = allowed_hosts: legit_entry is itself accepted; for each refuse_entry, accept([entry]), accept([legit_entry, entry]) and accept([entry, legit_entry]) are all []; for each accept_entry, accept([entry]) == [entry] (it is already canonical, so nothing is rewritten); for each lists case, accept(raw) == expect, where raw is any JSON value (null, a string, an object, a number, nested lists, a list).",
+  "allowed_hosts": ["huggingface.co"],
+  "max_sources": 3,
+  "max_length": 300,
+  "legit_entry": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+  "refuse_entry": [
+    { "what": "a plain http address", "entry": "http://huggingface.co/a/ggml-small.bin" },
+    { "what": "user-info", "entry": "https://user@huggingface.co/a" },
+    { "what": "user-info with a password", "entry": "https://user:pw@huggingface.co/a" },
+    {
+      "what": "the allowed name as user-info before another host",
+      "entry": "https://huggingface.co@evil.example/a"
+    },
+    {
+      "what": "the allowed name as the start of another domain",
+      "entry": "https://huggingface.co.example.com/a"
+    },
+    {
+      "what": "the allowed name glued to a longer name",
+      "entry": "https://examplehuggingface.co/a"
+    },
+    { "what": "a sibling top-level domain", "entry": "https://huggingface.com/a" },
+    { "what": "localhost", "entry": "https://localhost/a" },
+    { "what": "localhost in capitals", "entry": "https://LOCALHOST/a" },
+    { "what": "a name under localhost", "entry": "https://huggingface.co.localhost/a" },
+    { "what": "a loopback address", "entry": "https://127.0.0.1/a" },
+    { "what": "a loopback address as one decimal number", "entry": "https://2130706433/a" },
+    { "what": "a loopback address in hexadecimal", "entry": "https://0x7f000001/a" },
+    { "what": "a loopback address in octal", "entry": "https://0177.0.0.1/a" },
+    { "what": "a loopback address in short form", "entry": "https://127.1/a" },
+    { "what": "a private network address", "entry": "https://192.168.1.10/a" },
+    { "what": "an IPv6 loopback address", "entry": "https://[::1]/a" },
+    { "what": "an IPv6 address", "entry": "https://[2001:db8::1]/a" },
+    { "what": "a port other than 443", "entry": "https://huggingface.co:8443/a" },
+    { "what": "port 80 under https", "entry": "https://huggingface.co:80/a" },
+    { "what": "port zero", "entry": "https://huggingface.co:0/a" },
+    { "what": "a fragment", "entry": "https://huggingface.co/a#part" },
+    { "what": "an empty fragment", "entry": "https://huggingface.co/a#" },
+    { "what": "a trailing-dot host", "entry": "https://huggingface.co./a" },
+    { "what": "a trailing-dot subdomain", "entry": "https://cdn.huggingface.co./a" },
+    { "what": "an empty label at the start", "entry": "https://.huggingface.co/a" },
+    { "what": "an empty label in the middle", "entry": "https://a..huggingface.co/a" },
+    { "what": "a javascript address", "entry": "javascript:alert(1)" },
+    { "what": "a file address", "entry": "file:///etc/passwd" },
+    { "what": "a data address", "entry": "data:text/plain,hello" },
+    {
+      "what": "an over-long address",
+      "entry": "https://huggingface.co/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "what": "one character over the limit",
+      "entry": "https://huggingface.co/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "what": "47 accented letters as they are (not written the way the parser writes them: each becomes %C3%A9, which would make 305 characters)",
+      "entry": "https://huggingface.co/\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"
+    },
+    {
+      "what": "a look-alike letter in the host (Cyrillic e)",
+      "entry": "https://huggingfac\u0435.co/a"
+    },
+    { "what": "a look-alike letter in a subdomain", "entry": "https://cdn.huggingfac\u0435.co/a" },
+    {
+      "what": "a look-alike letter in the allowed name's first part",
+      "entry": "https://\u04bbuggingface.co/a"
+    },
+    {
+      "what": "an encoded dot that builds another host",
+      "entry": "https://huggingface.co%2eevil.example/a"
+    },
+    {
+      "what": "a backslash that ends the host early",
+      "entry": "https://evil.example\\@huggingface.co/a"
+    },
+    { "what": "a name with no dot", "entry": "https://huggingface/a" },
+    { "what": "a name that is only a top-level domain", "entry": "https://co/a" },
+    { "what": "no scheme", "entry": "huggingface.co/a" },
+    { "what": "a scheme-relative address", "entry": "//huggingface.co/a" },
+    { "what": "a path only", "entry": "/a/b" },
+    { "what": "an empty string", "entry": "" },
+    { "what": "spaces only", "entry": "   " },
+    {
+      "what": "a hyphen that glues the allowed name to another domain",
+      "entry": "https://huggingface.co-evil.example/a"
+    },
+    {
+      "what": "the allowed name in the path of another host",
+      "entry": "https://evil.example/huggingface.co/a"
+    },
+    {
+      "what": "the allowed name in the query of another host",
+      "entry": "https://evil.example/?u=https://huggingface.co/a"
+    },
+    {
+      "what": "a question mark that ends the host before the allowed name",
+      "entry": "https://evil.example?.huggingface.co/a"
+    },
+    {
+      "what": "a punycode look-alike of the allowed name",
+      "entry": "https://xn--huggingfac-tsi.co/a"
+    },
+    {
+      "what": "malformed punycode under the allowed name",
+      "entry": "https://xn--a.huggingface.co/a"
+    },
+    {
+      "what": "valid punycode under the allowed name (no internationalised label is taken: a label may hold only a-z, 0-9 and hyphens, and never starts with xn--)",
+      "entry": "https://xn--caf-dma.huggingface.co/a"
+    },
+    {
+      "what": "an underscore in a host label (a label may hold only a-z, 0-9 and hyphens)",
+      "entry": "https://a_b.huggingface.co/a"
+    },
+    {
+      "what": "a label that starts with a hyphen",
+      "entry": "https://-a.huggingface.co/a"
+    },
+    {
+      "what": "a label that ends with a hyphen",
+      "entry": "https://a-.huggingface.co/a"
+    },
+    {
+      "what": "a tab that the parser drops, leaving another host",
+      "entry": "https://huggingface.co\t.evil.example/a"
+    },
+    { "what": "a control character inside the host", "entry": "https://hugging\u0001face.co/a" },
+    { "what": "a NUL inside the host", "entry": "https://hugging\u0000face.co/a" },
+    { "what": "a space inside the host", "entry": "https://hugging face.co/a" },
+    { "what": "an encoded tab inside the host", "entry": "https://hugging%09face.co/a" },
+    { "what": "an encoded NUL inside the host", "entry": "https://hugging%00face.co/a" },
+    { "what": "a NUL straight after the host", "entry": "https://huggingface.co\u0000/a" },
+    { "what": "a no-break space before the scheme", "entry": "\u00a0https://huggingface.co/a" },
+    { "what": "an ftp address on the allowed host", "entry": "ftp://huggingface.co/a" },
+    { "what": "a websocket address on the allowed host", "entry": "wss://huggingface.co/a" },
+    {
+      "what": "capitals in the host (the parser writes lower case)",
+      "entry": "https://HuggingFace.CO/a/b"
+    },
+    {
+      "what": "capitals in the scheme (the parser writes lower case)",
+      "entry": "HTTPS://huggingface.co/a/b"
+    },
+    {
+      "what": "an explicit port 443 (the parser drops a default port)",
+      "entry": "https://huggingface.co:443/a/b"
+    },
+    {
+      "what": "an empty port (the parser drops the colon)",
+      "entry": "https://huggingface.co:/a/b"
+    },
+    {
+      "what": "dot segments (the parser resolves them away)",
+      "entry": "https://huggingface.co/a/./b/../c"
+    },
+    {
+      "what": "a space in the path (the parser writes %20)",
+      "entry": "https://huggingface.co/a b"
+    },
+    {
+      "what": "an encoded letter in the host (the parser writes the plain letter)",
+      "entry": "https://%68uggingface.co/a"
+    },
+    {
+      "what": "full-width letters the parser maps to the real host (it writes the plain letters)",
+      "entry": "https://\uff48uggingface.co/a"
+    },
+    {
+      "what": "capitals in a subdomain (the parser writes lower case)",
+      "entry": "https://CDN-LFS.HuggingFace.co/a/b"
+    },
+    { "what": "no path at all (the parser writes a slash)", "entry": "https://huggingface.co" },
+    {
+      "what": "an encoded dot segment (the parser resolves it away)",
+      "entry": "https://huggingface.co/a/%2e%2e/b"
+    },
+    {
+      "what": "a non-ASCII subdomain (the parser writes it as punycode)",
+      "entry": "https://caf\u00e9.huggingface.co/a"
+    },
+    {
+      "what": "capitals in a punycode subdomain (the parser writes lower case)",
+      "entry": "https://XN--CAF-DMA.huggingface.co/a"
+    },
+    {
+      "what": "an ideographic full stop the parser reads as a dot (it writes a plain dot)",
+      "entry": "https://huggingface\u3002co/a"
+    },
+    {
+      "what": "a soft hyphen inside the host (the parser drops it)",
+      "entry": "https://hugging\u00adface.co/a"
+    },
+    {
+      "what": "a zero-width space inside the host (the parser drops it)",
+      "entry": "https://hugging\u200bface.co/a"
+    },
+    {
+      "what": "a tab inside the path (the parser drops it)",
+      "entry": "https://huggingface.co/a\tb"
+    },
+    {
+      "what": "a newline inside the path (the parser drops it)",
+      "entry": "https://huggingface.co/a\nb"
+    },
+    {
+      "what": "a carriage return inside the path (the parser drops it)",
+      "entry": "https://huggingface.co/a\rb"
+    },
+    {
+      "what": "a tab inside the host (the parser drops it)",
+      "entry": "https://hugging\tface.co/a"
+    },
+    {
+      "what": "a newline inside the host (the parser drops it)",
+      "entry": "https://hugging\nface.co/a"
+    },
+    {
+      "what": "a tab inside the scheme (the parser drops it)",
+      "entry": "ht\ttps://huggingface.co/a"
+    },
+    {
+      "what": "a tab before and a newline after the address (the parser drops them)",
+      "entry": "\thttps://huggingface.co/a\n"
+    },
+    {
+      "what": "spaces around the address (the parser trims them)",
+      "entry": "  https://huggingface.co/a  "
+    },
+    {
+      "what": "control characters around the address (the parser trims them)",
+      "entry": "\u0001https://huggingface.co/a\u001f"
+    },
+    {
+      "what": "a NUL inside the path (the parser writes %00)",
+      "entry": "https://huggingface.co/a\u0000b"
+    },
+    {
+      "what": "a control character inside the path (the parser writes %01)",
+      "entry": "https://huggingface.co/a\u0001b"
+    },
+    {
+      "what": "a delete character inside the path (the parser writes %7F)",
+      "entry": "https://huggingface.co/a\u007fb"
+    },
+    {
+      "what": "a control character inside the query (the parser writes %01)",
+      "entry": "https://huggingface.co/a?x=\u0001y"
+    },
+    {
+      "what": "a no-break space inside the path (the parser writes %C2%A0)",
+      "entry": "https://huggingface.co/a\u00a0b"
+    },
+    {
+      "what": "one slash after the scheme (the parser writes two)",
+      "entry": "https:/huggingface.co/a"
+    },
+    {
+      "what": "no slash after the scheme (the parser writes two)",
+      "entry": "https:huggingface.co/a"
+    },
+    {
+      "what": "backslashes in place of the slashes after the scheme (the parser writes slashes)",
+      "entry": "https:\\\\huggingface.co/a"
+    },
+    {
+      "what": "a backslash in place of a slash after the host (the parser writes a slash)",
+      "entry": "https://huggingface.co\\a\\b"
+    },
+    {
+      "what": "an at sign after a question mark, which is not user-info (the parser writes a slash before the question mark)",
+      "entry": "https://huggingface.co?@evil.example/a"
+    },
+    {
+      "what": "a double quote in the path (the parser writes %22)",
+      "entry": "https://huggingface.co/a\"b"
+    },
+    {
+      "what": "angle brackets in the path (the parser writes %3C and %3E)",
+      "entry": "https://huggingface.co/a<b>"
+    },
+    {
+      "what": "braces in the path (the parser writes %7B and %7D)",
+      "entry": "https://huggingface.co/a{b}"
+    },
+    {
+      "what": "a backtick in the path (the parser writes %60)",
+      "entry": "https://huggingface.co/a`b"
+    },
+    {
+      "what": "a backslash inside the path (the parser writes a slash)",
+      "entry": "https://huggingface.co/a\\b"
+    },
+    {
+      "what": "an accented letter in the path (the parser writes %C3%A9)",
+      "entry": "https://huggingface.co/caf\u00e9"
+    },
+    {
+      "what": "an emoji in the path (the parser writes its four bytes as escapes)",
+      "entry": "https://huggingface.co/a\ud83d\ude00"
+    },
+    {
+      "what": "an apostrophe in the query (the parser writes %27)",
+      "entry": "https://huggingface.co/a?x='y'"
+    },
+    {
+      "what": "a space in the query (the parser writes %20)",
+      "entry": "https://huggingface.co/a?x=a b"
+    },
+    {
+      "what": "a double quote in the query (the parser writes %22)",
+      "entry": "https://huggingface.co/a?x=\""
+    },
+    {
+      "what": "an accented letter in the query (the parser writes %C3%A9)",
+      "entry": "https://huggingface.co/a?x=caf\u00e9"
+    },
+    {
+      "what": "a dot segment as the last segment (the parser resolves it away)",
+      "entry": "https://huggingface.co/a/.."
+    },
+    {
+      "what": "a single dot as the last segment (the parser resolves it away)",
+      "entry": "https://huggingface.co/a/."
+    },
+    {
+      "what": "an encoded dot segment in capitals (the parser resolves it away)",
+      "entry": "https://huggingface.co/a/%2E%2E/b"
+    },
+    {
+      "what": "an encoded dot segment half written with a dot (the parser resolves it away)",
+      "entry": "https://huggingface.co/a/.%2e/b"
+    },
+    {
+      "what": "a newline at the very end only (the parser drops it)",
+      "entry": "https://huggingface.co/a\n"
+    },
+    {
+      "what": "a space at the very end only (the parser trims it)",
+      "entry": "https://huggingface.co/a "
+    }
+  ],
+  "accept_entry": [
+    {
+      "what": "a plain address",
+      "entry": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"
+    },
+    { "what": "a subdomain", "entry": "https://cdn-lfs.huggingface.co/a/b" },
+    { "what": "a deeper subdomain", "entry": "https://a.b.huggingface.co/x" },
+    { "what": "a deep subdomain", "entry": "https://a.b.c.d.huggingface.co/x" },
+    { "what": "a query", "entry": "https://huggingface.co/a/b?download=true" },
+    {
+      "what": "a query with = and &",
+      "entry": "https://huggingface.co/a/b?download=true&revision=main&x=1"
+    },
+    {
+      "what": "the compiled-in address itself",
+      "entry": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+    },
+    { "what": "an empty query", "entry": "https://huggingface.co/a?" },
+    { "what": "the host and a slash only", "entry": "https://huggingface.co/" },
+    { "what": "a space written as %20 in the path", "entry": "https://huggingface.co/a%20b" },
+    {
+      "what": "an accented letter written as its escapes, in upper-case hex",
+      "entry": "https://huggingface.co/caf%C3%A9"
+    },
+    {
+      "what": "an accented letter written as its escapes, in lower-case hex, kept as it is",
+      "entry": "https://huggingface.co/caf%c3%a9"
+    },
+    {
+      "what": "an escape written in lower case, left as it is",
+      "entry": "https://huggingface.co/a%2fb"
+    },
+    {
+      "what": "an escape of a plain letter, which the parser does not decode",
+      "entry": "https://huggingface.co/%41"
+    },
+    {
+      "what": "capitals in the path and the query, which the parser keeps",
+      "entry": "https://huggingface.co/Some-Org/Some-Copy/resolve/Main/GGML-Small.bin?Download=True"
+    },
+    {
+      "what": "a last segment with dots and dashes",
+      "entry": "https://huggingface.co/some-org/some-copy/resolve/main/ggml-small-q8_0.v1.bin"
+    },
+    {
+      "what": "dots that do not make a dot segment",
+      "entry": "https://huggingface.co/a/.../b..c/.d/e."
+    },
+    { "what": "empty segments and a trailing slash", "entry": "https://huggingface.co/a//b/" },
+    {
+      "what": "an at sign in the path, which is not user-info",
+      "entry": "https://huggingface.co/@evil.example/a"
+    }
+  ],
+  "lists": [
+    { "what": "null", "raw": null, "expect": [] },
+    {
+      "what": "a bare string address",
+      "raw": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+      "expect": []
+    },
+    { "what": "an empty object", "raw": {}, "expect": [] },
+    {
+      "what": "an object that looks like a list",
+      "raw": {
+        "0": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "length": 1
+      },
+      "expect": []
+    },
+    { "what": "a number", "raw": 3, "expect": [] },
+    { "what": "true", "raw": true, "expect": [] },
+    { "what": "an empty list", "raw": [], "expect": [] },
+    { "what": "a list holding only a number", "raw": [7], "expect": [] },
+    {
+      "what": "a list holding a legitimate entry and then a number",
+      "raw": ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin", 7],
+      "expect": []
+    },
+    {
+      "what": "a list holding a number and then a legitimate entry",
+      "raw": [7, "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"],
+      "expect": []
+    },
+    { "what": "a list holding only null", "raw": [null], "expect": [] },
+    {
+      "what": "a list holding a legitimate entry and then null",
+      "raw": ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin", null],
+      "expect": []
+    },
+    {
+      "what": "a list holding null and then a legitimate entry",
+      "raw": [null, "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"],
+      "expect": []
+    },
+    {
+      "what": "a list holding only an object that carries an address",
+      "raw": [{ "href": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin" }],
+      "expect": []
+    },
+    {
+      "what": "a list holding a legitimate entry and then an object that carries an address",
+      "raw": [
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        { "href": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin" }
+      ],
+      "expect": []
+    },
+    {
+      "what": "a list holding an object that carries an address and then a legitimate entry",
+      "raw": [
+        { "href": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin" },
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"
+      ],
+      "expect": []
+    },
+    {
+      "what": "a list holding only a nested list",
+      "raw": [["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"]],
+      "expect": []
+    },
+    {
+      "what": "a list holding a legitimate entry and then a nested list",
+      "raw": [
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"]
+      ],
+      "expect": []
+    },
+    {
+      "what": "a list holding a nested list and then a legitimate entry",
+      "raw": [
+        ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"],
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"
+      ],
+      "expect": []
+    },
+    { "what": "a list holding only true", "raw": [true], "expect": [] },
+    {
+      "what": "a list holding a legitimate entry and then true",
+      "raw": ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin", true],
+      "expect": []
+    },
+    {
+      "what": "a list holding true and then a legitimate entry",
+      "raw": [true, "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"],
+      "expect": []
+    },
+    {
+      "what": "a list holding a legitimate entry and then an empty string",
+      "raw": ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin", ""],
+      "expect": []
+    },
+    {
+      "what": "a list holding an empty string and then a legitimate entry",
+      "raw": ["", "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"],
+      "expect": []
+    },
+    {
+      "what": "four distinct legitimate entries",
+      "raw": [
+        "https://huggingface.co/a",
+        "https://huggingface.co/b",
+        "https://cdn.huggingface.co/c",
+        "https://cdn-lfs.huggingface.co/d"
+      ],
+      "expect": []
+    },
+    {
+      "what": "four copies of one legitimate entry",
+      "raw": [
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"
+      ],
+      "expect": []
+    },
+    {
+      "what": "three copies of one legitimate entry, kept once",
+      "raw": [
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
+        "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"
+      ],
+      "expect": ["https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin"]
+    },
+    {
+      "what": "three distinct legitimate entries, kept in the order given and not sorted",
+      "raw": [
+        "https://huggingface.co/c",
+        "https://huggingface.co/a",
+        "https://cdn.huggingface.co/b"
+      ],
+      "expect": [
+        "https://huggingface.co/c",
+        "https://huggingface.co/a",
+        "https://cdn.huggingface.co/b"
+      ]
+    },
+    {
+      "what": "a repeat, removed with the first kept",
+      "raw": ["https://huggingface.co/a", "https://huggingface.co/b", "https://huggingface.co/a"],
+      "expect": ["https://huggingface.co/a", "https://huggingface.co/b"]
+    },
+    {
+      "what": "a repeat written another way (capitals and port 443) that comes first: not written the way the parser writes it, so the whole list is refused",
+      "raw": [
+        "https://HUGGINGFACE.co:443/b",
+        "https://huggingface.co/a",
+        "https://huggingface.co/b"
+      ],
+      "expect": []
+    },
+    {
+      "what": "a repeat written another way (capitals and port 443) that comes last: the whole list is refused",
+      "raw": ["https://huggingface.co/a", "https://HuggingFace.CO:443/a"],
+      "expect": []
+    },
+    {
+      "what": "two places that differ only in the capitals of their path are two places, both kept",
+      "raw": ["https://huggingface.co/a", "https://huggingface.co/A"],
+      "expect": ["https://huggingface.co/a", "https://huggingface.co/A"]
+    },
+    {
+      "what": "an address of exactly 300 characters, kept",
+      "raw": [
+        "https://huggingface.co/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "expect": [
+        "https://huggingface.co/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "what": "an address of 301 characters, refused",
+      "raw": [
+        "https://huggingface.co/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "expect": []
+    },
+    {
+      "what": "46 accented letters written as escapes (%C3%A9): 299 characters, kept as given",
+      "raw": [
+        "https://huggingface.co/%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9"
+      ],
+      "expect": [
+        "https://huggingface.co/%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9"
+      ]
+    },
+    {
+      "what": "47 accented letters written as escapes (%C3%A9): 305 characters, refused for its length as given",
+      "raw": [
+        "https://huggingface.co/%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9"
+      ],
+      "expect": []
+    },
+    {
+      "what": "an address of 300 characters as written, with a tab the parser drops: refused, since it is not written the way the parser writes it",
+      "raw": [
+        "https://huggingface.co/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t"
+      ],
+      "expect": []
+    },
+    {
+      "what": "an address of 301 characters as written, 300 once the parser drops a tab: refused (over the limit as written, and not written the way the parser writes it)",
+      "raw": [
+        "https://huggingface.co/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t"
+      ],
+      "expect": []
+    },
+    {
+      "what": "an address of 300 UTF-16 code units (299 code points), its host written with a mathematical bold h: refused, since the parser writes a plain h",
+      "raw": [
+        "https://\ud835\udc21uggingface.co/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "expect": []
+    },
+    {
+      "what": "an address of 301 UTF-16 code units (300 code points), its host written with a mathematical bold h: refused (over the limit in UTF-16 code units, and not written the way the parser writes it)",
+      "raw": [
+        "https://\ud835\udc21uggingface.co/ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "expect": []
+    }
+  ]
+}
