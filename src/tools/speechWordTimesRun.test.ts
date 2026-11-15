@@ -366,6 +366,40 @@ describe("what a launch records on its job", () => {
     expect(off.spec.meta).not.toHaveProperty("wordTimes");
     expect(off.transcript.words[0].start_seconds).toBe(STORED);
   });
+  it("records it on each file's own meta of the job of a run over several files, for a launch on the processor only", async () => {
+    const run = async (processor: boolean) => {
+      localStorage.clear();
+      const jobs = new FakeJobs();
+      __setJobSupervisor(jobs);
+      if (processor) hold();
+      configure(true, true);
+      const rig = engineRig();
+      jobs.onStart = (spec) =>
+        void setTimeout(() => {
+          for (const base of flagValues(spec.args, "-of")) {
+            rig.files.add(`${base}.json`);
+            rig.texts.set(`${base}.json`, spec.args.includes("-dtw") ? CLIP : CLIP_NO_DTW);
+          }
+          jobs.exit(spec.id, 0, "");
+        }, 0);
+      const files = [freshSource(), freshSource()];
+      const outcomes = await ensureTranscripts(rig.ctx(), files, "small", "en");
+      expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
+      const first = (await peekTranscript(rig.ctx(), files[0], "small", "en"))!.words[0];
+      return { spec: jobs.submitted[0], first: first.start_seconds };
+    };
+    const processor = await run(true);
+    expect(processor.spec.args.slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
+    const items = (processor.spec.meta as { items: unknown[] }).items;
+    expect(items).toHaveLength(2);
+    for (const item of items) expect(item).toMatchObject({ kind: "transcript", wordTimes: true });
+    expect(processor.first).toBe(SOUND);
+    const chip = await run(false);
+    expect(chip.spec.args).not.toContain("-dtw");
+    for (const item of (chip.spec.meta as { items: unknown[] }).items)
+      expect(item).not.toHaveProperty("wordTimes");
+    expect(chip.first).toBe(STORED);
+  });
 });
 
 describe("a run a crashed page left in the app process is read the way it was made", () => {

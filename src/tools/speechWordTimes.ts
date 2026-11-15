@@ -83,10 +83,14 @@ export function tokenOnSound(stored: Interval, tDtw: unknown): Interval | null {
   return { from: stored.from + shift, to: stored.to + shift };
 }
 
-/** The words of a transcript, in order, made fit to be read in order after their tokens moved: a start is never before
- *  the start of the word before it (across segments too) or below 0, an end is never before its start, and a word that
- *  runs over the next is cut back to where the next starts, so words touch and never overlap. A time that is not a
- *  number is no time: the word starts where the one before it did and ends where it starts. */
+/** The words of a transcript, in order, made fit to be read in order after their tokens moved. Each rule has one reason:
+ *  - a start is never before the start of the word before it (across segments too), and never below 0: the alignment
+ *    is made in order, so a start that goes back is a token aligned somewhere else, and everything that reads the words
+ *    (captions, `get_transcript`, the word editor) reads them as a sequence from the start of the audio;
+ *  - an end is never before its start: a token keeps the length it was stored with, made for its stored time;
+ *  - a word that runs over the next is cut back to where the next one starts: that stored length is longer than the gap
+ *    the alignment leaves, and two words must not claim the same sound. They touch, they never overlap.
+ *  A time that is not a number is no time: the word starts where the one before it did and ends where it starts. */
 export function settleWords(words: readonly Span[]): Span[] {
   let before = 0;
   const settled = words.map((w) => {
