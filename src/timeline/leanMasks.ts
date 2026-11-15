@@ -9,7 +9,7 @@
 // Everything here is pure. The rectangle of a frame comes from the product's OWN aperture expressions evaluated in the arithmetic of ffmpeg's
 // evaluator (leanExpr.ts), never guessed: the box of frame f is the set of integer columns X with (W - a)/2 <= X < (W + a)/2 (and the same for rows),
 // where a and b are the aperture's width and height at T = f * (1 / fps).
-import { compileLeanExpr } from "./leanExpr";
+import { compileLeanExpr, usesPow } from "./leanExpr";
 
 /** Columns x0 through x1 - 1 and rows y0 through y1 - 1, in pre-scaled pixels. */
 export type Rect = readonly [x0: number, x1: number, y0: number, y1: number];
@@ -37,7 +37,9 @@ export const LEAN_MASK_EXTRA_FRAMES = 2;
 export const LEAN_MAX_GROUPS_PER_CLIP = 2000;
 
 /** The rectangle of every frame in [from, to + LEAN_MASK_EXTRA_FRAMES), or null when an expression is outside the evaluator's subset or gives a
- *  value that is not a finite number (the caller keeps today's recipe). */
+ *  value that is not a finite number (the caller keeps today's recipe). Also null when a frame's rectangle depends on the last bit of pow: ffmpeg's own
+ *  pow(x, 2) is the C library's and differs from x * x by one float on 0.33 percent of inputs (leanExpr.ts), and an edge that lands on an integer moves a
+ *  whole column or row with it, so the rectangle is only exact where it is the same with pow a float lower and a float higher. */
 export function apertureRects(input: ApertureInput): Rect[] | null {
   const { width: W, height: H, fps } = input;
   if (!(W > 0 && H > 0 && Number.isInteger(W) && Number.isInteger(H) && fps >= 1)) return null;
@@ -45,6 +47,21 @@ export function apertureRects(input: ApertureInput): Rect[] | null {
   const widthOf = compileLeanExpr(input.widthExpr);
   const heightOf = compileLeanExpr(input.heightExpr);
   if (!widthOf || !heightOf) return null;
+  const others =
+    usesPow(input.widthExpr) || usesPow(input.heightExpr)
+      ? [-1, 1].map(
+          (u) =>
+            [compileLeanExpr(input.widthExpr, u), compileLeanExpr(input.heightExpr, u)] as const,
+        )
+      : [];
+  if (others.some(([w, h]) => !w || !h)) return null;
+  const rectOf = (a: number, b: number): Rect => [
+    // gte(X,(W-a)/2) * lt(X,(W+a)/2) on integer X selects the columns ceil((W-a)/2) through ceil((W+a)/2) - 1; the same for rows
+    Math.min(W, Math.max(0, Math.ceil((W - a) / 2))),
+    Math.min(W, Math.max(0, Math.ceil((W + a) / 2))),
+    Math.min(H, Math.max(0, Math.ceil((H - b) / 2))),
+    Math.min(H, Math.max(0, Math.ceil((H + b) / 2))),
+  ];
   const tick = 1 / fps; // av_q2d of the 1/fps time base every clip chain has after its `fps` filter
   const rects: Rect[] = [];
   for (let f = input.from; f < input.to + LEAN_MASK_EXTRA_FRAMES; f += 1) {
@@ -52,13 +69,15 @@ export function apertureRects(input: ApertureInput): Rect[] | null {
     const a = widthOf(env);
     const b = heightOf(env);
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-    // gte(X,(W-a)/2) * lt(X,(W+a)/2) on integer X selects the columns ceil((W-a)/2) through ceil((W+a)/2) - 1; the same for rows
-    rects.push([
-      Math.min(W, Math.max(0, Math.ceil((W - a) / 2))),
-      Math.min(W, Math.max(0, Math.ceil((W + a) / 2))),
-      Math.min(H, Math.max(0, Math.ceil((H - b) / 2))),
-      Math.min(H, Math.max(0, Math.ceil((H + b) / 2))),
-    ]);
+    const rect = rectOf(a, b);
+    for (const [otherWidth, otherHeight] of others) {
+      const a2 = otherWidth!(env);
+      const b2 = otherHeight!(env);
+      if (!Number.isFinite(a2) || !Number.isFinite(b2)) return null;
+      const other = rectOf(a2, b2);
+      if (other.some((v, i) => v !== rect[i])) return null;
+    }
+    rects.push(rect);
   }
   return rects;
 }

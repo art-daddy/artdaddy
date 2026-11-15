@@ -436,17 +436,20 @@ describe("fix 2: every window over a wide grid, judged by a second evaluator", (
                 const window = m[2] === undefined ? null : translated(m[2]);
                 const wipeRight = m[1].includes("gt(X,W*(1-");
                 for (let k = -8; k <= total + 8; k++) {
-                  const T = k / fps;
-                  let changes = false;
-                  for (const W of [2, 1920])
-                    for (const X of wipeRight ? [1, W >> 1, W - 1] : [0, 1, W >> 1, W - 1])
-                      if (factor({ T, W, X }) !== 1) changes = true;
-                  evaluated += 1;
-                  if (changes && window)
-                    expect(
-                      window({ T }),
-                      `${kind} ${rate} fps cut ${cut} dur ${frames}+${hair}: ${m[1]} at frame ${k}, window ${m[2]}`,
-                    ).not.toBe(0);
+                  // ffmpeg's geq and enable read the time of frame k as k * (1 / fps) (pts times av_q2d of the time base: tested against the app's ffmpeg on 11 rates, closure G28), which is
+                  // a different float from k / fps on about a third of the frames; this grid used to read only the quotient, so it could not see a window that is right for one and wrong for the other
+                  for (const T of [k * (1 / fps), k / fps]) {
+                    let changes = false;
+                    for (const W of [2, 1920])
+                      for (const X of wipeRight ? [1, W >> 1, W - 1] : [0, 1, W >> 1, W - 1])
+                        if (factor({ T, W, X }) !== 1) changes = true;
+                    evaluated += 1;
+                    if (changes && window)
+                      expect(
+                        window({ T }),
+                        `${kind} ${rate} fps cut ${cut} dur ${frames}+${hair}: ${m[1]} at frame ${k} (T ${T}), window ${m[2]}`,
+                      ).not.toBe(0);
+                  }
                 }
                 if (window) windows += 1;
               }

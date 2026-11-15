@@ -2,7 +2,9 @@
 // the cover aperture in render.ts, the alpha windows in leanWindows.ts): numbers, the variables T (or t), W, H, X and Y, `+ - * /`, unary minus,
 // parentheses and the functions if, lt, lte, gt, gte, between, eq, not, max, min, round, floor, ceil, abs, clip, pow. It evaluates in IEEE doubles in the order ffmpeg's evaluator does, so a
 // value computed here is the value ffmpeg's `geq`/`scale` computes for the same T, W and H (that is what lets the lean paths place a mask
-// exactly where the per-pixel expression would have). There is no `eval` and no `new Function`: the desktop webview may forbid both, and a fix
+// exactly where the per-pixel expression would have), EXCEPT pow(x, 2): ffmpeg calls the C library's pow, which differs from x * x by one unit in the last place on 0.33 percent of
+// inputs of its own Windows build (measured: rig\tmp\probe\pow_probe.mjs against 2,000,000 values; EXP-1 of the 16 Nov re-audit found 5 such values in 137,736 compared bit for bit).
+// A decision that must hold whatever that last bit is compiles the text again with `powUlps` (-1, +1). There is no `eval` and no `new Function`: the desktop webview may forbid both, and a fix
 // that silently never runs is the failure this lane must not ship.
 //
 // Anything outside the subset (an unknown name or function, a stray token, a missing parenthesis) compiles to `null`, never throws: the caller
@@ -18,6 +20,24 @@ export interface LeanEnv {
 }
 
 export type LeanExpr = (env: LeanEnv) => number;
+
+/** The float `ulps` steps above (positive) or below (negative) a number. */
+export function stepUlps(x: number, ulps: number): number {
+  if (ulps === 0 || !Number.isFinite(x)) return x;
+  if (x === 0) return ulps * Number.MIN_VALUE;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  view.setBigInt64(
+    0,
+    view.getBigInt64(0) + (x > 0 === ulps > 0 ? 1n : -1n) * BigInt(Math.abs(ulps)),
+  );
+  return view.getFloat64(0);
+}
+
+/** True when the text calls pow: the one function whose last bit is not the same on every ffmpeg (see `compileLeanExpr`). */
+export function usesPow(text: string): boolean {
+  return /\bpow\(/.test(text);
+}
 
 type Token =
   { kind: "num"; value: number } | { kind: "id"; name: string } | { kind: "op"; ch: string };
@@ -97,7 +117,10 @@ const FUNCTIONS: Record<string, { arity: number; fn: Fn }> = {
 
 class Parser {
   private pos = 0;
-  constructor(private readonly tokens: Token[]) {}
+  constructor(
+    private readonly tokens: Token[],
+    private readonly powUlps = 0,
+  ) {}
 
   atEnd(): boolean {
     return this.pos >= this.tokens.length;
@@ -172,7 +195,18 @@ class Parser {
     this.pos += 1;
     const name = t.name;
     if (this.peekOp("(")) {
-      const spec = FUNCTIONS[name];
+      // pow(x, 2) is the C library's, and not always x * x: ffmpeg's own build differs from x * x by one unit in the last place on 0.33 percent of inputs (rig\tmp\probe\pow_probe.mjs, 2,000,000 values),
+      // and another platform's build may differ elsewhere. pow(0, 2) and pow(1, 2) are exact everywhere. A caller that must not depend on that last bit compiles the text again with powUlps of -1 and +1.
+      const spec =
+        name === "pow" && this.powUlps !== 0
+          ? {
+              arity: 2,
+              fn: (x: number, y: number) =>
+                y === 2 && x !== 0 && x !== 1
+                  ? stepUlps(x * x, this.powUlps)
+                  : FUNCTIONS.pow.fn(x, y),
+            }
+          : FUNCTIONS[name];
       if (!spec) return null;
       this.pos += 1;
       const args: LeanExpr[] = [];
@@ -211,11 +245,12 @@ class Parser {
   }
 }
 
-/** Compile an expression text once; evaluate it per frame. null = outside the subset (the caller keeps today's recipe). */
-export function compileLeanExpr(text: string): LeanExpr | null {
+/** Compile an expression text once; evaluate it per frame. null = outside the subset (the caller keeps today's recipe). `powUlps` (default 0: pow(x, 2) is x * x)
+ *  moves every pow(x, 2) of the text, x other than 0 and 1, by that many floats: the way to ask what a text would give on an ffmpeg whose pow is a unit off. */
+export function compileLeanExpr(text: string, powUlps = 0): LeanExpr | null {
   const tokens = tokenize(text);
   if (!tokens || tokens.length === 0) return null;
-  const parser = new Parser(tokens);
+  const parser = new Parser(tokens, powUlps);
   const compiled = parser.expr();
   return compiled && parser.atEnd() ? compiled : null;
 }

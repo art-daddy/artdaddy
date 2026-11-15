@@ -9,8 +9,20 @@ import { cRound, compileLeanExpr } from "./leanExpr";
 import { apertureRects, maskStream, stripsOutside, type Rect } from "./leanMasks";
 import type { Animatable } from "./model";
 
-/** The reference evaluator: the SAME text run as JavaScript (a test may; the product may not), with ffmpeg's functions defined independently. */
-function oracle(text: string): (T: number, W: number, H: number) => number {
+/** The next float `ulps` steps above (positive) or below (negative) a number (test-only; the product has its own in leanExpr.ts). */
+function bumped(x: number, ulps: number): number {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  view.setBigInt64(
+    0,
+    view.getBigInt64(0) + (x > 0 === ulps > 0 ? 1n : -1n) * BigInt(Math.abs(ulps)),
+  );
+  return view.getFloat64(0);
+}
+
+/** The reference evaluator: the SAME text run as JavaScript (a test may; the product may not), with ffmpeg's functions defined independently.
+ *  `powUlps` moves pow(x, 2), x other than 0 and 1, by that many floats: ffmpeg's own pow is the C library's and is one float off from x * x on 0.33 percent of inputs. */
+function oracle(text: string, powUlps = 0): (T: number, W: number, H: number) => number {
   const fns = {
     _if: (c: number, a: number, b: number) => (c !== 0 ? a : b),
     lt: (a: number, b: number) => (a < b ? 1 : 0),
@@ -23,7 +35,8 @@ function oracle(text: string): (T: number, W: number, H: number) => number {
     floor: Math.floor,
     ceil: Math.ceil,
     abs: Math.abs,
-    pow: (x: number, y: number) => x ** y,
+    pow: (x: number, y: number) =>
+      powUlps !== 0 && y === 2 && x !== 0 && x !== 1 ? bumped(x * x, powUlps) : x ** y,
     clip: (x: number, lo: number, hi: number) => Math.min(Math.max(x, lo), hi),
   };
   const body = text.replace(/\bif\(/g, "_if(");
@@ -210,6 +223,166 @@ describe("apertureRects: the rectangle is exactly what the geq keeps", () => {
     expect(apertureRects({ ...base, widthExpr: "1/0", heightExpr: "50" })).toBeNull();
     expect(apertureRects({ ...base, widthExpr: "50", heightExpr: "50", width: 0 })).toBeNull();
     expect(apertureRects({ ...base, widthExpr: "50", heightExpr: "50", to: 0 })).toBeNull();
+  });
+
+  // 16 Nov re-audit (closure G29): ffmpeg's pow(x, 2) is the C library's, one float off from x * x on 0.33 percent of inputs (measured against ffmpeg itself), and the rectangle edge ceil((W - a) / 2) moves a whole column
+  // with a float when (W - a) / 2 lands on an integer. Four apertures found by a search of random ones (box sizes in whole pixels, every ease); each has a frame whose rectangle differs when pow is a float lower.
+  const POW_WITNESSES: Array<{
+    sizeW: Animatable;
+    sizeH: Animatable;
+    W: number;
+    H: number;
+    frame: number;
+  }> = [
+    {
+      sizeW: [
+        { t: 0, v: 709, ease: "ease-in-out" },
+        { t: 3.7, v: 1985, ease: "ease-in" },
+        { t: 5.9, v: 1335, ease: "ease-in-out" },
+        { t: 7.3, v: 2009, ease: "ease-in" },
+      ],
+      sizeH: [
+        { t: 0, v: 3746, ease: "hold" },
+        { t: 3.3, v: 3233, ease: "ease-in-out" },
+        { t: 5.1, v: 2530, ease: "ease-in-out" },
+      ],
+      W: 1920,
+      H: 2160,
+      frame: 111,
+    },
+    {
+      sizeW: [
+        { t: 0, v: 1459, ease: "ease-out" },
+        { t: 0.4, v: 219, ease: "ease-in" },
+        { t: 1.2, v: 2775, ease: "hold" },
+      ],
+      sizeH: [
+        { t: 0, v: 2594, ease: "ease-out" },
+        { t: 0.4, v: 389, ease: "ease-in" },
+        { t: 1.2, v: 4933, ease: "hold" },
+      ],
+      W: 3840,
+      H: 1920,
+      frame: 24,
+    },
+    {
+      sizeW: [
+        { t: 0, v: 282, ease: "ease-in-out" },
+        { t: 3.6, v: 3760, ease: "linear" },
+      ],
+      sizeH: [
+        { t: 0, v: 3699, ease: "ease-out" },
+        { t: 0.9333333333333333, v: 1912, ease: "ease-in-out" },
+      ],
+      W: 1440,
+      H: 1296,
+      frame: 54,
+    },
+    {
+      sizeW: [
+        { t: 0, v: 2224, ease: "ease-in-out" },
+        { t: 2.4, v: 944, ease: "ease-in" },
+        { t: 4.766666666666667, v: 2096, ease: "linear" },
+        { t: 8.066666666666666, v: 2193, ease: "ease-out" },
+      ],
+      sizeH: [
+        { t: 0, v: 2965, ease: "ease-out" },
+        { t: 1.8333333333333333, v: 149, ease: "linear" },
+      ],
+      W: 3840,
+      H: 1920,
+      frame: 63,
+    },
+  ];
+
+  it("gives null for an aperture whose rectangle on some frame depends on the last bit of pow", () => {
+    for (const w of POW_WITNESSES) {
+      const { widthExpr, heightExpr } = apertureExprs(w.sizeW, w.sizeH, 0);
+      const input = {
+        widthExpr,
+        heightExpr,
+        width: w.W,
+        height: w.H,
+        fps: 30,
+        from: 0,
+        to: w.frame + 1,
+      };
+      // the witness is real: with pow a float lower (an independent evaluator) the rectangle of that frame is another one
+      const T = w.frame * (1 / 30);
+      const rect = (u: number) => {
+        const a = oracle(widthExpr, u)(T, w.W, w.H);
+        const b = oracle(heightExpr, u)(T, w.W, w.H);
+        return [
+          Math.ceil((w.W - a) / 2),
+          Math.ceil((w.W + a) / 2),
+          Math.ceil((w.H - b) / 2),
+          Math.ceil((w.H + b) / 2),
+        ].join(",");
+      };
+      expect(rect(-1), JSON.stringify(w)).not.toBe(rect(0));
+      expect(apertureRects(input), JSON.stringify(w)).toBeNull();
+    }
+  });
+
+  it("never returns a rectangle that moves when pow's last bit moves (an independent evaluator with pow a float either way), and does not refuse an aperture without pow", () => {
+    const check = (sizeW: Animatable, sizeH: Animatable, W: number, H: number): void => {
+      const { widthExpr, heightExpr } = apertureExprs(sizeW, sizeH, 0);
+      const last = Math.ceil(Math.max(...(sizeW as Array<{ t: number }>).map((k) => k.t)) * 30) + 2;
+      const rects = apertureRects({
+        widthExpr,
+        heightExpr,
+        width: W,
+        height: H,
+        fps: 30,
+        from: 0,
+        to: last,
+      });
+      if (rects === null) return;
+      for (const u of [-1, 0, 1]) {
+        const fw = oracle(widthExpr, u);
+        const fh = oracle(heightExpr, u);
+        rects.forEach((rect, f) => {
+          const T = f * (1 / 30);
+          const a = fw(T, W, H);
+          const b = fh(T, W, H);
+          const expected = [
+            Math.min(W, Math.max(0, Math.ceil((W - a) / 2))),
+            Math.min(W, Math.max(0, Math.ceil((W + a) / 2))),
+            Math.min(H, Math.max(0, Math.ceil((H - b) / 2))),
+            Math.min(H, Math.max(0, Math.ceil((H + b) / 2))),
+          ];
+          expect(
+            rect,
+            `frame ${f}, pow ${u} floats: ${JSON.stringify({ sizeW, sizeH, W, H })}`,
+          ).toEqual(expected);
+        });
+      }
+    };
+    fc.assert(
+      fc.property(
+        keyframes,
+        keyframes,
+        fc.integer({ min: 200, max: 4000 }),
+        fc.integer({ min: 200, max: 4000 }),
+        check,
+      ),
+      {
+        numRuns: 200,
+        examples: POW_WITNESSES.map(
+          (w) => [w.sizeW, w.sizeH, w.W, w.H] as [Animatable, Animatable, number, number],
+        ),
+      },
+    );
+    // a linear or held aperture has no pow, so there is nothing to refuse
+    const linear: Animatable = [
+      { t: 0, v: 1000, ease: "linear" },
+      { t: 2, v: 1500, ease: "linear" },
+    ];
+    expect(apertureExprs(linear, linear, 0).widthExpr).not.toContain("pow(");
+    const { widthExpr, heightExpr } = apertureExprs(linear, linear, 0);
+    expect(
+      apertureRects({ widthExpr, heightExpr, width: 1920, height: 1080, fps: 30, from: 0, to: 60 }),
+    ).not.toBeNull();
   });
 });
 

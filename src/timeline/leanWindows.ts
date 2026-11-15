@@ -9,9 +9,9 @@
 // places lands a hair off its frame, so a bound AT a frame is decided by rounding). Everything is pure and never throws: null means "no window,
 // keep today's `geq` as it is".
 //
-// Times are the frame's presentation time in seconds: `T` inside a `geq` and `t` inside an `enable` are the same number, and frame k of the
-// project has T = k / fps. The builder prints seconds with toFixed(6) and the factors use the PRINTED numbers, so these functions print first and
-// reason about what ffmpeg will see.
+// Times are the frame's presentation time in seconds: `T` inside a `geq` and `t` inside an `enable` are the same number, pts times the time base as a double, so frame k of the project has
+// T = k * (1 / fps), which is NOT always the same float as k / fps (it differs on about a third of the frames; tested against the app's ffmpeg, closure G28). The builder prints seconds with
+// toFixed(6) and the factors use the PRINTED numbers, so these functions print first and reason about what ffmpeg will see.
 import { compileLeanExpr, type LeanExpr } from "./leanExpr";
 import { assertNever, type TransitionKind } from "./transition";
 
@@ -198,8 +198,9 @@ export function fadeWindow(
 /** The window of the animated-opacity `geq`: `alpha(X,Y)*clip((<curve>),0,1)`. `factorExpr` is the curve text `compileAnim` wrote, a function of T alone;
  *  the clip is drawn on frames [firstFrame, endFrame).
  *
- *  No reasoning about easing curves: the curve is EVALUATED, with the same arithmetic ffmpeg uses (leanExpr.ts), at T = k/fps for the frames
- *  firstFrame-2 through endFrame+1. A frame is marked when its factor is not exactly 1 (a value that is NaN is marked too). Each run of marked
+ *  No reasoning about easing curves: the curve is EVALUATED, with the arithmetic ffmpeg uses (leanExpr.ts; its pow(x, 2) can be a float off from ffmpeg's C library's: a frame that needs the filter only under that
+ *  was next to a marked frame, so covered by the widening below, on every curve of a search of 53,400, closure G29: a search result, not a guarantee), at every reading of the frame's time (frameReadings: k * (1/fps), which is what ffmpeg reads, k/fps, and a float step either side of each) for the frames
+ *  firstFrame-2 through endFrame+1. A frame is marked when its factor is not exactly 1 (a value that is NaN is marked too) at its own time k/fps. Each run of marked
  *  frames is widened by one frame on each side, so that a frame whose time ffmpeg computes one float step off (pts times the time base) still lands
  *  inside, and runs that touch are merged. A frame that is fine at k/fps but not at another reading of its time (k * (1/fps), or a float step either
  *  side of either) is covered as it is, one frame, not widened. Each run becomes `between(t,a,b)` with a and b half a frame outside its first and last frame. A run that

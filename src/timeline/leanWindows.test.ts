@@ -53,11 +53,15 @@ const FFMPEG = {
   floor: Math.floor,
   ceil: Math.ceil,
   abs: Math.abs,
-  pow: (x: number, y: number) => x ** y,
+  pow: (x: number, y: number) =>
+    powUlps !== 0 && y === 2 && x !== 0 && x !== 1 ? stepUlp(x * x, powUlps > 0 ? 1 : -1) : x ** y,
   clip: (x: number, lo: number, hi: number) =>
     Number.isNaN(x) ? NaN : x < lo ? lo : x > hi ? hi : x,
   alpha: () => 1,
 };
+
+/** ffmpeg's pow(x, 2) is the C library's, one float off from x * x on 0.33 percent of its own inputs (measured, closure G29); the test's evaluator can be asked for that float (-1, +1), pow(0, 2) and pow(1, 2) staying exact. */
+let powUlps = 0;
 
 function reference(text: string): (env: Env) => number {
   // JavaScript reads `T--0.25` as a decrement, ffmpeg as T - (-0.25)
@@ -66,6 +70,20 @@ function reference(text: string): (env: Env) => number {
   const f = new Function("T", "t", "X", "Y", "W", "H", ...Object.keys(FFMPEG), `return (${body});`);
   const functions = Object.values(FFMPEG);
   return (env) => Number(f(env.T, env.T, env.X ?? 0, 0, env.W ?? 0, 0, ...functions));
+}
+
+/** The text's value with pow as it is (x * x) and with pow a float lower and a float higher. */
+function referenceUnderPow(text: string): (env: Env) => number[] {
+  const f = reference(text);
+  return (env) => {
+    const out: number[] = [];
+    for (const u of [0, -1, 1]) {
+      powUlps = u;
+      out.push(f(env));
+    }
+    powUlps = 0;
+    return out;
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -785,10 +803,11 @@ function opacityFrames(run: OpacityRun): number[] {
 }
 
 function auditOpacity(run: OpacityRun, window: string | null): Audit {
-  const factor = reference(run.full);
+  // needed = the factor is not 1 with pow as x * x OR with pow a float either way (ffmpeg's own pow is the C library's: closure G29)
+  const factor = referenceUnderPow(run.full);
   return audit(
     opacityFrames(run),
-    (T) => factor({ T }) !== 1,
+    (T) => factor({ T }).some((v) => v !== 1),
     window,
     floatTimes(run.fps),
     (k) => k >= run.first && k < run.end,
