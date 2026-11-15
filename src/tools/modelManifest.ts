@@ -62,7 +62,9 @@ function isPublicName(host: string): boolean {
   // host this list may name is one of those, and a program that cannot run the URL parser's name rules can decide
   // the same thing with a pattern.
   if (
-    labels.some((label) => label.startsWith("xn--"))
+    labels.some(
+      (label) => !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label) || label.startsWith("xn--"),
+    )
   )
     return false;
   // A name whose last label is a number is an IPv4 address; no real top-level domain is one.
