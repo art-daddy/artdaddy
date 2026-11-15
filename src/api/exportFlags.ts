@@ -30,8 +30,9 @@
 //               the clip at the playhead (else the first on the timeline) goes to the front of the app's own proxy
 //               queue (off: 0.27.0: first in, first out)
 //   lean_zoom
-//               a zooming picture or clip with fit cover gets the exact mask stream (off: a zooming picture or clip
-//               with fit cover keeps 0.27.0's per-pixel zoom mask on every frame (slow, same picture))
+//               a zooming picture or clip with fit cover gets the exact mask stream, as long as lean_stills is on
+//               (off: a zooming picture or clip with fit cover keeps 0.27.0's per-pixel zoom mask on every frame
+//               (slow, same picture); it is also what you get while lean_stills is off)
 //   lean_fades
 //               transition, wipe and fade masks and animated opacity run only on the frames that need them (off:
 //               transition, wipe and fade masks and animated opacity run on every frame of their clip as in 0.27.0 (a
@@ -40,13 +41,14 @@
 //               the dip's colour layer is only as long as its gate (off: the dip's colour layer is as long as the
 //               whole project (or partition) as in 0.27.0)
 //   lean_stills
-//               each picture is read once (off: each picture is read again for every frame as in 0.27.0)
+//               each picture is read once (off: each picture is read again for every frame as in 0.27.0; it also
+//               switches lean_zoom off, because the held pictures pay for the zoom mask's memory)
 //   lean_grade
-//               vibrance may use several threads and a graded picture is graded once (off: vibrance runs on one
-//               thread and a graded picture is graded for every frame as in 0.27.0)
+//               a graded picture that is read once is graded once (off: a graded picture is graded for every frame as
+//               in 0.27.0)
 //   lean_decoders
-//               still-picture and audio inputs of a one-pass export get a decoder-thread cap (off: the pictures and
-//               audio of a one-pass export use ffmpeg's own decoder thread count as in 0.27.0)
+//               a picture that a one-pass export reads once gets one decoder thread (off: ffmpeg's own decoder thread
+//               count as in 0.27.0)
 //   idle_rule
 //               the no-progress stop v2: only an idle export is stopped early; a busy one gets 30 minutes for its first
 //               picture and 15 between pictures (off: a silent export is stopped after 5 minutes before its first
