@@ -102,7 +102,7 @@
 // export (a refresh runs beside it) and is not the compatibility gate, which can stop the app from working.
 import { apiBase } from "./config";
 import { authedFetch, hasSession } from "./auth";
-// TEMP (lane L6): the list of extra places to fetch the speech model from is read here until L2's lands.
+// The extra places to fetch the speech model from are checked by the one pure function that owns those rules.
 import { acceptModelSources } from "../tools/modelManifest";
 
 export const EXPORT_FLAG_NAMES = [
