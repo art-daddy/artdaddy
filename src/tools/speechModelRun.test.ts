@@ -435,7 +435,9 @@ describe("when the engine fails on the smaller file", () => {
   });
 
   // On Linux, where the net matters most, the loader and the shell say it with exit 126 or 127 and with their own
-  // words, not with a Windows status. No model file can cause that, so nothing is fetched for it.
+  // words, not with a Windows status, and the app's own job supervisor says it with "could not start" when it cannot
+  // spawn the program at all (a missing or quarantined sidecar, a mount that does not allow execution). No model file
+  // can cause any of that, so nothing is fetched for it.
   const COULD_NOT_START: Array<[how: string, answer: EngineAnswer]> = [
     [
       "the loader cannot find a library",
@@ -446,7 +448,14 @@ describe("when the engine fails on the smaller file", () => {
       },
     ],
     ["the shell cannot run the program", { code: 126, stderr: "" }],
-    ["the loader says so under another exit code", { code: 1, stderr: "cannot open shared object file" }],
+    [
+      "the loader says so under another exit code",
+      { code: 1, stderr: "cannot open shared object file" },
+    ],
+    [
+      "the supervisor cannot spawn the program",
+      { code: -1, stderr: "could not start whisper-cli: No such file or directory (os error 2)" },
+    ],
   ];
 
   it.each(COULD_NOT_START)(
@@ -467,7 +476,8 @@ describe("when the engine fails on the smaller file", () => {
     localStorage.setItem("artdaddy.speech_language", "en");
     const r = rig({
       say: () => ({ language: "nl" }),
-      engine: (launch) => (launch === 1 ? { code: 1, stderr: "failed to load model" } : { code: 0 }),
+      engine: (launch) =>
+        launch === 1 ? { code: 1, stderr: "failed to load model" } : { code: 0 },
     });
     const kept = await runWhisper(r.ctx, fresh(), "small", "auto");
     expect(r.launches.map((a) => [modelOf(a), beamOf(a)])).toEqual([
@@ -476,6 +486,9 @@ describe("when the engine fails on the smaller file", () => {
       [pathOf(FULL), DEFAULT_BEAM],
     ]);
     expect(kept.words.map((w) => w.word).join(" ")).toBe("launch 2");
+    // The prediction miss is still counted as one, though the run that ended it was the net's.
+    expect(reportTranscription).toHaveBeenCalledTimes(1);
+    expect(reportTranscription.mock.calls[0][2]).toMatchObject({ rerun: true });
   });
 
   it("reports a re-run after a refusal as a re-run, and one after an engine failure as an ordinary run", async () => {

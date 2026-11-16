@@ -1394,8 +1394,8 @@ export async function runWhisper(
   redoWith?: ModelPlan,
 ): Promise<ParsedTranscript> {
   let redo = redoWith;
-  /** Whether `redo` replaces a run that was refused for its language (what the telemetry calls a re-run), and not
-   *  one the engine failed on. */
+  /** Whether a transcript of this request was refused for its language and this run replaces it (what the telemetry
+   *  calls a re-run). An engine failure on the smaller file neither sets it nor clears it. */
   let refused = redoWith !== undefined;
   /** The engine failed on the smaller file and this request went on with the full-size one. */
   let wentOn = false;
@@ -1411,7 +1411,6 @@ export async function runWhisper(
         // every language accepts. If that fails too, or the runs are spent, the failure is the engine's own.
         if (attempt >= 2) throw e.failure;
         redo = universalPlan();
-        refused = false;
         wentOn = true;
         continue;
       }
@@ -1434,10 +1433,12 @@ function universalPlan(): ModelPlan {
   return { key: DEFAULT_MODEL_KEY, variant: MODEL_VARIANT, beam: DEFAULT_BEAM };
 }
 
-/** The engine itself failed on a run made with the smaller model file: it did not start, crashed, or left no output.
- *  The file may be the cause (it was never run on a PC like this one), so {@link runWhisper} runs the request once
- *  more with the full-size file; `failure` is what the caller is told when that cannot be done. It never leaves
- *  runWhisper. */
+/** The engine ran and failed on a run made with the smaller model file: it crashed, could not load the file, or left
+ *  no output (not an engine that could not be started at all: {@link engineDidNotStart}). The file may be the cause
+ *  (it was never run on a PC like this one), so the loop of {@link runWhisper} runs the request once more with the
+ *  full-size file; `failure` is what the caller is told when that cannot be done. The run's shared promise carries it
+ *  to whoever joined that run, which is why a joiner that is not that loop asks for what the run goes on with
+ *  ({@link planAfter}). */
 class EngineFailedOnSmallerFile extends Error {
   constructor(readonly failure: unknown) {
     super("the speech engine failed on the smaller model file");
@@ -1476,14 +1477,20 @@ async function planAfter(ctx: ClientToolContext, error: unknown): Promise<ModelP
   return undefined;
 }
 
-/** The loader or the shell said, before a line of the engine ran, that it cannot be started: exit 126 (not executable)
- *  or 127 (not found, or a shared library it needs is missing) and the dynamic loader's own words. Windows says it with
- *  the statuses of {@link WINDOWS_LOAD_FAILURES}, which `finishWhisper` already makes `engine_unavailable`. A model file
- *  cannot cause any of these, so running the request again with another file would only fetch it for nothing. */
+/** The engine could not be started at all, and said so before a line of it ran: the loader or the shell (exit 126, not
+ *  executable, or 127, not found or a shared library it needs is missing, and the dynamic loader's own words), or the
+ *  app's own job supervisor, which could not spawn it (its words are "could not start <program>: <os error>"). Windows
+ *  says it with the statuses of {@link WINDOWS_LOAD_FAILURES}, which `finishWhisper` already makes
+ *  `engine_unavailable`. A model file cannot cause any of these, so running the request again with another file would
+ *  only fetch it for nothing. */
 const SHELL_COULD_NOT_RUN: ReadonlySet<number> = new Set([126, 127]);
-const LOADER_WORDS = /error while loading shared libraries|cannot open shared object file/i;
+const COULD_NOT_START_WORDS =
+  /error while loading shared libraries|cannot open shared object file|(?:^|\n)could not start /i;
 function engineDidNotStart(run: EngineRun): boolean {
-  return (run.code !== null && SHELL_COULD_NOT_RUN.has(run.code)) || LOADER_WORDS.test(run.stderr);
+  return (
+    (run.code !== null && SHELL_COULD_NOT_RUN.has(run.code)) ||
+    COULD_NOT_START_WORDS.test(run.stderr)
+  );
 }
 
 /** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed).
