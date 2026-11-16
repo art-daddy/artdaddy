@@ -51,7 +51,7 @@ import { backendNow, backendOfRun, readPace, recordSpeechRun } from "./speechPac
 import { padded, playedSpan, spanWindows } from "./speechSpans";
 import { CAP_S } from "./speechPlan";
 import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
-import { measureVoiceStart } from "./speechLeadingQuiet";
+import { measureVoiceStart, type VoiceStart } from "./speechLeadingQuiet";
 import {
   type AlignmentOutput,
   retryWithoutWordTimes,
@@ -1915,9 +1915,20 @@ async function alignedAlone(
   } catch {
     return wavs.map(() => false); // the launch itself says what is wrong with the file
   }
+  const input = { size: key, cpuOnly };
+  if (!wordTimesPossible(input)) return wavs.map(() => false);
   const answers: boolean[] = [];
-  for (const wav of wavs)
-    answers.push((await alignmentFor(ctx, [wav], { size: key, cpuOnly })).length > 0);
+  // The files are read one after the other, and a read that does not answer within the guard ends the reading: the files after
+  // it stay in the shared run as they would today, so the run starts after one guard, never one per file (a launch over
+  // several files carries nothing; each late file is measured again at its own launch).
+  let stalled = false;
+  for (const wav of wavs) {
+    const voice: VoiceStart = stalled
+      ? { kind: "unknown" }
+      : await measureVoiceStart(ctx.store, wav);
+    if (voice.kind === "unknown" && voice.stalled) stalled = true;
+    answers.push(wordTimesArgs({ ...input, voice }).length > 0);
+  }
   return answers;
 }
 
@@ -2045,6 +2056,10 @@ async function engineFor(
     if (!retry) return run;
     alignmentFailed = true;
     await ctx.store.remove(`${meta.scratch}.json`).catch(() => undefined);
+    // The failed launch's job is let go of before the retry starts: a page that takes the run over after a crash finds one job
+    // of it, never two that share one scratch name (the failed one's finish would remove the retry's output).
+    const failed = jobs.pop();
+    if (failed) await sup?.forget(failed).catch(() => undefined);
     return launch(cpuOnly, afterCrash);
   };
   const engine = async (): Promise<EngineRun> => {
@@ -2601,11 +2616,13 @@ async function runTogether(
   /** What each file the run refused (for not being what its language needs) is run with alone, by place in `ours`. */
   const widenTo = new Map<number, ModelPlan>();
   /** How the person's Cancel ended a run of this request, once it did: what had not been read is not started behind their
-   *  back, and that includes a file that left the shared run for its own launch (speechWordTimes.ts). */
+   *  back. That is every file of the request that has not had its own launch yet: one the run missed (a language it
+   *  refused, an output cut short) as much as one that left it for the alignment (speechWordTimes.ts). */
   let cancelledByPerson: unknown = null;
-  /** A file the run did not make a transcript of, run alone as it always was. */
-  const alone = async (n: number, leftTheRun = false): Promise<void> => {
-    if (leftTheRun && cancelledByPerson !== null) return settle(n, { error: cancelledByPerson });
+  /** A file the run did not make a transcript of, run alone as it always was. `afterCancel`: it has had no launch of its
+   *  own yet, so a Cancel the person pressed before its turn answers it instead of starting it. */
+  const alone = async (n: number, afterCancel = false): Promise<void> => {
+    if (afterCancel && cancelledByPerson !== null) return settle(n, { error: cancelledByPerson });
     try {
       settle(n, {
         parsed: await runWhisper(ctx, ours[n].src, size, language, null, true, widenTo.get(n)),
@@ -2727,7 +2744,7 @@ async function runTogether(
         // Their words are kept, or they failed: nothing is left for another page to finish.
         await release();
       }
-      for (const n of missed) await alone(n);
+      for (const n of missed) await alone(n, true);
       for (const n of late) await alone(n, true);
     });
   } catch (error) {

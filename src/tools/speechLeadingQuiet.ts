@@ -35,11 +35,14 @@ export const LEADING_QUIET_MS = 1000;
 /** How much of the start of the audio is looked at, in seconds: whisper's own first window. The floor (the quietest
  *  tenth) is taken over these seconds only, so for audio up to this long the answer is the reference's. On the 1070 real
  *  clips of the study (3.6 to 46.5 s, 20 languages) no clip's decision changed with a prefix of 20 s or more; with 10 s
- *  five did, with 5 s eighteen. It is also what fits the one read: the app's head read returns at most 1 MiB. */
+ *  five did, with 5 s nineteen. It is also what fits the one read: the app's head read returns at most 1 MiB. */
 export const VOICE_SCAN_S = 30;
 
 /** How long the measurement may take before the launch goes ahead as 0.27.0 made it. */
 export const MEASURE_GUARD_MS = 5000;
+
+/** What the guard answers with when it runs out first: never a value a read can return. */
+const TIMED_OUT = Symbol("the read did not answer within the guard");
 
 const SAMPLE_RATE = 16_000;
 const FRAME_MS = 20;
@@ -56,10 +59,13 @@ const HEAD_BYTES = VOICE_SCAN_S * SAMPLE_RATE * 2 + 4096;
 export type VoiceStart =
   | { readonly kind: "at"; readonly ms: number }
   | { readonly kind: "none" }
-  | { readonly kind: "unknown" };
+  | { readonly kind: "unknown"; readonly stalled?: true };
 
 const NONE: VoiceStart = { kind: "none" };
 const UNKNOWN: VoiceStart = { kind: "unknown" };
+/** `unknown`, because the read did not answer within the guard (not because the file could not be read): a caller that has
+ *  several files to measure stops reading after the first of these, so a stalled read costs one guard, not one per file. */
+const STALLED: VoiceStart = { kind: "unknown", stalled: true };
 
 /** Does the voice start later than the quiet the rule allows. Strictly more: a voice at exactly one second is today's. */
 export function voiceStartsLate(voice: VoiceStart): boolean {
@@ -163,7 +169,8 @@ export interface HeadReader {
 }
 
 /** Where the voice starts in the audio file `wav`, read from its first bytes only. Never throws, never waits longer than
- *  `guardMs`; a file that cannot be read in time, or a store with no ranged read, is `unknown`. */
+ *  `guardMs`; a file that cannot be read in time, or a store with no ranged read, is `unknown` (`stalled` when the read
+ *  was still not answered after the guard). */
 export async function measureVoiceStart(
   store: HeadReader,
   wav: string,
@@ -172,10 +179,11 @@ export async function measureVoiceStart(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     if (typeof store.readHead !== "function") return UNKNOWN;
-    const guard = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), guardMs);
+    const guard = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), guardMs);
     });
-    return voiceStartOf(await Promise.race([store.readHead(wav, HEAD_BYTES), guard]));
+    const head = await Promise.race([store.readHead(wav, HEAD_BYTES), guard]);
+    return head === TIMED_OUT ? STALLED : voiceStartOf(head);
   } catch {
     return UNKNOWN;
   } finally {

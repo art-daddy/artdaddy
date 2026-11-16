@@ -92,9 +92,11 @@
 //               the assistant is brought back, once, when the words of the files it was told were not ready have
 //               landed (off: as in 0.27.0 nothing brings it back and the person has to ask again)
 //   speech_word_times
-//               a word's time is the one the engine's own alignment found for its sound, so the first words of a clip
-//               that begins with silence start where they are said; this release ships the behaviour off, so the
-//               switch changes nothing yet (off: 0.27.0: whisper's own word times, the engine started as before)
+//               a launch of the speech engine may carry its own word times (`-dtw`) when the voice in the audio it
+//               hears starts more than a second in, for a model file and an engine path measured for it, so the first
+//               words of a clip that begins with that much quiet start where they are said (speechWordTimes.ts; the
+//               build decides whether any launch does: this switch only takes it away) (off: 0.27.0: whisper's own
+//               word times, the engine started as before)
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or

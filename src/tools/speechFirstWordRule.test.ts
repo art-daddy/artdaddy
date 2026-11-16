@@ -50,6 +50,7 @@ import {
   WORD_TIMES_MODELS,
 } from "./speechWordTimes";
 import {
+  clipWordFrames,
   ensureTranscripts,
   parseWhisperCppJson,
   peekTranscript,
@@ -399,6 +400,34 @@ describe("a launch whose audio's start is not known is today's launch", () => {
       }
     }
   });
+  it("a run over several files whose audio reads never return starts after ONE guard, not one per file", async () => {
+    processor();
+    configure(true, true);
+    // The engine is the page's own runner here (no job supervisor), so the only timers are the guard's.
+    __resetJobSupervisor();
+    const rig = speechRig({ audio: () => wavWithVoiceAt(2000) });
+    Object.assign(rig.store, { readHead: () => new Promise<never>(() => undefined) });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const run = ensureTranscripts(
+      rig.ctx(),
+      [freshSource(), freshSource(), freshSource()],
+      FULL,
+      "en",
+    );
+    let waited = 0;
+    while (rig.launches.length === 0 && waited < 60_000) {
+      await vi.advanceTimersByTimeAsync(500);
+      waited += 500;
+    }
+    vi.useRealTimers();
+    await run;
+    expect(waited, "waits for the guard").toBeGreaterThanOrEqual(5_000);
+    expect(waited, "and for one only, not one per file").toBeLessThanOrEqual(6_000);
+    // The three stay in the shared run, which carries nothing.
+    expect(rig.launches).toHaveLength(1);
+    expect(flagValues(rig.launches[0], "-f")).toHaveLength(3);
+    expect(rig.launches[0]).not.toContain("-dtw");
+  });
 });
 
 describe("a window is judged on its own audio, never on the file's start", () => {
@@ -435,6 +464,39 @@ describe("a window is judged on its own audio, never on the file's start", () =>
     await runWhisper(t.rig.ctx(), freshSource(), FULL, "en", WINDOW);
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ span: { start: WINDOW.start, end: WINDOW.end } });
+  });
+
+  it("keeps today's launch for a window whose own audio has its voice at exactly one second: a clip cut at its first word, with get_transcript's second of padding in front, sits right here (D-13)", async () => {
+    processor();
+    configure(true, true);
+    const t = setup({ audio: (_s, _w, span) => wavWithVoiceAt(span ? 1000 : 200) });
+    const transcript = await runWhisper(t.rig.ctx(), freshSource(), FULL, "en", WINDOW);
+    expect(t.whisper()[0].args).not.toContain("-dtw");
+    expect(transcript.words[0].start_seconds).toBeCloseTo(WINDOW.start + STORED, 9);
+  });
+});
+
+describe("get_transcript reads the words the rule makes, and is not made worse (I-7)", () => {
+  // A clip whose in-point is one second into its file (30 fps). The file's first word is stored at 0.02 s and sounds at 1.36 s.
+  const clip = { source_in: 30, source_out: 600, timeline_in: 0, speed: 1 };
+  const kept = (words: Parameters<typeof clipWordFrames>[0]): string[] =>
+    clipWordFrames(words, clip, 30).map((row) => row[0]);
+
+  it("keeps a first word the alignment puts after the clip's in-point, which the stored time put before it", () => {
+    expect(kept(AS_STORED.words)).not.toContain(AS_STORED.words[0].word);
+    expect(kept(ON_SOUND.words)).toContain(ON_SOUND.words[0].word);
+    expect(kept(ON_SOUND.words).length).toBeGreaterThan(kept(AS_STORED.words).length);
+  });
+
+  it("reads a transcript made without the alignment exactly as today whatever the switches say", () => {
+    for (const [gate, flag] of [
+      [true, true],
+      [false, true],
+      [true, false],
+    ] as const) {
+      configure(gate, flag);
+      expect(kept(parseWhisperCppJson(CLIP_STORED).words)).toStrictEqual(kept(AS_STORED.words));
+    }
   });
 });
 
@@ -519,6 +581,52 @@ describe("a run over several files never carries the arguments: a file whose voi
     ).toEqual([true, true, true]);
     expect(t.whisper()).toHaveLength(1);
     expect(t.jobs.killed).toEqual([one.id]);
+  });
+
+  it("starts nothing for a file the shared run could not keep once the person has cancelled that run", async () => {
+    processor();
+    configure(true, true);
+    const [a, b, c] = [freshSource(), freshSource(), freshSource()];
+    // Every voice is early, so the three share one launch, which stays running until the test stops it.
+    const t = setup({ audio: () => wavWithVoiceAt(400), script: (n) => (n === 0 ? null : {}) });
+    const done = ensureTranscripts(t.rig.ctx({ background: true }), [a, b, c], FULL, "en");
+    await until(() => t.whisper().length === 1);
+    const [shared] = t.whisper();
+    expect(flagValues(shared.args, "-f")).toHaveLength(3);
+    // The engine had begun the first file's output when the person pressed Cancel: it is cut short, so the run missed that file.
+    const [outA] = flagValues(shared.args, "-of");
+    t.rig.files.add(`${outA}.json`);
+    t.rig.texts.set(`${outA}.json`, CLIP_STORED.slice(0, 400));
+    cancelSpeechJob(shared.id);
+    const outcomes = await done;
+    expect(
+      outcomes.map((o) => !o.ok && isSpeechCancelled((o as { error: unknown }).error)),
+    ).toEqual([true, true, true]);
+    // The file the run missed was not started behind the person's back.
+    expect(t.whisper()).toHaveLength(1);
+    expect(t.jobs.killed).toEqual([shared.id]);
+  });
+
+  it("starts none of the files the shared run missed once the person has cancelled the own run of the first of them", async () => {
+    processor();
+    configure(true, true);
+    const files = [freshSource(), freshSource(), freshSource()];
+    // The shared run ends with every output cut short, so each file is run alone in its turn; the first of those is left running.
+    const t = setup({
+      audio: () => wavWithVoiceAt(400),
+      script: (n) => (n === 0 ? { output: "partial" } : n === 1 ? null : {}),
+    });
+    const done = ensureTranscripts(t.rig.ctx({ background: true }), files, FULL, "en");
+    await until(() => t.whisper().length === 2);
+    const second = t.whisper()[1];
+    expect(flagValues(second.args, "-f")).toHaveLength(1);
+    expect(cancelSpeechJob(second.id)).toBe(true);
+    const outcomes = await done;
+    expect(
+      outcomes.map((o) => !o.ok && isSpeechCancelled((o as { error: unknown }).error)),
+    ).toEqual([true, true, true]);
+    expect(t.whisper()).toHaveLength(2);
+    expect(t.jobs.killed).toEqual([second.id]);
   });
 
   it("still starts the next late file when the first one's run simply fails: only the person's Cancel stops the rest", async () => {
@@ -632,6 +740,30 @@ describe("a launch that carried the arguments and failed is made once more witho
     expect(starts(got.outcome as { words: Array<{ start_seconds: number }> })).toStrictEqual(
       starts(ON_SOUND),
     );
+  });
+
+  it("lets go of the failed launch's job before the retry starts: a page that takes the run over finds one job of it, never two with one scratch name", async () => {
+    processor();
+    configure(true, true);
+    // The alignment launch fails; its retry is left running while the test looks.
+    const t = setup({
+      audio: () => wavWithVoiceAt(2000),
+      script: (n) => (n === 0 ? { code: 1, output: "none" } : null),
+    });
+    const run = runWhisper(t.rig.ctx(), freshSource(), FULL, "en");
+    await until(() => t.whisper().length === 2);
+    const [failed, retry] = t.whisper();
+    expect(failed.args).toContain("-dtw");
+    expect(retry.args).not.toContain("-dtw");
+    expect(failed.meta).toMatchObject({ scratch: (retry.meta as { scratch: string }).scratch });
+    expect(t.jobs.forgotten).toEqual([failed.id]);
+    for (const base of flagValues(retry.args, "-of")) {
+      t.rig.files.add(`${base}.json`);
+      t.rig.texts.set(`${base}.json`, CLIP_STORED);
+    }
+    t.jobs.exit(retry.id, 0, "");
+    expect(starts(await run)).toStrictEqual(starts(AS_STORED));
+    expect(t.jobs.forgotten.slice().sort()).toEqual([failed.id, retry.id].sort());
   });
 
   it.each([...WINDOWS_LOAD_FAILURES])(

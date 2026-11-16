@@ -122,6 +122,8 @@ const HOP = 320;
 const FRAME_MS = 20;
 const NONE: VoiceStart = { kind: "none" };
 const UNKNOWN: VoiceStart = { kind: "unknown" };
+/** `unknown` because the read did not answer within the guard: the caller stops reading after the first. */
+const STALLED: VoiceStart = { kind: "unknown", stalled: true };
 const at = (ms: number): VoiceStart => ({ kind: "at", ms });
 const voiceStartOfReference = (reference: Reference): VoiceStart =>
   reference.onset_ms === null ? NONE : at(reference.onset_ms);
@@ -719,7 +721,7 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
       expect(await measureVoiceStart(store, "a.wav", 50)).toEqual(UNKNOWN);
   });
 
-  it("gives up at the guard and not before: a read that never comes back is unknown at exactly guardMs", async () => {
+  it("gives up at the guard and not before: a read that never comes back is unknown at exactly guardMs, and says it stalled", async () => {
     vi.useFakeTimers();
     const store: HeadReader = { readHead: () => new Promise<Uint8Array | null>(() => {}) };
     let result: VoiceStart | undefined;
@@ -727,8 +729,25 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     await vi.advanceTimersByTimeAsync(4999);
     expect(result).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
-    expect(result).toEqual(UNKNOWN);
+    expect(result).toEqual(STALLED);
     expect(MEASURE_GUARD_MS).toBe(5000);
+  });
+
+  it("says a failure that is not a stall is not one: a read that throws, rejects or finds nothing is unknown without `stalled`", async () => {
+    const failing: HeadReader[] = [
+      {
+        readHead: () => {
+          throw new Error("disk gone");
+        },
+      },
+      { readHead: () => Promise.reject(new Error("denied")) },
+      { readHead: async () => null },
+    ];
+    for (const store of failing) {
+      const answer = await measureVoiceStart(store, "a.wav", 50);
+      expect(answer).toEqual(UNKNOWN);
+      expect(answer).not.toHaveProperty("stalled");
+    }
   });
 
   it("uses MEASURE_GUARD_MS when it is not told another", async () => {
@@ -739,7 +758,7 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     await vi.advanceTimersByTimeAsync(MEASURE_GUARD_MS - 1);
     expect(result).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
-    expect(result).toEqual(UNKNOWN);
+    expect(result).toEqual(STALLED);
   });
 
   it("ignores a read that comes back after the guard", async () => {
@@ -751,9 +770,9 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     let result: VoiceStart | undefined;
     void measureVoiceStart(store, "a.wav", 50).then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(50);
-    expect(result).toEqual(UNKNOWN);
+    expect(result).toEqual(STALLED);
     await vi.advanceTimersByTimeAsync(100);
-    expect(result).toEqual(UNKNOWN);
+    expect(result).toEqual(STALLED);
   });
 
   it("is silent about a read that fails after the guard has answered", async () => {
@@ -766,7 +785,7 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     };
     const answer = measureVoiceStart(store, "a.wav", 50);
     await vi.advanceTimersByTimeAsync(50);
-    expect(await answer).toEqual(UNKNOWN);
+    expect(await answer).toEqual(STALLED);
     // an unhandled rejection here would fail the whole run, not only this test
     await vi.advanceTimersByTimeAsync(100);
   });
