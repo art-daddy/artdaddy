@@ -304,7 +304,7 @@ describe("the speed check, in the dialog", () => {
     await act(async () => undefined);
     show();
     expect(screen.getByTestId("speed-check")).toHaveTextContent(
-      "Speed check: not finished (this PC was busy) · treated as slower than most · Check again",
+      "Speed check: could not finish · treated as slower than most · Check again",
     );
   });
 

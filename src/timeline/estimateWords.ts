@@ -106,7 +106,7 @@ const CHECK_NAMES: Partial<Record<PcClass, string>> = { fast: "fast", ok: "OK", 
  *  has been made. */
 export function describeSpeedCheck(pcClass: PcClass, day: string = ""): string {
   if (pcClass === "unfinished")
-    return "Speed check: not finished (this PC was busy) · treated as slower than most · Check again";
+    return "Speed check: could not finish · treated as slower than most · Check again";
   const name = CHECK_NAMES[pcClass];
   if (!name) return "";
   const when = typeof day === "string" ? day.trim() : "";

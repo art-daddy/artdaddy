@@ -222,10 +222,29 @@ describe("the amber lines and the check's lines", () => {
     );
     expect(describeSpeedCheck("ok")).toBe("Speed check: OK · Check again");
     expect(describeSpeedCheck("unfinished", "today")).toBe(
-      "Speed check: not finished (this PC was busy) · treated as slower than most · Check again",
+      "Speed check: could not finish · treated as slower than most · Check again",
     );
     expect(describeSpeedCheck("unknown", "today")).toBe("");
     expect(describeSpeedCheck("weird" as never, "today")).toBe("");
+  });
+
+  it("says of a check that could not finish only what is true of a PC that was busy and of one that is merely slow", () => {
+    const line = describeSpeedCheck("unfinished", "today");
+    // A PC that needs longer than the check's box is slow, not busy: the line gives no cause.
+    expect(line).not.toMatch(/busy/i);
+    expect(line).toMatch(/could not finish/);
+    // The card says the same of the same state in the same words, wherever it says it.
+    const guess = describeEstimateLine(
+      estimate({ basis: "guess", seconds: 3000, low: 2800, high: 3200 }),
+      "unfinished",
+    );
+    for (const said of [line, guess]) {
+      expect(said).toContain("could not finish");
+      expect(said).toContain("treated as slower than most");
+      expect(said).not.toMatch(/busy/i);
+    }
+    // The link is the last part of the line: the component cuts it off the end to put the button there.
+    expect(line.endsWith(` · ${CHECK_AGAIN_LABEL}`)).toBe(true);
   });
 });
 
