@@ -335,17 +335,26 @@ function withHarnessFault(args: string[]): string[] {
   return args;
 }
 
-function spawnFake(
+/** What the fake engine is told about a clip: its text and language, and the corpus's known voice start and length. */
+const fakeClipJson = (clip: CorpusClip): string =>
+  JSON.stringify({
+    id: clip.id,
+    language: clip.language,
+    text: clip.text,
+    voice_s: clip.voice_s,
+    total_seconds: clip.total_seconds,
+  });
+
+/** One engine process, tracked so that none outlives the file: the real whisper-cli (its libraries' folder as its working directory,
+ *  as the app's own runner starts it) or the fake. */
+function spawnEngineProcess(
+  program: string,
   args: string[],
-  clipFile: string,
-  fault: string,
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv },
   signal?: AbortSignal,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [FAKE_ENGINE, ...args], {
-      windowsHide: true,
-      env: { ...process.env, L13_FAKE_CLIP_FILE: clipFile, L13_FAKE_FAULT: fault },
-    });
+    const child = spawn(program, args, { windowsHide: true, cwd: opts.cwd, env: opts.env });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     alive.add(child);
@@ -357,6 +366,7 @@ function spawnFake(
       killed = true;
       child.kill("SIGKILL");
     };
+    if (signal?.aborted) onAbort();
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (t: string) => (stdout += t));
     child.stderr.on("data", (t: string) => (stderr += t));
@@ -413,13 +423,19 @@ function engineRunner(
       let result: CommandResult;
       if (!spawnEngine) result = await stubEngine(args);
       else if (FAKE)
-        result = await spawnFake(
-          args,
-          clipFile,
-          FAULT && (!FAULT_ONLY || FAULT_ONLY.test(clipId)) ? FAULT : "",
+        result = await spawnEngineProcess(
+          process.execPath,
+          [FAKE_ENGINE, ...args],
+          {
+            env: {
+              ...process.env,
+              L13_FAKE_CLIP_FILE: clipFile,
+              L13_FAKE_FAULT: FAULT && (!FAULT_ONLY || FAULT_ONLY.test(clipId)) ? FAULT : "",
+            },
+          },
           signal,
         );
-      else result = await nodeRunner.run("whisper-cli", args, signal, cwd, onStdout);
+      else result = await spawnEngineProcess(whisper!, args, { cwd: DLL_DIR }, signal);
       record.seconds = (Date.now() - started) / 1000;
       record.code = result.code;
       record.stderr = result.stderr;
@@ -503,10 +519,7 @@ async function runCase(clip: CorpusClip, mode: Mode): Promise<Run> {
   const clipFile = path.join(SCRATCH, "fake", `${clip.id}.json`);
   if (FAKE) {
     await fsp.mkdir(path.dirname(clipFile), { recursive: true });
-    await fsp.writeFile(
-      clipFile,
-      JSON.stringify({ id: clip.id, language: clip.language, text: clip.text }),
-    );
+    await fsp.writeFile(clipFile, fakeClipJson(clip));
   }
   const launches: Launch[] = [];
   const ctx = ctxFor(`${clip.id}-${mode}`, engineRunner(launches, clipFile, clip.id, true));
@@ -739,11 +752,8 @@ function check(
     const last = run.launches[run.launches.length - 1];
     expect(normalized(last.argv), `${label}: the retry is the gate-off launch`).toEqual(base);
   } else {
-    // The study's own bound: with the alignment no first word is early by more than half a second. The fake engine puts the first
-    // word on the voice the detector hears, so against a clip whose first sound is a click (the "blip" clips) it can only be judged
-    // by that reading; the real engine is judged against the known voice start.
-    const voice = FAKE ? (clip.detector_ms ?? clip.voice_s * 1000) / 1000 : clip.voice_s;
-    const early = run.words?.[0] ? voice - run.words[0][1] : 0;
+    // The study's own bound: with the alignment no first word is early by more than half a second (against the known voice start).
+    const early = run.words?.[0] ? clip.voice_s - run.words[0][1] : 0;
     expect
       .soft(early, `${label}: the first word is at most half a second before the voice`)
       .toBeLessThanOrEqual(0.5);
@@ -850,10 +860,7 @@ describe.skipIf(missing.length > 0 || !PART_GT)(
           const clipFile = path.join(SCRATCH, "fake", `${clip.id}.json`);
           if (FAKE) {
             await fsp.mkdir(path.dirname(clipFile), { recursive: true });
-            await fsp.writeFile(
-              clipFile,
-              JSON.stringify({ id: clip.id, language: clip.language, text: clip.text }),
-            );
+            await fsp.writeFile(clipFile, fakeClipJson(clip));
           }
           const launches: Launch[] = [];
           const ctx = ctxFor(label, engineRunner(launches, clipFile, clip.id, true), dir);

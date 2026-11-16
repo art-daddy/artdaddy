@@ -6,10 +6,11 @@
 //   * whisper stores the FIRST word of a recording at the start of the audio, early by the quiet in front of the
 //     voice, and the words after it a little less early each, so the fourth word is on its sound;
 //   * with `-dtw` every token also carries `t_dtw` (units of 10 ms) = where its sound is; without it `-1`;
-//   * the sound of the first word is the voice's start in THE FILE IT IS HANDED plus a short lag (the study's median
-//     first word came 0.1 s after the sound began). The voice's start is read from the file's samples (the study's
-//     onset proxy, ported here on its own, not imported from the app), so a window cut out of a longer file is
-//     right too; the clip's own text and language come from the clip file named by L13_FAKE_CLIP_FILE.
+//   * the sound of the first word is the voice's start plus a short lag (the study's median first word came 0.1 s after the sound
+//     began). For the clip's WHOLE file (its length matches the clip file's total_seconds) the voice's start is the corpus's known
+//     one (clip file: voice_s); for a window cut out of it the voice's start is read from the file's samples (the study's onset
+//     proxy, ported here on its own, not imported from the app), so a window is right too. The clip's own text and language come
+//     from the clip file named by L13_FAKE_CLIP_FILE.
 //   * stderr says what the real engine says about the backend, the flash attention and the alignment.
 // Faults (L13_FAKE_FAULT, only for a launch that carries `-dtw`, except always-exit): dtw-exit (exit 3, no output),
 // dtw-garbage (exit 0, an output that is not JSON), dtw-missing (exit 0, no output), always-exit (every launch).
@@ -99,12 +100,17 @@ function tokensOf(text) {
 
 const samples = readSamples(wav);
 const audioS = samples.length / 16000;
-const voiceMs = onsetMs(samples);
+// The voice's start: the corpus's known one when the engine is handed the clip's whole file (the real engine's alignment finds the
+// sound, whatever a click in front made the detector think), else, for a window cut out of it, the voice the samples show.
+const heardMs = onsetMs(samples);
+const whole =
+  typeof clip.total_seconds === "number" && Math.abs(audioS - clip.total_seconds) < 0.05;
+const voiceS = whole && typeof clip.voice_s === "number" ? clip.voice_s : (heardMs ?? 0) / 1000;
 const lang = asked !== "auto" ? asked : (clip.language ?? "en");
 const dtw = dtwPreset !== undefined;
 const word = tokensOf(clip.text ?? "word");
 const n = word.length;
-const firstSound = Math.min((voiceMs ?? 0) / 1000 + lagS, Math.max(0, audioS - 0.3));
+const firstSound = Math.min(voiceS + lagS, Math.max(0, audioS - 0.3));
 const step = n > 1 ? Math.max(0.05, (audioS - 0.1 - firstSound) / n) : 0.3;
 const sound = word.map((_, i) => firstSound + i * step);
 // Where whisper stores each word: the first at 0, the next ones less early each, the fourth on its sound.
