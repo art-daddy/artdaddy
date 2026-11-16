@@ -52,6 +52,10 @@ export interface PlanInput {
    *  the engine has just heard. A guess never makes the app fetch a file for a language the smaller file is not
    *  cleared for while the smaller file is here: see {@link planModel}. Anything but `true` is not a guess. */
   predicted?: boolean;
+  /** True when the engine failed on the smaller file on this PC and the full-size file then ran the same request: the
+   *  smaller file is the likely cause, so it is not planned (every language is planned as on any PC that runs the
+   *  full-size file). Anything but `true` leaves the plan as it was. */
+  smallerFailed?: boolean;
 }
 
 /** A launch the manifest does not allow: a file it does not name, or a file on a path it was not cleared for. The
@@ -116,7 +120,7 @@ export function modelRules(
     // Today's plan, byte for byte: the baseline file, at the beam the chip's gate gives the language.
     const today = (): ModelPlan =>
       planOf(baselineKey, baseline, beamFor(baseline.variant, language ?? ""));
-    if (input?.backend !== "cpu" || !smaller) return today();
+    if (input?.backend !== "cpu" || !smaller || input.smallerFailed === true) return today();
 
     const [smallerKey, smallerEntry] = smaller;
     const have = new Set(Array.isArray(input.installed) ? input.installed : []);
@@ -242,7 +246,8 @@ const SHIPPED = modelRules(MODEL_MANIFEST, DEFAULT_MODEL_KEY, SHIPPED_EVIDENCE);
  *  processor, at the beam it cleared; the baseline file for every other language, except that a language which is only
  *  PREDICTED (`input.predicted`) starts on the smaller file when that is the file that is here, at the default beam.
  *  Nothing known: the baseline file when it is installed, else the smaller one, at the default beam, and the commit
- *  point checks the result. `offerSmallerToInstalled` is {@link OFFER_SMALLER_TO_INSTALLED}'s switch. */
+ *  point checks the result. After the engine failed on the smaller file on this PC (`input.smallerFailed`) the
+ *  smaller file is not planned at all. `offerSmallerToInstalled` is {@link OFFER_SMALLER_TO_INSTALLED}'s switch. */
 export function planModel(
   input: PlanInput,
   offerSmallerToInstalled: boolean = OFFER_SMALLER_TO_INSTALLED,

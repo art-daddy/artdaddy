@@ -52,6 +52,7 @@ import { assertLaunchArgv, processorBeam } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
 import { __resetWordTimesShipped, __setWordTimesShipped, DTW_ARGS } from "./speechWordTimes";
 import {
+  __resetSmallerFileFailure,
   __setDownloadPolicy,
   ensureLaunchModel,
   ensureTranscripts,
@@ -225,6 +226,7 @@ beforeEach(() => {
   lastCheck.passed.length = 0;
   lastCheck.unchecked.length = 0;
   __resetWorkGate();
+  __resetSmallerFileFailure();
   __setDownloadPolicy(SINGLE_ATTEMPT);
   hostIs(WINDOWS_UA);
   fetchedUrls.length = 0;
@@ -239,16 +241,15 @@ beforeEach(() => {
   reportTranscription.mockClear();
 });
 afterEach(() => {
-  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
-  expect(lastCheck.unchecked, "the engine was started with arguments the last check never saw").toEqual(
-    [],
-  );
+  const unchecked = lastCheck.unchecked.slice();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   __resetHostInfo();
   __resetWordTimesShipped();
   __resetExportFlags();
   __setDownloadPolicy(PATIENT_DOWNLOAD);
+  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
+  expect(unchecked, "the engine was started with arguments the last check never saw").toEqual([]);
 });
 
 describe("a PC that transcribes on its processor, with both files on disk", () => {
@@ -384,6 +385,30 @@ describe("when the engine fails on the smaller file", () => {
     expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL)]);
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
     expect(r.kept.size).toBe(0);
+  });
+
+  it("remembers it for the rest of the session: the next request goes straight to the full-size file", async () => {
+    noChip();
+    const r = rig({
+      engine: (_launch, args) =>
+        modelOf(args) === pathOf(SMALL) ? { code: 1, stderr: "failed to load model" } : { code: 0 },
+    });
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    // The smaller file was tried once, and not again.
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL), pathOf(FULL)]);
+    // The graphics chip is not involved: the full-size file on this PC is launched as it always was.
+    expect(onProcessor(r.launches[2])).toBe(false);
+  });
+
+  it("remembers nothing when the full-size file fails too: the file is not to blame, and the next request tries the smaller one first", async () => {
+    noChip();
+    const r = rig({ engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    await runWhisper(r.ctx, fresh(), "small", "en").catch(() => undefined);
+    await runWhisper(r.ctx, fresh(), "small", "en").catch(() => undefined);
+    expect(r.launches.map(modelOf)).toEqual(
+      [SMALL, FULL, SMALL, FULL].map((key) => pathOf(key)),
+    );
   });
 
   it("does not go on when the engine cannot start at all: a missing library is not the model's fault", async () => {

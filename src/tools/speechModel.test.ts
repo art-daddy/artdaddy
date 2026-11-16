@@ -497,6 +497,43 @@ describe("planModel for a language that is only predicted", () => {
   });
 });
 
+describe("planModel after the engine failed on the smaller file on this PC", () => {
+  const failed = (
+    backend: SpeechBackend,
+    language: string | null,
+    installed: readonly string[],
+    offer?: boolean,
+  ): { key: string; variant: ModelVariant; beam: number } =>
+    planModel({ backend, language, installed, smallerFailed: true }, offer);
+
+  it("is the plan of a PC that runs the full-size file, for every language, every set of files and either switch", () => {
+    for (const language of [...CODES, null, "", "zz", "auto"])
+      for (const offer of [false, true])
+        for (const installed of [[], [BASELINE], [SMALLER], [BASELINE, SMALLER]])
+          expect(failed("cpu", language, installed, offer), `${language} ${installed}`).toEqual(
+            plan("gpu", language, installed, offer),
+          );
+  });
+
+  it("also holds for a language that is only a guess, and is a flag only when exactly true", () => {
+    for (const language of CODES)
+      expect(
+        planModel({ backend: "cpu", language, installed: [SMALLER], predicted: true, smallerFailed: true }),
+        language,
+      ).toEqual(plan("gpu", language, [SMALLER]));
+    for (const smallerFailed of [false, undefined, null, 0, 1, "true", "yes", {}, []])
+      expect(
+        planModel({
+          backend: "cpu",
+          language: "en",
+          installed: [SMALLER],
+          smallerFailed: smallerFailed as never,
+        }),
+        String(smallerFailed),
+      ).toEqual(plan("cpu", "en", [SMALLER]));
+  });
+});
+
 describe("planModel, as rules over any input", () => {
   const language = fc.oneof(
     fc.constantFrom(...CODES),

@@ -70,6 +70,7 @@ import { DEFAULT_BEAM, SPEECH_LANGUAGE_KEY } from "./speechDecoding";
 import { TranscriptionFailure } from "./speechFailure";
 import { recordSpeechRun } from "./speechPace";
 import {
+  __resetSmallerFileFailure,
   __setDownloadPolicy,
   ensureTranscripts,
   PATIENT_DOWNLOAD,
@@ -224,6 +225,7 @@ beforeEach(() => {
   lastCheck.passed.length = 0;
   lastCheck.unchecked.length = 0;
   __resetWorkGate();
+  __resetSmallerFileFailure();
   __resetPrefetch();
   clearModelDownload();
   setModelDownloadFailure(null);
@@ -242,15 +244,14 @@ beforeEach(() => {
   reportTranscription.mockClear();
 });
 afterEach(() => {
-  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
-  expect(lastCheck.unchecked, "the engine was started with arguments the last check never saw").toEqual(
-    [],
-  );
+  const unchecked = lastCheck.unchecked.slice();
   wrongPlan.on = false;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   __resetHostInfo();
   __setDownloadPolicy(PATIENT_DOWNLOAD);
+  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
+  expect(unchecked, "the engine was started with arguments the last check never saw").toEqual([]);
 });
 
 describe("a second refusal in one run", () => {

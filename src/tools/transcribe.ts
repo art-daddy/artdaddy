@@ -1394,15 +1394,21 @@ export async function runWhisper(
   redoWith?: ModelPlan,
 ): Promise<ParsedTranscript> {
   let redo = redoWith;
+  /** The engine failed on the smaller file and this request went on with the full-size one. */
+  let wentOn = false;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await runWhisperOnce(ctx, src, size, language, window, redo, joined);
+      const done = await runWhisperOnce(ctx, src, size, language, window, redo, joined);
+      // The full-size file ran what the smaller one could not: the smaller file is the likely cause on this PC.
+      if (wentOn) smallerFileFailed = true;
+      return done;
     } catch (e) {
       if (e instanceof EngineFailedOnSmallerFile) {
         // The engine failed on the smaller file, which may be the cause: once more with the full-size file, which
         // every language accepts. If that fails too, or the runs are spent, the failure is the engine's own.
         if (attempt >= 2) throw e.failure;
         redo = universalPlan();
+        wentOn = true;
         continue;
       }
       if (!(e instanceof WeakDecodeError) || attempt >= 2) throw e;
@@ -1432,6 +1438,17 @@ class EngineFailedOnSmallerFile extends Error {
     super("the speech engine failed on the smaller model file");
     this.name = "EngineFailedOnSmallerFile";
   }
+}
+
+/** Set when the engine failed on the smaller file and the full-size file then ran the same request: the smaller file
+ *  is the likely cause on this PC, so the plan does not name it for the rest of this app session (a restart tries it
+ *  again: one more fast failed launch is cheap, and an update may have fixed it). When the full-size file fails too the
+ *  file is not to blame and nothing is remembered. */
+let smallerFileFailed = false;
+
+/** Tests only: a session in which the engine has not failed on the smaller file. */
+export function __resetSmallerFileFailure(): void {
+  smallerFileFailed = false;
 }
 
 /** Whether `e`, thrown for a run made with `plan`, is the ENGINE failing on a file other than the baseline. Not the
@@ -1470,6 +1487,7 @@ async function planForLanguage(
     language,
     installed: await installedModels(ctx),
     ...(predicted ? { predicted } : {}),
+    ...(smallerFileFailed ? { smallerFailed: true } : {}),
   });
 }
 
