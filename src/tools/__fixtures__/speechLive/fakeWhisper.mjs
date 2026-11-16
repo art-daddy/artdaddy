@@ -91,6 +91,10 @@ if (outBase) {
     })),
   };
   fs.writeFileSync(`${outBase}.json`, JSON.stringify(json));
+  // ARTDADDY_FAKE_REPLAY_JSON (speechQ8.smoke.e2e.ts): a whisper `-ojf` JSON written as the output file in place of the made-up
+  // one, so a run can hand the app a real transcript. Unset, nothing differs from before.
+  if (process.env.ARTDADDY_FAKE_REPLAY_JSON)
+    fs.copyFileSync(process.env.ARTDADDY_FAKE_REPLAY_JSON, `${outBase}.json`);
   process.stderr.write(`output_json: saving output to '${outBase}.json'\n`);
 }
 const totalMs = performance.now() - t0;
