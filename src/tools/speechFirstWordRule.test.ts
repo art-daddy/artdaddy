@@ -522,7 +522,7 @@ describe("a launch that carried the arguments and failed is made once more witho
   it("fails as a failed 0.27.0 launch does when the second launch fails too, after exactly two launches, and never builds the words from the first one's partial output", async () => {
     const { today, got } = await twice(
       { code: 1, output: "partial", stderr: "first" },
-      { code: 1, output: "none", stderr: "second" },
+      { code: 0, output: "none", stderr: "second" },
     );
     expect(got.specs).toHaveLength(2);
     expect(got.outcome).toBeInstanceOf(TranscriptionFailure);
