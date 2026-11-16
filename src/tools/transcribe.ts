@@ -1394,11 +1394,14 @@ export async function runWhisper(
   redoWith?: ModelPlan,
 ): Promise<ParsedTranscript> {
   let redo = redoWith;
+  /** Whether `redo` replaces a run that was refused for its language (what the telemetry calls a re-run), and not
+   *  one the engine failed on. */
+  let refused = redoWith !== undefined;
   /** The engine failed on the smaller file and this request went on with the full-size one. */
   let wentOn = false;
   for (let attempt = 0; ; attempt++) {
     try {
-      const done = await runWhisperOnce(ctx, src, size, language, window, redo, joined);
+      const done = await runWhisperOnce(ctx, src, size, language, window, redo, joined, refused);
       // The full-size file ran what the smaller one could not: the smaller file is the likely cause on this PC.
       if (wentOn) smallerFileFailed = true;
       return done;
@@ -1408,6 +1411,7 @@ export async function runWhisper(
         // every language accepts. If that fails too, or the runs are spent, the failure is the engine's own.
         if (attempt >= 2) throw e.failure;
         redo = universalPlan();
+        refused = false;
         wentOn = true;
         continue;
       }
@@ -1416,6 +1420,7 @@ export async function runWhisper(
       // run finds yet another language, the full-size file with the engine's own default beam settles it: it is
       // acceptable for all (speechModel.ts, acceptableRun).
       redo = attempt === 0 ? await replanFor(ctx, e.detected) : universalPlan();
+      refused = true;
     }
   }
 }
@@ -1451,14 +1456,34 @@ export function __resetSmallerFileFailure(): void {
   smallerFileFailed = false;
 }
 
-/** Whether `e`, thrown for a run made with `plan`, is the ENGINE failing on a file other than the baseline. Not the
- *  person stopping it, not a run deferred for the cap, not an engine that cannot start at all (a missing library is
- *  not the model's fault), not a language it does not know and not a transcript the commit point refused. */
-function engineFailedOnSmallerFile(e: unknown, plan: ModelPlan): boolean {
-  if (plan.key === DEFAULT_MODEL_KEY) return false;
+/** Whether `e`, thrown for a run made with `plan` that ended as `run`, is the ENGINE failing on a file other than the
+ *  baseline. Not the person stopping it, not a run deferred for the cap, not an engine that could not start (see
+ *  {@link engineDidNotStart}: no file can cause that), not a language it does not know and not a transcript the commit
+ *  point refused. */
+function engineFailedOnSmallerFile(e: unknown, plan: ModelPlan, run: EngineRun): boolean {
+  if (plan.key === DEFAULT_MODEL_KEY || engineDidNotStart(run)) return false;
   if (e instanceof TranscriptionFailure) return e.reason === "engine_failed";
   // The engine exited cleanly and left an output that is not a transcript (cut short).
   return e instanceof SyntaxError;
+}
+
+/** The plan the loop of {@link runWhisper} goes on with after `error` ended a run (a transcript the commit point
+ *  refused, an engine failure on the smaller file), or undefined for any other error: that one is a result. A caller
+ *  that joined such a run without being that loop must not be handed the error as its own outcome. */
+async function planAfter(ctx: ClientToolContext, error: unknown): Promise<ModelPlan | undefined> {
+  if (error instanceof EngineFailedOnSmallerFile) return universalPlan();
+  if (error instanceof WeakDecodeError) return replanFor(ctx, error.detected);
+  return undefined;
+}
+
+/** The loader or the shell said, before a line of the engine ran, that it cannot be started: exit 126 (not executable)
+ *  or 127 (not found, or a shared library it needs is missing) and the dynamic loader's own words. Windows says it with
+ *  the statuses of {@link WINDOWS_LOAD_FAILURES}, which `finishWhisper` already makes `engine_unavailable`. A model file
+ *  cannot cause any of these, so running the request again with another file would only fetch it for nothing. */
+const SHELL_COULD_NOT_RUN: ReadonlySet<number> = new Set([126, 127]);
+const LOADER_WORDS = /error while loading shared libraries|cannot open shared object file/i;
+function engineDidNotStart(run: EngineRun): boolean {
+  return (run.code !== null && SHELL_COULD_NOT_RUN.has(run.code)) || LOADER_WORDS.test(run.stderr);
 }
 
 /** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed).
@@ -1545,6 +1570,8 @@ async function runWhisperOnce(
   window: TranscribeWindow | null | undefined,
   redo: ModelPlan | undefined,
   joined = false,
+  /** This run replaces one that was refused for its language: the telemetry's `rerun`. */
+  rerun = redo !== undefined,
 ): Promise<ParsedTranscript> {
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
@@ -1624,7 +1651,7 @@ async function runWhisperOnce(
         beam: plan.beam,
         variant: plan.variant,
         requested: lang,
-        ...(redo !== undefined ? { rerun: true } : {}),
+        ...(rerun ? { rerun: true } : {}),
         label: fileLabel(src),
         purpose,
         spanS,
@@ -1692,7 +1719,7 @@ async function runWhisperOnce(
         // The engine ran and failed on the smaller file: runWhisper goes on with the full-size one. A launch the
         // manifest refused never gets here (it is thrown by engine() above), and neither does a cancel.
         return await finishWhisper(ctx.store, meta, run, ctx.signal).catch((e: unknown) => {
-          throw engineFailedOnSmallerFile(e, plan) ? new EngineFailedOnSmallerFile(e) : e;
+          throw engineFailedOnSmallerFile(e, plan, run) ? new EngineFailedOnSmallerFile(e) : e;
         });
       } catch (e) {
         // The person stopped a whole file's run: it is theirs to ask for again, and nothing starts it behind
@@ -2419,7 +2446,16 @@ async function transcribeTogether(
       await running;
       outcomes[k.at] = { ok: true, existed: false };
     } catch (error) {
-      outcomes[k.at] = { ok: false, error };
+      try {
+        // The run this one joined ended for a reason that is the loop of runWhisper's to settle, not a result: it
+        // goes on by itself, and asking again joins what it goes on with (or finds its words).
+        const again = await planAfter(ctx, error);
+        if (again === undefined) throw error;
+        await runWhisper(ctx, k.src, size, language, null, false, again);
+        outcomes[k.at] = { ok: true, existed: false };
+      } catch (e) {
+        outcomes[k.at] = { ok: false, error: e };
+      }
     }
   });
   if (ours.length < 2) {

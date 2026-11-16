@@ -100,6 +100,8 @@ interface EngineAnswer {
   stderr?: string;
   /** Leaves no output file, whatever the exit code says: with code 0, a clean exit with no transcript. */
   noOutput?: boolean;
+  /** With code 0, leaves an output that stops in the middle: a run that died while writing it. */
+  cutShort?: boolean;
 }
 interface RigOptions {
   /** The manifest keys whose file is on disk. Absent: both. */
@@ -107,6 +109,8 @@ interface RigOptions {
   /** What the engine says it heard, per launch and clip. Absent: English. */
   say?: (launch: number, args: string[], clip: string) => Say;
   engine?: (launch: number, args: string[]) => EngineAnswer;
+  /** Every launch waits for this before it answers: a run that is still going. */
+  gate?: Promise<void>;
   /** Runs when the audio is extracted: after the plan, before the launch. */
   onExtract?: () => void;
   background?: boolean;
@@ -176,6 +180,7 @@ function rig(options: RigOptions = {}) {
       const launch = launches.length;
       launches.push(args);
       if (!wasChecked(args)) lastCheck.unchecked.push(args);
+      await options.gate;
       const answer = options.engine?.(launch, args) ?? { code: 0 };
       if (answer.code === 0 && answer.noOutput !== true) {
         const outs = flagValues(args, "-of");
@@ -185,7 +190,8 @@ function rig(options: RigOptions = {}) {
           const said = options.say?.(launch, args, source) ?? { language: "en" };
           const out = `${outs[place]}.json`;
           files.add(out);
-          texts.set(out, json(said.language, said.text ?? `launch ${launch}`));
+          const whole = json(said.language, said.text ?? `launch ${launch}`);
+          texts.set(out, answer.cutShort === true ? whole.slice(0, 12) : whole);
         });
       }
       return { code: answer.code, stdout: "", stderr: answer.stderr ?? "" };
@@ -354,6 +360,7 @@ describe("when the engine fails on the smaller file", () => {
     ["it cannot load the file", { code: 1, stderr: "failed to load model" }],
     ["it crashes", { code: ENGINE_CRASH, stderr: VULKAN_LOG }],
     ["it exits cleanly and leaves no transcript", { code: 0, noOutput: true }],
+    ["it exits cleanly and leaves a transcript cut short", { code: 0, cutShort: true }],
   ];
 
   it.each(FAILURES)(
@@ -415,9 +422,7 @@ describe("when the engine fails on the smaller file", () => {
     const r = rig({ engine: () => ({ code: 1, stderr: "failed to load model" }) });
     await runWhisper(r.ctx, fresh(), "small", "en").catch(() => undefined);
     await runWhisper(r.ctx, fresh(), "small", "en").catch(() => undefined);
-    expect(r.launches.map(modelOf)).toEqual(
-      [SMALL, FULL, SMALL, FULL].map((key) => pathOf(key)),
-    );
+    expect(r.launches.map(modelOf)).toEqual([SMALL, FULL, SMALL, FULL].map((key) => pathOf(key)));
   });
 
   it("does not go on when the engine cannot start at all: a missing library is not the model's fault", async () => {
@@ -427,6 +432,122 @@ describe("when the engine fails on the smaller file", () => {
     const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
     expect((failure as TranscriptionFailure).reason).toBe("engine_unavailable");
     expect(r.launches).toHaveLength(1);
+  });
+
+  // On Linux, where the net matters most, the loader and the shell say it with exit 126 or 127 and with their own
+  // words, not with a Windows status. No model file can cause that, so nothing is fetched for it.
+  const COULD_NOT_START: Array<[how: string, answer: EngineAnswer]> = [
+    [
+      "the loader cannot find a library",
+      {
+        code: 127,
+        stderr:
+          "whisper-cli: error while loading shared libraries: libgomp.so.1: cannot open shared object file",
+      },
+    ],
+    ["the shell cannot run the program", { code: 126, stderr: "" }],
+    ["the loader says so under another exit code", { code: 1, stderr: "cannot open shared object file" }],
+  ];
+
+  it.each(COULD_NOT_START)(
+    "does not go on with the full-size file, and fetches nothing, when %s",
+    async (_how, failure) => {
+      noChip();
+      const r = rig({ installed: [SMALL], engine: () => failure });
+      const failed = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+      expect((failed as TranscriptionFailure).reason).toBe("engine_failed");
+      expect(r.launches).toHaveLength(1);
+      expect(fetchedUrls).toEqual([]);
+    },
+  );
+
+  it("is still three runs at most: a refusal, an engine failure on the re-run, then the full-size file", async () => {
+    noChip();
+    // Guessed English (greedy), heard Dutch (cleared at 5 beams only): refused, run again at 5 beams, and that fails.
+    localStorage.setItem("artdaddy.speech_language", "en");
+    const r = rig({
+      say: () => ({ language: "nl" }),
+      engine: (launch) => (launch === 1 ? { code: 1, stderr: "failed to load model" } : { code: 0 }),
+    });
+    const kept = await runWhisper(r.ctx, fresh(), "small", "auto");
+    expect(r.launches.map((a) => [modelOf(a), beamOf(a)])).toEqual([
+      [pathOf(SMALL), 1],
+      [pathOf(SMALL), 5],
+      [pathOf(FULL), DEFAULT_BEAM],
+    ]);
+    expect(kept.words.map((w) => w.word).join(" ")).toBe("launch 2");
+  });
+
+  it("reports a re-run after a refusal as a re-run, and one after an engine failure as an ordinary run", async () => {
+    noChip();
+    // Guessed English, heard Dutch: refused, then run again at 5 beams: that is what the telemetry's re-run means.
+    localStorage.setItem("artdaddy.speech_language", "en");
+    const refused = rig({ say: () => ({ language: "nl" }) });
+    await runWhisper(refused.ctx, fresh(), "small", "auto");
+    expect(reportTranscription).toHaveBeenCalledTimes(1);
+    expect(reportTranscription.mock.calls[0][2]).toMatchObject({ beam: 5, rerun: true });
+
+    // The engine failed on the smaller file and the full-size file ran the request: no transcript was refused.
+    reportTranscription.mockClear();
+    const failed = rig({
+      engine: (_launch, args) =>
+        modelOf(args) === pathOf(SMALL) ? { code: 1, stderr: "failed to load model" } : { code: 0 },
+    });
+    await runWhisper(failed.ctx, fresh(), "small", "en");
+    expect(reportTranscription).toHaveBeenCalledTimes(1);
+    expect(reportTranscription.mock.calls[0][2]).toMatchObject({ beam: DEFAULT_BEAM });
+    expect(reportTranscription.mock.calls[0][2].rerun).not.toBe(true);
+  });
+
+  // A batch that finds the file already being transcribed joins that run. The run's own caller goes on after an engine
+  // failure on the smaller file (or a refusal) by itself; the batch must not be handed that as the file's outcome.
+  describe("a batch that joined the run", () => {
+    it("is not told the engine failed on the smaller file: it gets the words the run goes on to make", async () => {
+      noChip();
+      let open!: () => void;
+      const r = rig({
+        gate: new Promise<void>((resolve) => (open = resolve)),
+        engine: (_launch, args) =>
+          modelOf(args) === pathOf(SMALL)
+            ? { code: 1, stderr: "failed to load model" }
+            : { code: 0 },
+      });
+      const clip = fresh();
+      const single = runWhisper(r.ctx, clip, "small", "en");
+      await vi.waitFor(() => expect(r.launches).toHaveLength(1));
+      const batch = ensureTranscripts(r.ctx, [clip], "small", "en");
+      // The batch finds the run and joins it before the engine answers.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      open();
+      const [kept, out] = await Promise.all([single, batch]);
+      expect(out).toEqual([{ ok: true, existed: false }]);
+      expect(kept.words.map((w) => w.word).join(" ")).toBe("launch 1");
+      // One run with each file: the batch started none of its own.
+      expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL)]);
+    });
+
+    it("is not told the transcript was refused either: it gets the words of the run that replaces it", async () => {
+      noChip();
+      localStorage.setItem("artdaddy.speech_language", "en");
+      let open!: () => void;
+      const r = rig({
+        gate: new Promise<void>((resolve) => (open = resolve)),
+        say: () => ({ language: "nl" }),
+      });
+      const clip = fresh();
+      const single = runWhisper(r.ctx, clip, "small", "auto");
+      await vi.waitFor(() => expect(r.launches).toHaveLength(1));
+      const batch = ensureTranscripts(r.ctx, [clip], "small", "auto");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      open();
+      const [, out] = await Promise.all([single, batch]);
+      expect(out).toEqual([{ ok: true, existed: false }]);
+      // The refused run and the one run that replaces it, at 5 beams: the batch started none of its own.
+      expect(r.launches.map((a) => [modelOf(a), beamOf(a)])).toEqual([
+        [pathOf(SMALL), 1],
+        [pathOf(SMALL), 5],
+      ]);
+    });
   });
 
   it("does not touch a PC that runs the full-size file: its failure is its own, with one launch", async () => {
