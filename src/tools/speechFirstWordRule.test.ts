@@ -578,6 +578,22 @@ describe("a launch that carried the arguments and failed is made once more witho
       expect(reportAppError).not.toHaveBeenCalled();
     });
 
+    it("the person pressed Cancel as the alignment launch died by itself with another exit: still no second launch, answered as a cancel", async () => {
+      processor();
+      configure(true, true);
+      const t = setup({ script: () => null });
+      const run = runWhisper(t.rig.ctx({ background: true }), freshSource(), FULL, "en").catch(
+        (e: unknown) => e,
+      );
+      await until(() => t.whisper().length === 1);
+      const [first] = t.whisper();
+      t.jobs.exit(first.id, 1, ""); // it died by itself...
+      cancelSpeechJob(first.id); // ...as the person pressed Cancel
+      expect(isSpeechCancelled(await run)).toBe(true);
+      expect(t.whisper()).toHaveLength(1);
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+
     it("the caller's own Stop during the first launch: one launch", async () => {
       processor();
       configure(true, true);

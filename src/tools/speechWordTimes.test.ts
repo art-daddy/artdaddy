@@ -173,6 +173,28 @@ describe("which model files and engine paths the alignment was measured for", ()
     expect(wordTimesPossible({ size: "small", cpuOnly: false })).toBe(false);
   });
 
+  it("treats the chip's constant and its list of files as two keys: neither alone lets a chip launch carry the arguments", () => {
+    const chipList = WORD_TIMES_CHIP_MODELS as string[];
+    __setWordTimesShipped(true);
+    __setExportFlag("speech_word_times", true);
+    try {
+      chipList.push("small");
+      expect(wordTimesPossible({ size: "small", cpuOnly: false }), "listed, constant off").toBe(
+        false,
+      );
+      __setWordTimesChipShipped(true);
+      expect(wordTimesPossible({ size: "small", cpuOnly: false }), "listed, constant on").toBe(
+        true,
+      );
+      chipList.length = 0;
+      expect(wordTimesPossible({ size: "small", cpuOnly: false }), "constant on, none listed").toBe(
+        false,
+      );
+    } finally {
+      chipList.length = 0;
+    }
+  });
+
   it("does not let a name from the object prototype or an empty key through", () => {
     __setWordTimesShipped(true);
     __setWordTimesChipShipped(true);
