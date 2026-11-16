@@ -51,7 +51,7 @@ const spawned = (args: string[], plan: { cpuOnly: boolean }): string[] =>
 
 describe("the model file a path names", () => {
   it.each([
-    ["C:\\Users\\Some One\\AppData\\Roaming\\My App\\models\\ggml-small.bin", BASELINE_KEY],
+    ["C:\\Users\\User With Spaces\\AppData\\Roaming\\My App\\models\\ggml-small.bin", BASELINE_KEY],
     ["C:/models/ggml-small.bin", BASELINE_KEY],
     ["/home/me/.local/share/app/models/ggml-small-q8_0.bin", SMALLER_KEY],
     ["\\\\server\\share\\models\\ggml-small-q8_0.bin", SMALLER_KEY],
@@ -122,7 +122,7 @@ describe("the model file a path names", () => {
 
 const M = `C:\\models\\${SMALLER_FILE}`;
 const B = `C:\\models\\${BASELINE_FILE}`;
-const SPACED = `C:\\Users\\Some One\\AppData\\Roaming\\My App\\models\\${SMALLER_FILE}`;
+const SPACED = `C:\\Users\\User With Spaces\\AppData\\Roaming\\My App\\models\\${SMALLER_FILE}`;
 
 // [what the arguments are, the arguments, whether the final-argv check lets them through]
 const CASES: Array<[string, string[], "ok" | "refused"]> = [
@@ -179,7 +179,7 @@ describe("assertLaunchArgv, on the arguments about to be spawned", () => {
   });
 
   it("never says where the person's files are in what it throws", () => {
-    const secret = "C:\\Users\\Pat Example\\AppData\\Roaming\\models";
+    const secret = "C:\\Users\\PRIVATE-FOLDER-NAME\\AppData\\Roaming\\models";
     for (const argv of [
       ["-m", `${secret}\\ggml-medium.bin`],
       ["-m", `${secret}\\${SMALLER_FILE}`],
@@ -194,7 +194,7 @@ describe("assertLaunchArgv, on the arguments about to be spawned", () => {
       }
       expect(thrown).toBeInstanceOf(ModelPairingError);
       const message = (thrown as Error).message;
-      expect(message).not.toContain("Pat Example");
+      expect(message).not.toContain("PRIVATE-FOLDER-NAME");
       expect(message).not.toContain("ggml-medium");
       expect(message.length).toBeLessThan(200);
       expect((thrown as Error).name).toBe("ModelPairingError");
@@ -284,7 +284,7 @@ const roots = fc.constantFrom(
 const segments = fc.oneof(
   fc.constantFrom(
     "models",
-    "Some One",
+    "User With Spaces",
     "App Data",
     "AppData",
     "Local",

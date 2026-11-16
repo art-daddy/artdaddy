@@ -23,6 +23,7 @@ import {
   type ModelVariant,
 } from "./speechDecoding";
 import gateData from "./speechGate.json";
+import { whisperCode } from "./whisperLanguages";
 
 interface Cell {
   error_pct: number;
@@ -86,7 +87,7 @@ const verdictOf = (diff: number, high: number): string =>
 const rowOf = (set: string) => GATE.rows.find((r) => r.set === set)!;
 
 describe("the two processor settings", () => {
-  it("are exactly what the lane's contract says: the 8-bit file on the processor, greedy and 5 beams", () => {
+  it("are exactly the two settings this change defines: the 8-bit file on the processor, greedy and 5 beams", () => {
     expect(GATE.settings.ZC).toEqual({
       variant: "q8_0",
       beam: 1,
@@ -208,6 +209,22 @@ describe("the processor cells, row by row", () => {
       }
     },
   );
+
+  it("measure a language on every one of its sets or on none: a half-measured language would silently stay uncleared", () => {
+    for (const id of ["ZC", "ZBC"]) {
+      const covered = new Map<string, Set<boolean>>();
+      for (const row of GATE.rows)
+        covered.set(
+          row.language,
+          (covered.get(row.language) ?? new Set<boolean>()).add(row.results[id] !== undefined),
+        );
+      for (const [language, has] of covered) expect(has.size, `${id} ${language}`).toBe(1);
+    }
+  });
+
+  it("are about languages the gate names by the engine's own code, so that what it says is read for them", () => {
+    for (const row of GATE.rows) expect(whisperCode(row.language), row.set).toBe(row.language);
+  });
 
   it("carry the gate's own three words, and each follows the rule from its two figures", () => {
     for (const row of GATE.rows)
