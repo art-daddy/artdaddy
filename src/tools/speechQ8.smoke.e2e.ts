@@ -11,8 +11,14 @@
 //   * what an install that holds one file does: only the full-size file -> it keeps it and downloads nothing; only the q8_0 file
 //     -> English runs on it, and Arabic is refused with a plain reason and NO launch (never a wrong-model run);
 //   * language "auto" predicted as English and heard as Dutch: the greedy transcript is not kept, and the kept run is 5 beams;
-//   * the words the app makes of the engine's JSON are the stored ones (the study's own words, see the engine-check kit), and the
-//     kit's word reader (a port used by its standalone harness) agrees with the app's reader on stored transcripts of 12 languages.
+//   * the words the app keeps are exactly the words the engine wrote for that launch (read with the app's own reader) and, with the
+//     real engine, at most 2 words and at most 8 % of the clip away from the study's stored words (the numbers are printed; the
+//     rule is the engine-check kit's, lib/words.mjs `allowedApart`): the study gave the engine float samples and the app gives it
+//     16-bit ones, so a near-tie word can flip (the first real run moved one English word, "Son" to "Sun", which the same engine and
+//     file do not do on the study's float samples: the kit asserts that exact equality as `words-float`); the facts (file, ftype,
+//     backend, flags, beams) are asserted exactly in every case; the fake engine replays the stored words, so with it they must be
+//     equal. The kit's word reader (a port used by its standalone harness) agrees with the app's reader on stored transcripts of 12
+//     languages.
 // The behaviour under test (the choice of the model file, the launch boundary) is written by lane L12 itself: before that
 // lands, the assertions on the q8_0 file are EXPECTED to fail (the app launches the full-size file for everything). The ones that
 // describe today's behaviour (a chip PC, an install with only the full-size file, the stored words, the rule) pass before and after.
@@ -35,6 +41,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, promises as fsp, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -196,6 +203,8 @@ interface Launch {
    *  (7 = q8_0, 1 = f16). Read from a real engine only: the fake replays a stored file that cannot know. */
   jsonModel: string | null;
   jsonFtype: number | null;
+  /** The engine's own output file of this launch, whole (real engine only). */
+  jsonText: string | null;
 }
 
 /** Every launch of the file, across all cases, for the closing rule. */
@@ -261,6 +270,7 @@ function engineRunner(launches: Launch[], clip: KitClip): CommandRunner {
           wallS: 0,
           jsonModel: null,
           jsonFtype: null,
+          jsonText: null,
         };
         launches.push(record);
         everyLaunch.push(record);
@@ -301,11 +311,15 @@ function engineRunner(launches: Launch[], clip: KitClip): CommandRunner {
           const base = flagValue(args, "-of");
           if (!FAKE && base && existsSync(`${base}.json`)) {
             try {
-              const json = JSON.parse(await fsp.readFile(`${base}.json`, "utf8")) as {
+              const text = await fsp.readFile(`${base}.json`, "utf8");
+              record.jsonText = text;
+              const json = JSON.parse(text) as {
                 params?: { model?: string };
                 model?: { ftype?: number };
               };
-              record.jsonModel = path.basename(String(json.params?.model ?? "").replace(/\\/g, "/"));
+              record.jsonModel = path.basename(
+                String(json.params?.model ?? "").replace(/\\/g, "/"),
+              );
               record.jsonFtype = json.model?.ftype ?? null;
             } catch {
               /* a cut file is a finding of its own: the app reads it next and says so */
@@ -397,7 +411,9 @@ async function runCase(
       return `${modelOf(l)} ${l.args.includes("-bs") ? "-bs 1 -bo 1" : "5 beams"} ${l.args.includes("-ng") ? "-ng" : "(chip)"} -> ${facts.backend ?? "?"}, ${l.wallS.toFixed(1)} s`;
     })
     .join(" | ");
-  console.log(`[speechQ8] ${label}: ${launches.length} launch(es): ${line || "none"}${error ? `; ended with ${error instanceof Error ? error.message.slice(0, 120) : String(error)}` : ""}`); // eslint-disable-line no-console
+  console.log(
+    `[speechQ8] ${label}: ${launches.length} launch(es): ${line || "none"}${error ? `; ended with ${error instanceof Error ? error.message.slice(0, 120) : String(error)}` : ""}`,
+  ); // eslint-disable-line no-console
   return { launches, words, error, fetches: fetchCalls.length - fetchesBefore };
 }
 
@@ -405,6 +421,67 @@ async function runCase(
 function appWordsOfStored(clip: KitClip): string[] {
   const raw = readFileSync(path.join(KIT, clip.stored.path), "utf8");
   return parseWhisperCppJson(raw, { wordTimes: false }).words.map((w) => w.word);
+}
+
+/** The rule for the words of the app's own audio lives in ONE place, the engine-check kit (lib/words.mjs: `allowedApart`, `diffWords`), which the
+ *  standalone harness (run_check.mjs) and the re-evaluation of a saved run (reeval.mjs) use too, so the three cannot disagree about how many words
+ *  apart is too many. A plain Node module of the kit, loaded when first needed. */
+interface KitWords {
+  allowedApart: (storedWordCount: number) => number;
+  diffWords: (expected: readonly string[], produced: readonly string[]) => { distance: number };
+  APART_MAX_WORDS: number;
+  APART_MAX_PERCENT: number;
+}
+let kitWordsLoad: Promise<KitWords> | null = null;
+const kitWords = (): Promise<KitWords> =>
+  (kitWordsLoad ??= import(
+    /* @vite-ignore */ pathToFileURL(path.join(KIT, "lib", "words.mjs")).href
+  ) as Promise<KitWords>);
+
+/** What the kept transcript of a case must be. With the fake engine, which replays the stored words: those. With the real one, three things:
+ *  the app keeps exactly the words the engine wrote for the launch that made them; the words are at most 2 words and at most 8 % of the clip away
+ *  from the study's stored words (the numbers are printed); and which file and flags ran is asserted, exactly, from the engine's own output
+ *  elsewhere in the case (the file in its JSON, ftype, backend, beams), so a wrong model or a wrong decoding still fails.
+ *  Why a bound and not equality: the study gave the engine float samples and the app gives it 16-bit ones (99.9 % of the samples equal after
+ *  rounding, none more than 1 LSB apart), and a word that is a near tie can flip. The first real run moved one English word ("Son" to "Sun", #22
+ *  of 28) that the same engine, file and flags do not move on the study's float samples: the engine-check kit asserts that exact equality
+ *  (run_check.mjs `words-float`). */
+async function expectKeptWords(label: string, r: CaseResult, clip: KitClip): Promise<void> {
+  const stored = appWordsOfStored(clip);
+  if (FAKE) {
+    expect(r.words, "the fake engine replays the stored words").toEqual(stored);
+    return;
+  }
+  const { allowedApart, diffWords, APART_MAX_WORDS, APART_MAX_PERCENT } = await kitWords();
+  const kept = r.words ?? [];
+  const last = r.launches[r.launches.length - 1];
+  const wrote = parseWhisperCppJson(last?.jsonText ?? "", { wordTimes: false }).words.map(
+    (w) => w.word,
+  );
+  expect(
+    kept,
+    "the app keeps exactly the words the engine wrote for the launch that made them",
+  ).toEqual(wrote);
+  expect(kept.length, "some words were made").toBeGreaterThan(0);
+  const apart = diffWords(stored, kept).distance;
+  const allowed = allowedApart(stored.length);
+  console.log(
+    `[speechQ8] ${label}: ${apart} of ${stored.length} word(s) apart from the study's stored words (allowed ${allowed}: at most ${APART_MAX_WORDS} words and at most ${APART_MAX_PERCENT} %)`,
+  ); // eslint-disable-line no-console
+  expect(
+    apart,
+    `at most ${allowed} of ${stored.length} words away from the study's (the rounding of the 16-bit input)`,
+  ).toBeLessThanOrEqual(allowed);
+}
+
+/** The engine's own header says how many beams it decoded with (`N beams + best of N`): the decoding flags the app built reached the decoder. */
+function expectBeams(l: Launch, beams: number): void {
+  if (FAKE) return;
+  const m = /(\d+) beams \+ best of (\d+)/.exec(l.stderr);
+  expect(
+    m ? [Number(m[1]), Number(m[2])] : null,
+    "the engine's own header: beams + best of",
+  ).toEqual([beams, beams]);
 }
 
 /** What every launch of a case on a processor PC must show, whichever file it runs. */
@@ -419,7 +496,10 @@ describe.skipIf(missing.length > 0)(
   () => {
     beforeAll(async () => {
       installGlobal("navigator", {
-        hardwareConcurrency: Number(process.env.ARTDADDY_LIVE_CORES) || os.availableParallelism?.() || os.cpus().length,
+        hardwareConcurrency:
+          Number(process.env.ARTDADDY_LIVE_CORES) ||
+          os.availableParallelism?.() ||
+          os.cpus().length,
       });
       installGlobal("localStorage", memoryStorage());
       installGlobal("fetch", (input: unknown) => {
@@ -469,7 +549,7 @@ describe.skipIf(missing.length > 0)(
       await fsp.rm(SCRATCH, { recursive: true, force: true }).catch(() => undefined);
     });
 
-    it("the kit's word reader finds the same words as the app's parseWhisperCppJson in stored transcripts of 12 languages", () => {
+    it("the kit's word reader finds the same words as the app's parseWhisperCppJson in stored transcripts of 12 languages, and its word rule loads", async () => {
       const parity = kit!.parity;
       expect(parity.length, "the parity corpus is there").toBeGreaterThanOrEqual(12);
       for (const p of parity) {
@@ -479,10 +559,18 @@ describe.skipIf(missing.length > 0)(
       }
       for (const c of kit!.clips)
         expect(appWordsOfStored(c), `${c.id}: the stored words`).toEqual(c.stored.words);
+      // The word rule is the kit's alone (see kitWords): a clip of 12 words or fewer must match exactly, a long one is capped at 2 words.
+      const rule = await kitWords();
+      expect(rule.allowedApart(12), "12 words or fewer: exact").toBe(0);
+      expect(rule.allowedApart(1000), "a long clip: the cap in words").toBe(rule.APART_MAX_WORDS);
+      expect(
+        rule.diffWords(["a", "b", "c"], ["a", "x", "c"]).distance,
+        "the kit's edit distance",
+      ).toBe(1);
     });
 
     it(
-      "English on a processor PC: the q8_0 file, greedy (-bs 1 -bo 1), -ng; the words are the stored ones",
+      "English on a processor PC: the q8_0 file, greedy (-bs 1 -bo 1), -ng; the kept words are the engine's, within rounding of the stored ones",
       async () => {
         const clip = clipOf("en");
         const r = await runCase("en-processor", clip, "en", { backend: "processor" });
@@ -500,13 +588,14 @@ describe.skipIf(missing.length > 0)(
           expect(l.jsonModel, "the engine says it loaded the q8_0 file").toBe(Q8_FILE);
           expect(l.jsonFtype, "ftype 7 is q8_0").toBe(7);
         }
-        expect(r.words, "the words are the stored ones").toEqual(appWordsOfStored(clip));
+        expectBeams(l, 1);
+        await expectKeptWords("en-processor", r, clip);
       },
       5 * 60_000,
     );
 
     it(
-      "Dutch on a processor PC: the q8_0 file, 5 beams (no -bs, no -bo), -ng; the words are the stored ones",
+      "Dutch on a processor PC: the q8_0 file, 5 beams (no -bs, no -bo), -ng; the kept words are the engine's, within rounding of the stored ones",
       async () => {
         const clip = clipOf("nl");
         const r = await runCase("nl-processor", clip, "nl", { backend: "processor" });
@@ -514,19 +603,23 @@ describe.skipIf(missing.length > 0)(
         expect(r.launches).toHaveLength(1);
         const l = r.launches[0];
         expect(modelOf(l), "the q8_0 file").toBe(Q8_FILE);
-        expect(l.args, "Dutch fails greedy on the processor: the engine's own 5 beams").not.toContain("-bs");
+        expect(
+          l.args,
+          "Dutch fails greedy on the processor: the engine's own 5 beams",
+        ).not.toContain("-bs");
         expect(l.args).not.toContain("-bo");
         expect(flagValue(l.args, "-l")).toBe("nl");
         expectProcessorLaunch(l);
         expect(r.fetches).toBe(0);
         if (!FAKE) expect(l.jsonFtype).toBe(7);
-        expect(r.words).toEqual(appWordsOfStored(clip));
+        expectBeams(l, 5);
+        await expectKeptWords("nl-processor", r, clip);
       },
       5 * 60_000,
     );
 
     it(
-      "Spanish on a processor PC: the q8_0 file, greedy, -ng; the words are the stored ones",
+      "Spanish on a processor PC: the q8_0 file, greedy, -ng; the kept words are the engine's, within rounding of the stored ones",
       async () => {
         const clip = clipOf("es");
         const r = await runCase("es-processor", clip, "es", { backend: "processor" });
@@ -539,7 +632,8 @@ describe.skipIf(missing.length > 0)(
         expectProcessorLaunch(l);
         expect(r.fetches).toBe(0);
         if (!FAKE) expect(l.jsonFtype).toBe(7);
-        expect(r.words).toEqual(appWordsOfStored(clip));
+        expectBeams(l, 1);
+        await expectKeptWords("es-processor", r, clip);
       },
       5 * 60_000,
     );
@@ -552,7 +646,9 @@ describe.skipIf(missing.length > 0)(
         expect(r.error, String(r.error)).toBeUndefined();
         expect(r.launches).toHaveLength(1);
         const l = r.launches[0];
-        expect(modelOf(l), "Arabic misses the 2-point rule on q8_0: the full-size file").toBe(F16_FILE);
+        expect(modelOf(l), "Arabic misses the 2-point rule on q8_0: the full-size file").toBe(
+          F16_FILE,
+        );
         expect(l.args).not.toContain("-bs");
         expect(l.args).not.toContain("-bo");
         expect(flagValue(l.args, "-l")).toBe("ar");
@@ -562,11 +658,14 @@ describe.skipIf(missing.length > 0)(
           expect(l.jsonModel).toBe(F16_FILE);
           expect(l.jsonFtype, "ftype 1 is f16").toBe(1);
         }
+        expectBeams(l, 5);
         const stored = appWordsOfStored(clip);
         if (FAKE || AR_STRICT) expect(r.words, "the stored chip words").toEqual(stored);
         else {
           const same = JSON.stringify(r.words) === JSON.stringify(stored);
-          console.log(`[speechQ8] ar-processor words ${same ? "equal the stored f16 chip words" : `DIFFER from the stored f16 chip words (${r.words?.length ?? 0} produced, ${stored.length} stored): reported, not failed`}`); // eslint-disable-line no-console
+          console.log(
+            `[speechQ8] ar-processor words ${same ? "equal the stored f16 chip words" : `DIFFER from the stored f16 chip words (${r.words?.length ?? 0} produced, ${stored.length} stored): reported, not failed`}`,
+          ); // eslint-disable-line no-console
           expect(r.words?.length ?? 0, "some words were made").toBeGreaterThan(0);
         }
       },
@@ -580,12 +679,15 @@ describe.skipIf(missing.length > 0)(
         const r = await runCase("en-chip", clip, "en", { backend: "chip" });
         expect(r.error, String(r.error)).toBeUndefined();
         expect(r.launches.length, "at least one launch").toBeGreaterThanOrEqual(1);
-        for (const l of r.launches) expect(modelOf(l), "never the q8_0 file on the chip").toBe(F16_FILE);
+        for (const l of r.launches)
+          expect(modelOf(l), "never the q8_0 file on the chip").toBe(F16_FILE);
         const first = r.launches[0];
         expect(first.args, "the first launch is the chip's: no -ng").not.toContain("-ng");
         // The decoding is today's, byte for byte: what the gate cleared for the full-size file in English.
         const decodeOf = (args: readonly string[]): string[] =>
-          args.includes("-bs") ? ["-bs", flagValue(args, "-bs") ?? "", "-bo", flagValue(args, "-bo") ?? ""] : [];
+          args.includes("-bs")
+            ? ["-bs", flagValue(args, "-bs") ?? "", "-bo", flagValue(args, "-bo") ?? ""]
+            : [];
         expect(decodeOf(first.args)).toEqual(decodeArgs(beamFor("f16", "en")));
         expect(r.fetches).toBe(0);
       },
@@ -596,14 +698,19 @@ describe.skipIf(missing.length > 0)(
       "a processor PC that has only the full-size file keeps it (today's behaviour) and downloads nothing",
       async () => {
         const clip = clipOf("en");
-        const r = await runCase("en-processor-f16-only", clip, "en", { backend: "processor", keys: ["small"] });
+        const r = await runCase("en-processor-f16-only", clip, "en", {
+          backend: "processor",
+          keys: ["small"],
+        });
         expect(r.error, String(r.error)).toBeUndefined();
         expect(r.launches).toHaveLength(1);
         const l = r.launches[0];
         expect(modelOf(l), "no surprise download of the other file").toBe(F16_FILE);
         expect(r.fetches, "no network").toBe(0);
         expectProcessorLaunch(l);
-        expect(l.args.includes("-bs"), "today's decoding for the full-size file in English").toBe(beamFor("f16", "en") === 1);
+        expect(l.args.includes("-bs"), "today's decoding for the full-size file in English").toBe(
+          beamFor("f16", "en") === 1,
+        );
       },
       5 * 60_000,
     );
@@ -612,14 +719,18 @@ describe.skipIf(missing.length > 0)(
       "a processor PC that has only the q8_0 file runs English on it (-ng, greedy) and downloads nothing",
       async () => {
         const clip = clipOf("en");
-        const r = await runCase("en-processor-q8-only", clip, "en", { backend: "processor", keys: ["small_q8_0"] });
+        const r = await runCase("en-processor-q8-only", clip, "en", {
+          backend: "processor",
+          keys: ["small_q8_0"],
+        });
         expect(r.error, String(r.error)).toBeUndefined();
         expect(r.launches).toHaveLength(1);
         const l = r.launches[0];
         expect(modelOf(l), "the file that is there").toBe(Q8_FILE);
         expectProcessorLaunch(l);
         expect(r.fetches, "no network: the file it needs is on disk").toBe(0);
-        expect(r.words).toEqual(appWordsOfStored(clip));
+        expectBeams(l, 1);
+        await expectKeptWords("en-processor-q8-only", r, clip);
       },
       5 * 60_000,
     );
@@ -628,9 +739,18 @@ describe.skipIf(missing.length > 0)(
       "Arabic on a PC that has only the q8_0 file: no engine is launched, the reason is plain, and the q8_0 file is never used for it",
       async () => {
         const clip = clipOf("ar");
-        const r = await runCase("ar-processor-q8-only", clip, "ar", { backend: "processor", keys: ["small_q8_0"] });
-        expect(r.launches.filter((l) => modelOf(l) === Q8_FILE), "never a wrong-model run").toHaveLength(0);
-        expect(r.launches, "it needs the full-size file, which is not there and cannot be fetched: nothing runs").toHaveLength(0);
+        const r = await runCase("ar-processor-q8-only", clip, "ar", {
+          backend: "processor",
+          keys: ["small_q8_0"],
+        });
+        expect(
+          r.launches.filter((l) => modelOf(l) === Q8_FILE),
+          "never a wrong-model run",
+        ).toHaveLength(0);
+        expect(
+          r.launches,
+          "it needs the full-size file, which is not there and cannot be fetched: nothing runs",
+        ).toHaveLength(0);
         expect(r.error, "a plain reason, not a transcript").toBeInstanceOf(TranscriptionFailure);
         expect((r.error as TranscriptionFailure).reason).toBe("model_unavailable");
         expect(r.fetches, "the app asked the network for the file it needs").toBeGreaterThan(0);
@@ -642,16 +762,24 @@ describe.skipIf(missing.length > 0)(
       'language "auto" predicted as English, heard as Dutch: the greedy transcript is not kept, the kept run is 5 beams',
       async () => {
         const clip = clipOf("nl");
-        const r = await runCase("auto-nl-processor", clip, "auto", { backend: "processor", lastLanguage: "en" });
+        const r = await runCase("auto-nl-processor", clip, "auto", {
+          backend: "processor",
+          lastLanguage: "en",
+        });
         expect(r.error, String(r.error)).toBeUndefined();
         expect(r.launches, "the prediction, then the run the heard language needs").toHaveLength(2);
         const [first, second] = r.launches;
-        expect(first.args.includes("-bs"), "the first run was planned for the predicted English: greedy").toBe(true);
+        expect(
+          first.args.includes("-bs"),
+          "the first run was planned for the predicted English: greedy",
+        ).toBe(true);
         expect(second.args, "the kept run is Dutch's: 5 beams").not.toContain("-bs");
         expect(second.args).not.toContain("-bo");
-        for (const l of r.launches) expect(l.args, "every launch of this PC is the processor's").toContain("-ng");
-        if (!FAKE) expect(r.words?.length ?? 0).toBeGreaterThan(0);
-        else expect(r.words).toEqual(appWordsOfStored(clip));
+        for (const l of r.launches)
+          expect(l.args, "every launch of this PC is the processor's").toContain("-ng");
+        expectBeams(first, 1);
+        expectBeams(second, 5);
+        await expectKeptWords("auto-nl-processor", r, clip);
       },
       5 * 60_000,
     );
@@ -661,7 +789,8 @@ describe.skipIf(missing.length > 0)(
       for (const l of everyLaunch) {
         const file = modelOf(l);
         expect(KNOWN_FILES, `a launch of ${file}: a file the manifest knows`).toContain(file);
-        if (file === Q8_FILE) expect(l.args, "the q8_0 file is the processor's only").toContain("-ng");
+        if (file === Q8_FILE)
+          expect(l.args, "the q8_0 file is the processor's only").toContain("-ng");
       }
     });
   },
