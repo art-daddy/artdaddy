@@ -29,7 +29,7 @@ export interface PcCheckSignals {
   /** An export is being asked its questions: the queue's own busy flag does not follow it yet. */
   exportAsked: boolean;
   playing: boolean;
-  /** A look or a background speech job runs. */
+  /** A look, a background speech or loudness job, or a preview copy of an imported file being built runs: heavy local work of the app's own that the check would share the processors with. */
   lookOrSpeechJob: boolean;
   projectOpen: boolean;
   /** When the person last touched the editor, on the same clock as `now()`. */

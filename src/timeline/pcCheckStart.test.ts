@@ -9,6 +9,7 @@ import type { ProbeOutcome } from "../platform/host";
 import { IDLE_BEFORE_RUN_MS, type PcCheckDeps } from "../platform/pcCheck";
 import { EXPORT_SPEED_PROBE_ID } from "../platform/pcCheckProbe";
 import { useEditor } from "../store/editor";
+import { useProxyJobs } from "../store/proxyJobs";
 import { amd, harness } from "../test/chipHarness";
 import { ExportMemFs } from "../test/timelineKit";
 import { __resetWorkGate, adoptTurn, lookWhisper } from "../tools/workGate";
@@ -122,6 +123,7 @@ afterEach(async () => {
   __resetChipTests();
   __resetExportFlags();
   setPcCheckService(null);
+  useProxyJobs.setState({ jobs: [] });
   useEditor.setState({ projectId: null, timeline: null, playhead: 0 });
   document.body.innerHTML = "";
   vi.useRealTimers();
@@ -178,6 +180,13 @@ const CONDITIONS: Condition[] = [
     on: async () => adoptTurn("whisper"),
   },
   {
+    name: "a preview copy of an imported file is being built",
+    on: async () => {
+      useProxyJobs.getState().begin("C:/library/clip.mov", "clip.mov", ["m1"]);
+      return () => useProxyJobs.getState().finish("C:/library/clip.mov");
+    },
+  },
+  {
     name: "the playhead is moving",
     on: async () => {
       const timer = setInterval(
@@ -232,6 +241,19 @@ describe("the check in the app: when it starts", () => {
       expect(runningNow(), `${condition.name}: after it ended`).toBe(EXPORT_SPEED_PROBE_ID);
     },
   );
+
+  it("does not start while any preview copy is still being built: one of two copies ending is not the end of the work", async () => {
+    const world = begin();
+    const copies = useProxyJobs.getState();
+    copies.begin("C:/library/a.mov", "a.mov", ["m1"]);
+    copies.begin("C:/library/b.mov", "b.mov", ["m2"]);
+    copies.finish("C:/library/a.mov");
+    await advance(10 * 60_000);
+    expect(world.checks()).toHaveLength(0);
+    copies.finish("C:/library/b.mov");
+    await advance(IDLE_BEFORE_RUN_MS + 10_000);
+    expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+  });
 
   it("waits one idle wait after the person's last key, click or scroll, and each one begins the wait again", async () => {
     const world = begin();

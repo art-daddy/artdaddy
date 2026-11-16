@@ -11,6 +11,7 @@ import {
 import { checkFiles } from "../platform/pcCheckFiles";
 import { exportSpeedProbe } from "../platform/pcCheckProbe";
 import { useEditor } from "../store/editor";
+import { useProxyJobs } from "../store/proxyJobs";
 import { backgroundWorkActive, subscribeBackgroundWork } from "../tools/workGate";
 import { setChipTestGate } from "./chipTest";
 import { exportAskedNow, subscribeExportAsk } from "./exportAsk";
@@ -83,6 +84,21 @@ function playheadNow(): number | null {
   return editor.projectId !== null ? editor.playhead : null;
 }
 
+/** A preview copy of an imported file is being built: up to two more ffmpeg encodes at the app's own priority, which the speed check would share the processors with and read as a slower PC (its answer is kept for
+ *  30 days). The indexer keeps this list and takes a copy from it however the copy ends (store/proxyJobs.ts); the work gate does not hold these copies. */
+function previewCopyBuilding(): boolean {
+  return useProxyJobs.getState().jobs.length > 0;
+}
+
+/** Hears the first preview copy begin and the last one end; a copy's progress says nothing the check needs. */
+function subscribeProxyJobs(onChange: () => void): () => void {
+  return useProxyJobs.subscribe((state, before) => {
+    const building = state.jobs.length > 0;
+    const was = before.jobs.length > 0;
+    if (building !== was) onChange();
+  });
+}
+
 /** Starts the check and returns how to stop it: the service is disposed (a run under way is stopped and stores nothing), and what it registered with the rest of the app is taken back. */
 export function startPcCheck(options: PcCheckStartOptions = {}): () => void {
   const now = (): number => Date.now();
@@ -121,12 +137,12 @@ export function startPcCheck(options: PcCheckStartOptions = {}): () => void {
         ),
       exportAsked: exportAskedNow,
       playing: playback.playing,
-      lookOrSpeechJob: backgroundWorkActive,
+      lookOrSpeechJob: () => backgroundWorkActive() || previewCopyBuilding(),
       projectOpen: projectOpenNow,
       lastInputAtMs: input.lastInputAtMs,
       enabled: () => exportFlag("pc_check") !== false,
     },
-    listen: [subscribeExports, subscribeExportAsk, subscribeBackgroundWork],
+    listen: [subscribeExports, subscribeExportAsk, subscribeBackgroundWork, subscribeProxyJobs],
     now,
     setBeat: (fn, ms) => setInterval(fn, ms),
     clearBeat: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),

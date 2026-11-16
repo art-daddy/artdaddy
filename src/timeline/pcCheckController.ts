@@ -13,7 +13,7 @@ export interface SignalReaders {
   /** An export is being asked its questions (a pending check-first question does not count: see exportAsk.ts). */
   exportAsked(): boolean;
   playing(): boolean;
-  /** A look's whisper or a background job is at work. */
+  /** A look's whisper, a background job (a transcription or a loudness measurement) or a preview copy of an imported file is at work. */
   lookOrSpeechJob(): boolean;
   projectOpen(): boolean;
   lastInputAtMs(): number;
