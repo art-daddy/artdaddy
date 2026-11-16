@@ -47,6 +47,16 @@ describe("ImportProgress — speech model", () => {
     );
   });
 
+  // A second model file (another one is already on this PC): "the first time you start the app" is untrue of it.
+  it("calls a second model file another speech model, and does not say it happens when the app is first started", () => {
+    reportModelDownload(Math.round(TOTAL * 0.4), TOTAL, true);
+    render(<ImportProgress />);
+    const text = screen.getByTestId("model-download").textContent ?? "";
+    expect(text).toContain("Downloading another speech model (about 465 MB) - 40%");
+    expect(text).toContain("This only happens once.");
+    expect(text).not.toMatch(/first time|one time/i);
+  });
+
   it("says how long is left once the speed is known", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000_000);

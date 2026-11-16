@@ -50,6 +50,7 @@ import { platform } from "../platform";
 import { __resetHostInfo } from "../platform/host";
 import {
   clearModelDownload,
+  modelDownloadMessage,
   setModelDownloadFailure,
   useModelDownload,
 } from "../store/modelDownload";
@@ -442,6 +443,55 @@ describe("a language that was only predicted, on a PC that holds only the smalle
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
     expect(r.kept.size).toBe(0);
     expect(await r.words(src, "auto")).toBe("");
+  });
+});
+
+describe("the download of a second model file, told to the screens", () => {
+  /** A fetch that never gets an answer, so that the download stays under way while the store is read. */
+  const silentNetwork = (): void => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+  };
+
+  it("is flagged when another model file is already on the PC, through the app's own download", async () => {
+    noChip();
+    silentNetwork();
+    // The smaller file is here and Arabic is named, so the full-size file is fetched: a second model file.
+    const r = rig({ installed: [SMALL] });
+    const asked = runWhisper(r.ctx, fresh(), "small", "ar").catch((e: unknown) => e);
+    await vi.waitFor(() =>
+      expect(useModelDownload.getState().total).toBe(WHISPER_MODELS[FULL].bytes),
+    );
+    await vi.waitFor(() => expect(useModelDownload.getState().again).toBe(true));
+    const under = useModelDownload.getState();
+    expect(modelDownloadMessage(under.received, under.total, null, under.again)).toBe(
+      "Downloading another speech model (about 465 MB) - 0%",
+    );
+    // The person presses Cancel: the request ends saying so, and the flag goes with the download.
+    under.cancel?.();
+    expect(((await asked) as Error).message).toMatch(/speech model download cancelled/);
+    expect(useModelDownload.getState()).toMatchObject({ total: 0, again: false });
+  });
+
+  it("is not flagged for the first download of a PC that holds no model file", async () => {
+    noChip();
+    silentNetwork();
+    const r = rig({ installed: [] });
+    const asked = runWhisper(r.ctx, fresh(), "small", "ar").catch((e: unknown) => e);
+    await vi.waitFor(() =>
+      expect(useModelDownload.getState().total).toBe(WHISPER_MODELS[FULL].bytes),
+    );
+    // The disk has been read by now: nothing else is here, so it is the first model, in the owner's words.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const under = useModelDownload.getState();
+    expect(under.again).toBe(false);
+    expect(modelDownloadMessage(under.received, under.total, null, under.again)).toBe(
+      "Downloading the speech model (one time, about 465 MB) - 0%",
+    );
+    under.cancel?.();
+    await asked;
   });
 });
 

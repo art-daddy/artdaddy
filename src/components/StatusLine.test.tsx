@@ -181,6 +181,24 @@ describe("StatusLine: what the person sees while a turn runs", () => {
       expect(container.textContent).not.toMatch(/first time/);
     });
 
+    it("says a second model file is another speech model, and says nothing about the first start", () => {
+      act(() => {
+        live().callStarted("a", "add_captions", Date.now());
+        live().speechWaitStarted(1, "add_captions");
+        reportModelDownload(10 * MIB, 465 * MIB, true);
+      });
+      const { container } = render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe("Downloading another speech model…");
+      expect(container.textContent).toMatch(/This only happens once/);
+      expect(container.textContent).not.toMatch(/first time|one time/i);
+      // The download ending takes the words with it, and the next one is the first again.
+      act(() => clearModelDownload());
+      act(() => reportModelDownload(10 * MIB, 465 * MIB));
+      expect(screen.getByRole("status").textContent).toBe(
+        "Downloading the speech model (one time)…",
+      );
+    });
+
     it("does not say a tool is transcribing when it is not the one waiting for speech", () => {
       act(() => {
         live().callStarted("a", "video_ask", Date.now());

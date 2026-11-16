@@ -76,6 +76,7 @@ import {
   megabytes,
   percent,
   reportModelDownload,
+  setModelDownloadAgain,
   setModelDownloadCancel,
   setModelDownloadFailure,
 } from "../store/modelDownload";
@@ -502,6 +503,10 @@ class ModelInstall {
   received = 0;
   /** The bytes the part file already held when the first attempt began; null before it. */
   startedWith: number | null = null;
+  /** Another model file was already whole on this PC when this one began, so the download is a second one and says
+   *  so (the words about "the first time you start the app" are untrue of it). Read off the disk beside the
+   *  download, so false until it is known. */
+  again = false;
 
   constructor(
     readonly total: number,
@@ -699,6 +704,16 @@ async function downloadModel(
   const finishActivity = beginSessionActivity("whisper-model-download");
   // The pill's Cancel stops this install, whoever is waiting for it.
   setModelDownloadCancel(cancelModelDownload);
+  // Whether this is a second model file is read off the disk beside the download and told to the screens when it is
+  // known: the first request never waits for the words on them.
+  let over = false;
+  void installedModels(ctx).then(
+    (here) => {
+      self.again = here.some((other) => other !== size);
+      if (!over) setModelDownloadAgain(self.again);
+    },
+    () => undefined,
+  );
   const began = Date.now();
   const seconds = (): number => (Date.now() - began) / 1000;
   const fetched = (): number => Math.max(0, self.received - (self.startedWith ?? 0));
@@ -781,6 +796,7 @@ async function downloadModel(
     }
     throw e;
   } finally {
+    over = true;
     clearModelDownload();
     finishActivity();
     // After the progress is cleared: the card replaces the pill, never sits beside it. It remembers which file it is
@@ -913,7 +929,7 @@ async function transferModel(
     }
     // Shown from the moment the download is asked for, not from the first byte: an origin that
     // never answers is a download stuck at 0%, and nothing on screen said it had started.
-    reportModelDownload(have, spec.bytes);
+    reportModelDownload(have, spec.bytes, self.again);
     self.received = have;
     self.startedWith ??= have;
     let resp: Response;
@@ -980,7 +996,7 @@ async function transferModel(
       if (received === published) return;
       published = received;
       self.received = received;
-      reportModelDownload(received, spec.bytes);
+      reportModelDownload(received, spec.bytes, self.again);
     };
     publish();
     let completed = false;

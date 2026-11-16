@@ -9,8 +9,8 @@ import type { CardInput } from "./speechTimeLine";
 export interface CardSources {
   readonly wake: WakeChatView;
   readonly jobs: readonly SpeechJob[];
-  /** The speech model's download, when one is under way. */
-  readonly download: { pct: number; etaS: number | null } | null;
+  /** The speech model's download, when one is under way. `again`: it is a second model file, not the PC's first. */
+  readonly download: { pct: number; etaS: number | null; again?: boolean } | null;
   /** Seconds this PC is projected to need for `audioS` seconds of audio not yet started. */
   readonly projectedS: (audioS: number) => number;
 }

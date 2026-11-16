@@ -135,6 +135,22 @@ const DOWNLOAD: Row[] = [
     { phase: "waiting", waitingForExport: true, download: { pct: 10, etaS: null } },
     ["Downloading the speech model (one time): 10%", "Then 5 files to transcribe."],
   ],
+  // A second model file (another one is already on this PC) is not a one-time thing that happens at the first start.
+  [
+    "downloading a second model file, with the time left",
+    { download: { pct: 40, etaS: 125, again: true } },
+    ["Downloading another speech model: 40%, about 3 min left", "Then 5 files to transcribe."],
+  ],
+  [
+    "downloading a second model file, nothing to transcribe",
+    { done: 8, total: 8, download: { pct: 7, etaS: null, again: true } },
+    ["Downloading another speech model: 7%"],
+  ],
+  [
+    "a flag that is not exactly true is the first download",
+    { download: { pct: 7, etaS: null, again: "yes" as unknown as boolean } },
+    ["Downloading the speech model (one time): 7%", "Then 5 files to transcribe."],
+  ],
 ];
 
 /** The sentence after "Words are ready for N files." for each reason the assistant is not carrying on. */

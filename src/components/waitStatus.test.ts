@@ -116,6 +116,23 @@ describe("a tool that is waiting for speech", () => {
     expect(s?.hint).toMatch(/Stop/);
   });
 
+  // A second model file (another one is already on this PC) is not the first start's one-time download.
+  it("calls a second model file another speech model, with no claim about the first start, and explains it from the first second", () => {
+    const s = status({ ...waiting(), downloadingModel: true, downloadingAnother: true }, 1);
+    expect(s?.label).toBe("Downloading another speech model");
+    expect(s?.hint).toMatch(/This only happens once/);
+    expect(s?.hint).toMatch(/Stop/);
+    expect(`${s?.label} ${s?.hint}`).not.toMatch(/first time|one time/i);
+    // Said alone, without a download under way, or by a tool that is not waiting for speech, it changes nothing.
+    expect(status({ ...waiting(), downloadingAnother: true }, 1)?.label).toBe(
+      "Transcribing the audio",
+    );
+    expect(
+      status({ calls: [call("video_ask")], downloadingModel: true, downloadingAnother: true }, 1)
+        ?.label,
+    ).toBe(runningPhrase("video_ask"));
+  });
+
   it("keeps the usual slow hint for a plain transcription: none before half a minute, one after", () => {
     expect(status(waiting(), SLOW_AFTER_S - 1)?.hint).toBeNull();
     expect(status(waiting(), SLOW_AFTER_S)?.hint).toMatch(/Still working/);

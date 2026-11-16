@@ -5,7 +5,7 @@
 // shows how long it has lasted once that is worth showing, and after half a minute says the one thing
 // that matters then: it is still going, and Stop is there.
 import type { LiveCall, LiveRequest, LiveRound } from "../store/liveWait";
-import { MODEL_DOWNLOAD_NOTE } from "../store/modelDownload";
+import { modelDownloadNote } from "../store/modelDownload";
 import { runningPhrase } from "./toolSummary";
 
 /** A wait shorter than this needs no clock: it would only flicker. */
@@ -18,6 +18,8 @@ export const CLOCK_MAX_S = 359_999;
 /** What a tool that is waiting for speech says it is doing, whatever it is usually called. */
 export const TRANSCRIBING_LABEL = "Transcribing the audio";
 export const DOWNLOADING_MODEL_LABEL = "Downloading the speech model (one time)";
+/** The same, when the download is a second model file (another one is already on this PC). */
+export const DOWNLOADING_ANOTHER_MODEL_LABEL = "Downloading another speech model";
 
 export type WaitKind = "approval" | "tool" | "model";
 
@@ -50,6 +52,9 @@ export interface WaitInput {
   speechTools?: readonly string[];
   /** The speech model is downloading, which is what any speech wait is then waiting for. */
   downloadingModel?: boolean;
+  /** That download is not this PC's first speech model (another model file is already here), so it is not said to
+   *  be a one-time thing that happens when the app is first started. Only read while `downloadingModel` is true. */
+  downloadingAnother?: boolean;
 }
 
 const ROUND_LABEL = {
@@ -122,8 +127,11 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
     const more = input.calls.length - 1;
     const onSpeech = input.speechTools?.includes(oldest.name) === true;
     const downloading = onSpeech && input.downloadingModel === true;
+    const another = downloading && input.downloadingAnother === true;
     const phrase = downloading
-      ? DOWNLOADING_MODEL_LABEL
+      ? another
+        ? DOWNLOADING_ANOTHER_MODEL_LABEL
+        : DOWNLOADING_MODEL_LABEL
       : onSpeech
         ? TRANSCRIBING_LABEL
         : runningPhrase(oldest.name);
@@ -132,7 +140,7 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
       more > 0 ? `${phrase} (+${more} more)` : phrase,
       oldest.startedAt,
       downloading
-        ? `${MODEL_DOWNLOAD_NOTE} You can press Stop at any time.`
+        ? `${modelDownloadNote(another)} You can press Stop at any time.`
         : "Still working on this. You can press Stop at any time.",
       downloading,
     );

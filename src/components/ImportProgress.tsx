@@ -10,8 +10,8 @@
 import { useImportJobs } from "../store/importJobs";
 import {
   downloadEtaSeconds,
-  MODEL_DOWNLOAD_NOTE,
   modelDownloadMessage,
+  modelDownloadNote,
   percent,
   setModelDownloadFailure,
   useModelDownload,
@@ -32,6 +32,7 @@ export default function ImportProgress(): JSX.Element | null {
   const startReceived = useModelDownload((s) => s.startReceived);
   const cancel = useModelDownload((s) => s.cancel);
   const failure = useModelDownload((s) => s.failure);
+  const again = useModelDownload((s) => s.again);
   const retryScheduled = useModelDownload((s) => s.nextAttemptAt !== null);
   const modelPct = total > 0 ? percent(received, total) : null;
   // "Downloading" and "failed" are never shown together, whatever the store holds.
@@ -88,8 +89,8 @@ export default function ImportProgress(): JSX.Element | null {
           data-pct={String(modelPct)}
           className="rounded-md border border-edge bg-panel/95 px-3 py-2 text-xs text-neutral-200 shadow-xl"
         >
-          <div className="leading-snug">{modelDownloadMessage(received, total, eta)}</div>
-          <div className="mt-0.5 leading-snug text-neutral-400">{MODEL_DOWNLOAD_NOTE}</div>
+          <div className="leading-snug">{modelDownloadMessage(received, total, eta, again)}</div>
+          <div className="mt-0.5 leading-snug text-neutral-400">{modelDownloadNote(again)}</div>
           <div className="mt-1.5 h-1 overflow-hidden rounded bg-neutral-800">
             <div
               className="h-full rounded bg-accent transition-[width] duration-200"

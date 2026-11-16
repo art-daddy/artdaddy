@@ -26,7 +26,9 @@ export function useSpeechCard(chat: ChatKey | null): {
   const dl = useModelDownload();
   if (!chat) return { view: null, dismiss: () => undefined };
   const download =
-    dl.total > 0 ? { pct: percent(dl.received, dl.total), etaS: downloadEtaSeconds(dl) } : null;
+    dl.total > 0
+      ? { pct: percent(dl.received, dl.total), etaS: downloadEtaSeconds(dl), again: dl.again }
+      : null;
   const pace = currentPaceModel();
   const view = cardView(
     cardInputOf({

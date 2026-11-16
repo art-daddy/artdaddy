@@ -27,6 +27,7 @@ export default function StatusLine() {
   const approvalSince = useLiveWait((s) => s.approvalSince);
   const speechWaits = useLiveWait((s) => s.speechWaits);
   const downloadingModel = useModelDownload((s) => s.total > 0);
+  const downloadingAnother = useModelDownload((s) => s.total > 0 && s.again);
   const speechTools = useMemo(() => speechWaits.map((w) => w.tool), [speechWaits]);
   const now = useNow();
   const status = waitStatus({
@@ -38,6 +39,7 @@ export default function StatusLine() {
     now,
     speechTools,
     downloadingModel,
+    downloadingAnother,
   });
 
   return (

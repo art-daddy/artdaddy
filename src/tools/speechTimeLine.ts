@@ -40,8 +40,9 @@ export interface CardInput {
   queuedS: number;
   /** Measured under real time since the first words. */
   slow: boolean;
-  /** The speech model is downloading right now (percent 0 to 100, seconds left or null). */
-  download: { pct: number; etaS: number | null } | null;
+  /** The speech model is downloading right now (percent 0 to 100, seconds left or null); `again`: it is a second
+   *  model file, not the PC's first, so it is not called a one-time thing. */
+  download: { pct: number; etaS: number | null; again?: boolean } | null;
   /** Words landed and not yet read: how many files, and why the assistant is not carrying on by itself
    *  (null = it is about to). */
   ready: { files: number; held: HeldBy } | null;
@@ -124,7 +125,9 @@ export function cardView(input: CardInput): CardView | null {
     const { pct, etaS } = input.download;
     const timeLeft =
       typeof etaS === "number" && Number.isFinite(etaS) ? `, ${formatEta(etaS)} left` : "";
-    lines.push(`Downloading the speech model (one time): ${Math.min(100, whole(pct))}%${timeLeft}`);
+    const what =
+      input.download.again === true ? "another speech model" : "the speech model (one time)";
+    lines.push(`Downloading ${what}: ${Math.min(100, whole(pct))}%${timeLeft}`);
     if (left > 0) lines.push(`Then ${plural(left, "file", "files")} to transcribe.`);
   } else if (left > 0) {
     lines.push(progressLine(input, done, total));
