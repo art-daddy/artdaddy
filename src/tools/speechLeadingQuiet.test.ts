@@ -102,6 +102,22 @@ const TABLE: Table = JSON.parse(
   readFileSync(path.join(__dirname, "__fixtures__", "firstWord", "onset-reference.json"), "utf8"),
 );
 
+/** Ties on a floor interpolated between two DIFFERENT quiet levels (a second file: the first table is frozen and untouched). */
+interface FloorTieJson {
+  id: string;
+  rate: number;
+  frames: { count: number; first: number }[];
+  reference: { onset_ms: number | null };
+  plain_interpolation_would_answer: number | null;
+}
+
+const FLOOR_TIES: { cases: FloorTieJson[] } = JSON.parse(
+  readFileSync(
+    path.join(__dirname, "__fixtures__", "firstWord", "onset-reference-floor-ties.json"),
+    "utf8",
+  ),
+);
+
 const HOP = 320;
 const FRAME_MS = 20;
 const NONE: VoiceStart = { kind: "none" };
@@ -128,7 +144,7 @@ function samplesOfCase(c: CaseJson): Int16Array {
 }
 
 /** A tie case's samples: every frame is one sample then 319 zeros, the sample in the study's float domain times 32768 (exact: a power of two). */
-function samplesOfTie(t: TieJson): Float64Array {
+function samplesOfTie(t: { frames: { count: number; first: number }[] }): Float64Array {
   const frames = t.frames.reduce((sum, f) => sum + f.count, 0);
   const out = new Float64Array(frames * HOP);
   let frame = 0;
@@ -217,6 +233,15 @@ describe("speechOnsetMs answers what the study's detector answered", () => {
     if (t.id.endsWith("-eq")) expect(t.ge_would_answer).not.toBeNull();
     if (t.id.endsWith("-up")) expect(t.tolerance_would_answer).toBeNull();
   });
+
+  it.each(FLOOR_TIES.cases.map((t) => [t.id, t] as const))(
+    "%s (a floor between two different quiet levels, interpolated as numpy does)",
+    (_id, t) => {
+      // the other way of interpolating the quietest tenth answers differently on exactly these frames
+      expect(t.plain_interpolation_would_answer).not.toBe(t.reference.onset_ms);
+      expect(speechOnsetMs(samplesOfTie(t), t.rate)).toBe(t.reference.onset_ms);
+    },
+  );
 
   it("is a pure function of the samples (the same twice, and the input is not changed)", () => {
     const samples = samplesOfCase(caseById("quiet-1.02s-then-voice"));
