@@ -1754,10 +1754,10 @@ async function engineFor(
   /** How the run was stopped, if it was: shared by the launches of one run, so a stop never leads to a retry. */
   const stopped: { by: StopReason | null } = { by: null };
   const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
-    // THE place whisper-cli is started (speechLaunchBoundary.test.ts walks the sources for any other). The model file
-    // `args` name says which path it may take: a file the manifest restricts to the processor is launched with `-ng`
-    // whatever was asked, so it can never run on the graphics chip, and the final arguments are checked once more
-    // just before the spawn.
+    // THE place whisper-cli is started (the test "where the engine is started" in speechModelRun.test.ts walks the
+    // sources for any other). The model file `args` name says which path it may take: a file the manifest restricts
+    // to the processor is launched with `-ng` whatever was asked, so it can never run on the graphics chip, and the
+    // final arguments are checked once more just before the spawn.
     const onProcessor = enginePath(args, cpuOnly);
     const id = `whisper-${scratchToken()}`;
     jobs.push(id);
