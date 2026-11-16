@@ -633,6 +633,17 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     expect(asks[0][1]).toBeGreaterThanOrEqual(VOICE_SCAN_S * 16000 * 2 + 44);
   });
 
+  it("reads what a head read that honours the limit holds: a long chunk before the audio shortens the scan, one longer than the read is unknown", async () => {
+    const long = synthPcm16({ quietS: 1.5, voiceS: 40 });
+    const honouring = (file: Uint8Array): HeadReader => ({
+      readHead: async (_path, max) => file.subarray(0, max),
+    });
+    const withList = (size: number): Uint8Array => pcm16Wav(long, { list: size });
+    expect(await measureVoiceStart(honouring(withList(0)), "a.wav")).toEqual(at(1500));
+    expect(await measureVoiceStart(honouring(withList(10_000)), "a.wav")).toEqual(at(1500));
+    expect(await measureVoiceStart(honouring(withList(1_100_000)), "a.wav")).toEqual(UNKNOWN);
+  });
+
   it("is unknown, at once, for a store with no ranged read", async () => {
     expect(await measureVoiceStart({}, "a.wav")).toEqual(UNKNOWN);
     expect(await measureVoiceStart({ readHead: 5 } as unknown as HeadReader, "a.wav")).toEqual(
