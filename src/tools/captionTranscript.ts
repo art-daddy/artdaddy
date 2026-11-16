@@ -67,16 +67,23 @@ export async function captionWords(
   }
 }
 
+/** The sentence about a pending model download, for the assistant. A second model file is not the one-time download
+ *  of the first start, and is not said to be. */
+function downloadSentence(status: InProgressTranscript): string {
+  if (status.stage !== "downloading_speech_model") return "";
+  const pct = status.progress_pct ?? 0;
+  return status.again === true
+    ? ` Another speech model is still downloading (${pct}%); this download happens only once.`
+    : ` The speech model is still downloading (${pct}%); this one-time download happens the first time speech is transcribed on this computer.`;
+}
+
 /** What the model reads when captions could not be made yet because words are still being made. A
  *  failure for the tool (nothing was added), but not an error: the call can simply be repeated. */
 export function pendingCaptionsResult(
   waiting: ReadonlyArray<{ clip_id: string; track_id: string }>,
   status: InProgressTranscript,
 ): Record<string, unknown> {
-  const download =
-    status.stage === "downloading_speech_model"
-      ? ` The speech model is still downloading (${status.progress_pct ?? 0}%); this one-time download happens the first time speech is transcribed on this computer.`
-      : "";
+  const download = downloadSentence(status);
   // The time first (S2-13): a clip longer than this PC can do in ten minutes still runs, and the person
   // is told how long it is expected to take, so the assistant can say it before anything else.
   const left =

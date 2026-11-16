@@ -44,6 +44,9 @@ export interface InProgressTranscript {
   eta_s?: number;
   /** How far the speech model's download is, while that is what is pending. */
   progress_pct?: number;
+  /** The download that is pending is a second model file, not this PC's first: it is not called the one-time
+   *  download of the first start. Present only when true. */
+  again?: boolean;
   note: string;
 }
 
@@ -70,12 +73,20 @@ export function failedTranscript(error: unknown): FailedTranscript {
 export interface DownloadProgress {
   pct: number;
   etaS: number | null;
+  /** It is a second model file, not this PC's first (the download store's flag). Left out when it is not. */
+  again?: boolean;
 }
 
 /** The speech model's download, when one is under way. */
 export function modelDownloadNow(): DownloadProgress | null {
   const s = useModelDownload.getState();
-  return s.total > 0 ? { pct: percent(s.received, s.total), etaS: downloadEtaSeconds(s) } : null;
+  return s.total > 0
+    ? {
+        pct: percent(s.received, s.total),
+        etaS: downloadEtaSeconds(s),
+        ...(s.again ? { again: true } : {}),
+      }
+    : null;
 }
 
 export interface WaitRequest<T> {
@@ -191,6 +202,7 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
       waited_s: waited,
       ...(eta === undefined ? {} : { eta_s: eta }),
       ...(download ? { progress_pct: download.pct } : {}),
+      ...(download?.again === true ? { again: true } : {}),
       note: inProgressNote(stage, eta, download?.pct),
     },
   };

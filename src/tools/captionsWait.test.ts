@@ -500,6 +500,30 @@ describe("what the model is told when captions wait for words", () => {
     expect(String(r.error)).toMatch(/speech model is still downloading \(37%\)/);
   });
 
+  it("does not call a second model file's download the one-time download of the first start", () => {
+    const pending = (again?: boolean): string =>
+      String(
+        pendingCaptionsResult(waiting, {
+          status: "in_progress",
+          stage: "downloading_speech_model",
+          waited_s: 60,
+          progress_pct: 37,
+          ...(again === undefined ? {} : { again }),
+          note: "ignored",
+        }).error,
+      );
+    // The first start's download keeps the words it always had, with or without the flag saying it is not a second.
+    for (const first of [pending(), pending(false)])
+      expect(first).toMatch(
+        /speech model is still downloading \(37%\); this one-time download happens the first time speech is transcribed on this computer\./,
+      );
+    // A second file says how far it is and that it happens once, and makes no claim about the first time.
+    const second = pending(true);
+    expect(second).toMatch(/speech model is still downloading \(37%\)/);
+    expect(second).toMatch(/happens only once/);
+    expect(second).not.toMatch(/first time|one-time|one time/i);
+  });
+
   it("tells the time first when it knows it (S2-13), and says nothing about time when it does not", () => {
     const known = pendingCaptionsResult(waiting, {
       status: "in_progress",

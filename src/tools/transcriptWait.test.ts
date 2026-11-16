@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { toolDefinition } from "../contract";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
+import { clearModelDownload, reportModelDownload } from "../store/modelDownload";
 import { useSpeechJobs, type SpeechJob } from "../store/speechJobs";
 import type { WakeTarget } from "../store/speechWakeHost";
 import { TranscriptionFailure } from "./speechFailure";
@@ -266,6 +267,27 @@ describe("waitForRun", () => {
       );
       expect(s.note).toMatch(/The words start after that/);
       expect(s.note).toMatch(/Don't guess what is said/);
+    });
+
+    it("says that the download is a second model file when it is, from what the cards read, and says nothing otherwise", async () => {
+      const first = await answers({ progress: () => ({ pct: 40, etaS: 90 }) });
+      expect(first).not.toHaveProperty("again");
+      __resetWaiting();
+      const second = await answers({ progress: () => ({ pct: 40, etaS: 90, again: true }) });
+      expect(second).toMatchObject({ stage: "downloading_speech_model", again: true });
+      // The words the study chose are the same for either file.
+      expect(second.note).toBe(first.note);
+      __resetWaiting();
+      try {
+        // As the app's own call reads it, from the store the cards read (no `progress` given).
+        reportModelDownload(10, 100, true);
+        expect(await answers()).toMatchObject({ stage: "downloading_speech_model", again: true });
+        __resetWaiting();
+        reportModelDownload(10, 100, false);
+        expect(await answers()).not.toHaveProperty("again");
+      } finally {
+        clearModelDownload();
+      }
     });
 
     it("adds the transcription that follows the download to the download's own time left", async () => {
