@@ -22,8 +22,15 @@ are not committed to this repository.
 
 ## Speech model
 
-Whisper model weights are downloaded on first use from the upstream whisper.cpp
-distribution and are covered by that project's terms. They are not redistributed here.
+The model weights the app downloads are OpenAI's Whisper models converted to the ggml format by the whisper.cpp
+project and published at [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp), whose model card
+declares the MIT license. Whisper is MIT, Copyright (c) 2022 OpenAI; whisper.cpp is MIT, Copyright (c) 2023-2026 The
+ggml authors.
+
+The weights are not bundled in the installer and are not committed to this repository. The app downloads them on first
+use from that upstream repository or, when it is unavailable, from an unmodified copy that ArtDaddy hosts at
+`models.artdaddy.app`. Wherever the bytes come from, the app uses a file only after its size and SHA-256 equal the
+values pinned in `src/tools/modelManifest.ts`.
 
 ## Obtaining the source of bundled GPL components
 
