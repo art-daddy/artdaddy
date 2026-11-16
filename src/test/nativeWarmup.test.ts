@@ -106,6 +106,18 @@ describe("warming the native test program", () => {
     expect(logs.at(-1)).toMatch(/not found/i);
   });
 
+  it("reports a missing cargo once, although node also closes the child with a negative code", async () => {
+    const { deps, logs } = rig((child) => {
+      child.emit("error", Object.assign(new Error("spawn cargo ENOENT"), { code: "ENOENT" }));
+      child.emit("close", -4058);
+    });
+    const outcome = await warmNativeTestProgram(deps);
+    expect(outcome.state).toBe("no-cargo");
+    expect(
+      logs.filter((line) => /not found|ended with exit code|ready in|gave up/.test(line)),
+    ).toHaveLength(1);
+  });
+
   it("reports another spawn error as a failed build, not as a missing cargo", async () => {
     const { deps } = rig((child) =>
       child.emit("error", Object.assign(new Error("spawn cargo EACCES"), { code: "EACCES" })),

@@ -73,8 +73,13 @@ export function warmNativeTestProgram(deps: WarmDeps): Promise<WarmOutcome> {
   );
   return new Promise<WarmOutcome>((resolve) => {
     let timedOut = false;
+    let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Node reports a spawn that fails with an 'error' and then also closes the child (code -4058 on
+    // Windows): the first word is the one that counts.
     const finish = (state: WarmOutcome["state"], code?: number | null) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       const seconds = elapsed();
       const outcome: WarmOutcome = { state, seconds, code };
