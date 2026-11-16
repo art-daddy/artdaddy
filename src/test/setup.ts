@@ -9,6 +9,13 @@ import { __setExportConfirmationForTests } from "../lib/confirm";
 import { clearOutbox } from "../api/exportOutbox";
 import { installNetworkGuard } from "./networkGuard";
 
+// vitest's runner takes no turn of the event loop between tests that do not wait, so a file of them is ONE turn however long it runs, and a worker call that waits for the runner's reply (onTaskUpdate)
+// gives up after 60 s of it: under the pre-push run's full parallel load that ended the real run on 16 Nov with "Timeout calling onTaskUpdate" although every test passed. One real turn of the loop
+// after every test (registered first, so it runs last, after the cleanups below) makes the limit a property of one test again. Captured here, before a test can install fake timers.
+// eventLoopTurn.test.ts fails when this goes.
+const realSetImmediate = globalThis.setImmediate;
+afterEach(() => new Promise<void>((resolve) => realSetImmediate(resolve)));
+
 // A test that runs the real export reporter would otherwise file a row in production analytics.
 installNetworkGuard();
 
