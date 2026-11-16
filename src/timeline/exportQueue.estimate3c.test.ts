@@ -924,16 +924,19 @@ describe("an export the app starts again by itself is never asked about its time
     it.each([
       ["nothing was answered", undefined],
       ["only a time notice was", CONFIRM_REASON_BITS.slow],
-    ])("is refused, and nobody is asked, when %s", async (_what, answered) => {
-      const { fs, store } = await fresh();
-      const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
-      __setExportConfirmationForTests(asked);
-      await expect(submitWithDependencies(restartOf(store, fs, answered))).rejects.toThrow(
-        /cancelled before submission/,
-      );
-      expect(asked).not.toHaveBeenCalled();
-      expect(listExportRecords()).toHaveLength(0);
-    });
+    ] as [string, number | undefined][])(
+      "is refused, and nobody is asked, when %s",
+      async (_what, answered) => {
+        const { fs, store } = await fresh();
+        const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
+        __setExportConfirmationForTests(asked);
+        await expect(submitWithDependencies(restartOf(store, fs, answered))).rejects.toThrow(
+          /cancelled before submission/,
+        );
+        expect(asked).not.toHaveBeenCalled();
+        expect(listExportRecords()).toHaveLength(0);
+      },
+    );
 
     it("a time notice answered on the first attempt does not make the restart refuse for the other one", async () => {
       const { fs, store } = await fresh();

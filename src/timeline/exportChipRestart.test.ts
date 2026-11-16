@@ -658,7 +658,10 @@ describe("a chip that fails an export an outside assistant started", () => {
       restarted: "processor",
     });
     t.jobs.exit(second.id, 0);
-    expect(await whenExportEnds(started.job_id)).toMatchObject({ job_id: second.id, state: "done" });
+    expect(await whenExportEnds(started.job_id)).toMatchObject({
+      job_id: second.id,
+      state: "done",
+    });
     await whenExportsSettle();
     expect(await t.fs.exists(DEST_LONG)).toBe(true);
   });
