@@ -32,7 +32,10 @@ interface Cell {
   verdict: string;
 }
 interface GateFile {
-  settings: Record<string, { variant: string; beam: number; model: string; flags: string[]; backend?: string }>;
+  settings: Record<
+    string,
+    { variant: string; beam: number; model: string; flags: string[]; backend?: string }
+  >;
   rows: Array<{
     set: string;
     language: string;
@@ -58,7 +61,18 @@ interface Study {
     unit: string;
     n: number;
     base_pct: number;
-    results: Record<string, { pct: number; diff: number; lo: number; hi: number; verdict: string; empty: number; overlong: number }>;
+    results: Record<
+      string,
+      {
+        pct: number;
+        diff: number;
+        lo: number;
+        hi: number;
+        verdict: string;
+        empty: number;
+        overlong: number;
+      }
+    >;
   }>;
 }
 const STUDIES: Array<[id: string, cell: string, study: Study, s1: S1Row[]]> = [
@@ -67,7 +81,8 @@ const STUDIES: Array<[id: string, cell: string, study: Study, s1: S1Row[]]> = [
 ];
 
 /** The rule the gate file states about itself ("rule"), as the verdict word it gives a result. */
-const verdictOf = (diff: number, high: number): string => (diff > 2.0 ? "fail" : high <= 4.0 ? "pass" : "weak");
+const verdictOf = (diff: number, high: number): string =>
+  diff > 2.0 ? "fail" : high <= 4.0 ? "pass" : "weak";
 const rowOf = (set: string) => GATE.rows.find((r) => r.set === set)!;
 
 describe("the two processor settings", () => {
@@ -135,46 +150,64 @@ describe("the processor cells, row by row", () => {
     expect(STUDIES[1][2].rows).toHaveLength(10);
   });
 
-  it.each(STUDIES)("%s: every cell is the study's score-file cell, in the gate's own words, with its set's baseline and size", (id, cellName, study) => {
-    expect(study.corrected).toBe(false);
-    expect(study.others).toEqual([cellName]);
-    for (const r of study.rows) {
-      const row = rowOf(r.set);
-      const cell = r.results[cellName];
-      expect([row.unit, row.utterances, row.baseline_error_pct], r.set).toEqual([r.unit, r.n, r.base_pct]);
-      const word = verdictOf(cell.diff, cell.hi);
-      // The study scores two words; the gate has three, and its "weak" is one of the study's FAIL.
-      expect(cell.verdict === "PASS", `${id} ${r.set}`).toBe(word === "pass");
-      expect(row.results[id], `${id} ${r.set}`).toEqual({
-        error_pct: cell.pct,
-        diff_points: cell.diff,
-        ci_low: cell.lo,
-        ci_high: cell.hi,
-        verdict: word,
-      });
-      // A figure built on empty or runaway output would not be a measurement of speech.
-      expect([cell.empty, cell.overlong], `${id} ${r.set}`).toEqual([0, 0]);
-    }
-  });
+  it.each(STUDIES)(
+    "%s: every cell is the study's score-file cell, in the gate's own words, with its set's baseline and size",
+    (id, cellName, study) => {
+      expect(study.corrected).toBe(false);
+      expect(study.others).toEqual([cellName]);
+      for (const r of study.rows) {
+        const row = rowOf(r.set);
+        const cell = r.results[cellName];
+        expect([row.unit, row.utterances, row.baseline_error_pct], r.set).toEqual([
+          r.unit,
+          r.n,
+          r.base_pct,
+        ]);
+        const word = verdictOf(cell.diff, cell.hi);
+        // The study scores two words; the gate has three, and its "weak" is one of the study's FAIL.
+        expect(cell.verdict === "PASS", `${id} ${r.set}`).toBe(word === "pass");
+        expect(row.results[id], `${id} ${r.set}`).toEqual({
+          error_pct: cell.pct,
+          diff_points: cell.diff,
+          ci_low: cell.lo,
+          ci_high: cell.hi,
+          verdict: word,
+        });
+        // A figure built on empty or runaway output would not be a measurement of speech.
+        expect([cell.empty, cell.overlong], `${id} ${r.set}`).toEqual([0, 0]);
+      }
+    },
+  );
 
-  it.each(STUDIES)("%s: the study document's table (section 10.1) says the same of every cell, number by number", (id, cellName, study, s1) => {
-    expect(s1).toHaveLength(study.rows.length);
-    for (const [label, set, base, pct, diff, lo, hi, verdict] of s1) {
-      const cell = rowOf(set).results[id];
-      expect(cell, `${id} ${label}`).toBeDefined();
-      expect([rowOf(set).baseline_error_pct, cell.error_pct, cell.diff_points, cell.ci_low, cell.ci_high, cell.verdict], `${id} ${label}`).toEqual([
-        base,
-        pct,
-        diff,
-        lo,
-        hi,
-        verdict,
-      ]);
-      // And the table as transcribed is the score file's: a typo in the transcription cannot hide behind a typo in a cell.
-      const source = study.rows.find((r) => r.set === set)!.results[cellName];
-      expect([pct, diff, lo, hi], `${id} ${label}`).toEqual([source.pct, source.diff, source.lo, source.hi]);
-    }
-  });
+  it.each(STUDIES)(
+    "%s: the study document's table (section 10.1) says the same of every cell, number by number",
+    (id, cellName, study, s1) => {
+      expect(s1).toHaveLength(study.rows.length);
+      for (const [label, set, base, pct, diff, lo, hi, verdict] of s1) {
+        const cell = rowOf(set).results[id];
+        expect(cell, `${id} ${label}`).toBeDefined();
+        expect(
+          [
+            rowOf(set).baseline_error_pct,
+            cell.error_pct,
+            cell.diff_points,
+            cell.ci_low,
+            cell.ci_high,
+            cell.verdict,
+          ],
+          `${id} ${label}`,
+        ).toEqual([base, pct, diff, lo, hi, verdict]);
+        // And the table as transcribed is the score file's: a typo in the transcription cannot hide behind a typo in a cell.
+        const source = study.rows.find((r) => r.set === set)!.results[cellName];
+        expect([pct, diff, lo, hi], `${id} ${label}`).toEqual([
+          source.pct,
+          source.diff,
+          source.lo,
+          source.hi,
+        ]);
+      }
+    },
+  );
 
   it("carry the gate's own three words, and each follows the rule from its two figures", () => {
     for (const row of GATE.rows)
@@ -194,12 +227,21 @@ const sortedOf = (set: ReadonlySet<string> | undefined): string[] => [...(set ??
 /** A table of cleared languages as plain data. */
 const plain = (table: ReturnType<typeof clearedOn>): Record<string, Record<string, string[]>> =>
   Object.fromEntries(
-    [...table].map(([variant, byBeam]) => [variant, Object.fromEntries([...byBeam].map(([beam, set]) => [String(beam), sortedOf(set)]))]),
+    [...table].map(([variant, byBeam]) => [
+      variant,
+      Object.fromEntries([...byBeam].map(([beam, set]) => [String(beam), sortedOf(set)])),
+    ]),
   );
 
 describe("clearedOn reads one path's measurements and no other's", () => {
-  const studyGreedyLanguages = S1.languageTable.filter((r) => r[2] === "greedy").map((r) => r[1]).sort();
-  const studyBeamLanguages = S1.languageTable.filter((r) => r[2] === "5 beams").map((r) => r[1]).sort();
+  const studyGreedyLanguages = S1.languageTable
+    .filter((r) => r[2] === "greedy")
+    .map((r) => r[1])
+    .sort();
+  const studyBeamLanguages = S1.languageTable
+    .filter((r) => r[2] === "5 beams")
+    .map((r) => r[1])
+    .sort();
 
   it("on the processor: the study's table (greedy in 10, 5 beams in 9, Arabic in neither), for the 8-bit variant only", () => {
     const table = plain(clearedOn(SHIPPED_EVIDENCE, "cpu"));
@@ -232,13 +274,17 @@ describe("clearedOn reads one path's measurements and no other's", () => {
 
   it("greedyTable, which beamFor reads, is the chip's table and does not move when the processor settings are removed", () => {
     const withoutProcessor: GateFile = structuredClone(GATE);
-    for (const [id, s] of Object.entries(withoutProcessor.settings)) if (s.backend === "cpu") delete withoutProcessor.settings[id];
+    for (const [id, s] of Object.entries(withoutProcessor.settings))
+      if (s.backend === "cpu") delete withoutProcessor.settings[id];
     for (const row of withoutProcessor.rows) for (const id of ["ZC", "ZBC"]) delete row.results[id];
     const a = greedyTable(SHIPPED_EVIDENCE);
     const b = greedyTable(withoutProcessor as unknown as GateEvidence);
     expect([...a.keys()].sort()).toEqual([...b.keys()].sort());
-    for (const [variant, set] of a) expect(sortedOf(set), variant).toEqual(sortedOf(b.get(variant)));
-    expect(sortedOf(a.get("q8_0"))).toEqual((freezeData.greedyTable as Record<string, string[]>).q8_0);
+    for (const [variant, set] of a)
+      expect(sortedOf(set), variant).toEqual(sortedOf(b.get(variant)));
+    expect(sortedOf(a.get("q8_0"))).toEqual(
+      (freezeData.greedyTable as Record<string, string[]>).q8_0,
+    );
   });
 });
 
@@ -247,7 +293,19 @@ describe("measuredOn", () => {
     expect(measuredOn({})).toBe("gpu");
     expect(measuredOn({ backend: "gpu" })).toBe("gpu");
     expect(measuredOn({ backend: "cpu" })).toBe("cpu");
-    for (const odd of ["CPU", "Cpu", " cpu", "cpu ", "processor", "vulkan", "", null, 0, {}, ["cpu"]])
+    for (const odd of [
+      "CPU",
+      "Cpu",
+      " cpu",
+      "cpu ",
+      "processor",
+      "vulkan",
+      "",
+      null,
+      0,
+      {},
+      ["cpu"],
+    ])
       expect(measuredOn({ backend: odd as never }), JSON.stringify(odd)).toBeNull();
   });
 });
@@ -264,7 +322,10 @@ interface MiniSetting {
 }
 interface MiniEvidence {
   settings: Record<string, MiniSetting>;
-  rows: Array<{ language: string; results: Record<string, { diff_points: number; ci_high: number } | undefined> }>;
+  rows: Array<{
+    language: string;
+    results: Record<string, { diff_points: number; ci_high: number } | undefined>;
+  }>;
 }
 
 describe("clearedOn and greedyTable, over any evidence", () => {
@@ -293,20 +354,28 @@ describe("clearedOn and greedyTable, over any evidence", () => {
   });
   const asEvidence = (e: MiniEvidence): GateEvidence =>
     ({
-      settings: Object.fromEntries(Object.entries(e.settings).map(([id, s]) => [id, { flags: [], ...s }])),
+      settings: Object.fromEntries(
+        Object.entries(e.settings).map(([id, s]) => [id, { flags: [], ...s }]),
+      ),
       rows: e.rows.map((r, i) => ({ set: `s${i}`, ...r })),
     }) as unknown as GateEvidence;
   const run = { numRuns: 400 };
 
   /** An independent oracle: a language is cleared at (variant, beam) on a path iff some setting measures exactly that
    *  there, and for EVERY such setting, EVERY row of the language has a cell that passes the owner's rule. */
-  const oracle = (e: MiniEvidence, path: "gpu" | "cpu"): Record<string, Record<string, string[]>> => {
+  const oracle = (
+    e: MiniEvidence,
+    path: "gpu" | "cpu",
+  ): Record<string, Record<string, string[]>> => {
     const out: Record<string, Record<string, string[]>> = {};
     const known = new Set(["f16", "q8_0", "q5_1"]);
     const languages = [...new Set(e.rows.map((r) => r.language))];
-    const onPath = (s: MiniSetting): boolean => (s.backend === undefined ? "gpu" : s.backend) === path;
+    const onPath = (s: MiniSetting): boolean =>
+      (s.backend === undefined ? "gpu" : s.backend) === path;
     for (const s of Object.values(e.settings).filter((x) => onPath(x) && known.has(x.variant))) {
-      const same = Object.entries(e.settings).filter(([, o]) => onPath(o) && o.variant === s.variant && o.beam === s.beam);
+      const same = Object.entries(e.settings).filter(
+        ([, o]) => onPath(o) && o.variant === s.variant && o.beam === s.beam,
+      );
       out[s.variant] ??= {};
       out[s.variant][String(s.beam)] = languages
         .filter((l) =>
@@ -327,7 +396,8 @@ describe("clearedOn and greedyTable, over any evidence", () => {
   it("clears a language on a path exactly when every measurement of that variant and beam on THAT path passes in every row", () => {
     fc.assert(
       fc.property(evidence, (e) => {
-        for (const path of ["gpu", "cpu"] as const) expect(plain(clearedOn(asEvidence(e), path)), path).toEqual(oracle(e, path));
+        for (const path of ["gpu", "cpu"] as const)
+          expect(plain(clearedOn(asEvidence(e), path)), path).toEqual(oracle(e, path));
       }),
       run,
     );
@@ -336,12 +406,21 @@ describe("clearedOn and greedyTable, over any evidence", () => {
   it("is not moved by anything measured on the other path, in either direction", () => {
     fc.assert(
       fc.property(evidence, (e) => {
-        for (const [path, other] of [["cpu", "gpu"], ["gpu", "cpu"]] as const) {
+        for (const [path, other] of [
+          ["cpu", "gpu"],
+          ["gpu", "cpu"],
+        ] as const) {
           const kept: MiniEvidence = {
-            settings: Object.fromEntries(Object.entries(e.settings).filter(([, s]) => (s.backend === undefined ? "gpu" : s.backend) !== other)),
+            settings: Object.fromEntries(
+              Object.entries(e.settings).filter(
+                ([, s]) => (s.backend === undefined ? "gpu" : s.backend) !== other,
+              ),
+            ),
             rows: e.rows,
           };
-          expect(plain(clearedOn(asEvidence(e), path))).toEqual(plain(clearedOn(asEvidence(kept), path)));
+          expect(plain(clearedOn(asEvidence(e), path))).toEqual(
+            plain(clearedOn(asEvidence(kept), path)),
+          );
         }
       }),
       run,
@@ -351,7 +430,9 @@ describe("clearedOn and greedyTable, over any evidence", () => {
   it("clears nothing for a setting whose path is spelled any way but gpu, cpu or nothing", () => {
     fc.assert(
       fc.property(evidence, (e) => {
-        const named = Object.fromEntries(Object.entries(e.settings).filter(([, s]) => s.backend === "CPU" || s.backend === ""));
+        const named = Object.fromEntries(
+          Object.entries(e.settings).filter(([, s]) => s.backend === "CPU" || s.backend === ""),
+        );
         const only: MiniEvidence = { settings: named, rows: e.rows };
         expect(plain(clearedOn(asEvidence(only), "cpu"))).toEqual({});
         expect(plain(clearedOn(asEvidence(only), "gpu"))).toEqual({});
@@ -368,7 +449,9 @@ describe("clearedOn and greedyTable, over any evidence", () => {
           rows: [...e.rows].reverse(),
         };
         for (const path of ["gpu", "cpu"] as const)
-          expect(plain(clearedOn(asEvidence(reversed), path))).toEqual(plain(clearedOn(asEvidence(e), path)));
+          expect(plain(clearedOn(asEvidence(reversed), path))).toEqual(
+            plain(clearedOn(asEvidence(e), path)),
+          );
       }),
       run,
     );
@@ -412,7 +495,9 @@ describe("clearedOn and greedyTable, over any evidence", () => {
         settings: { S0: { variant, beam: 1, backend: "cpu" } },
         rows: [{ language: "a", results: { S0: { diff_points: 0, ci_high: 0 } } }],
       };
-      expect(plain(clearedOn(asEvidence(e), "cpu")), variant).toEqual({ [variant]: { "1": ["a"] } });
+      expect(plain(clearedOn(asEvidence(e), "cpu")), variant).toEqual({
+        [variant]: { "1": ["a"] },
+      });
     }
   });
 });

@@ -38,7 +38,8 @@ const appArgv = (model: string, beam = 5): string[] => [
   ...decodeArgs(beam),
 ];
 /** What engineFor's launch does with the plan: -ng goes on when the launch is the processor's. */
-const spawned = (args: string[], plan: { cpuOnly: boolean }): string[] => (plan.cpuOnly ? [...args, "-ng"] : args);
+const spawned = (args: string[], plan: { cpuOnly: boolean }): string[] =>
+  plan.cpuOnly ? [...args, "-ng"] : args;
 
 describe("the model file a path names", () => {
   it.each([
@@ -93,7 +94,15 @@ describe("the model file a path names", () => {
   });
 
   it("names nothing for what is not a string", () => {
-    for (const path of [undefined, null, 0, {}, [], [SMALLER_FILE], { toString: () => SMALLER_FILE }])
+    for (const path of [
+      undefined,
+      null,
+      0,
+      {},
+      [],
+      [SMALLER_FILE],
+      { toString: () => SMALLER_FILE },
+    ])
       expect(modelKeyOfPath(path as never)).toBeNull();
   });
 
@@ -125,12 +134,24 @@ const CASES: Array<[string, string[], "ok" | "refused"]> = [
   ["-m as the last argument, with no value", ["-f", "a.wav", "-ng", "-m"], "refused"],
   ["two -m naming the same file", ["-m", M, "-m", M, "-ng"], "refused"],
   ["two -m naming one file each", ["-m", B, "-m", M, "-ng"], "refused"],
-  ["the flag -ng taken as the model's value, which is what the engine does", ["-m", "-ng"], "refused"],
+  [
+    "the flag -ng taken as the model's value, which is what the engine does",
+    ["-m", "-ng"],
+    "refused",
+  ],
   ["the flag -ng taken as the model's value, the real file after it", ["-m", "-ng", M], "refused"],
   ["an empty value", ["-m", ""], "refused"],
   ["a file the manifest does not name", ["-m", "C:\\models\\ggml-medium.bin", "-ng"], "refused"],
-  ["a file that only ends like one it names", ["-m", "C:\\models\\xggml-small.bin", "-ng"], "refused"],
-  ["the model given as --model=value, which the engine does not read", [`--model=${M}`, "-ng"], "refused"],
+  [
+    "a file that only ends like one it names",
+    ["-m", "C:\\models\\xggml-small.bin", "-ng"],
+    "refused",
+  ],
+  [
+    "the model given as --model=value, which the engine does not read",
+    [`--model=${M}`, "-ng"],
+    "refused",
+  ],
   ["nothing at all", [], "refused"],
 ];
 
@@ -151,7 +172,12 @@ describe("assertLaunchArgv, on the arguments about to be spawned", () => {
 
   it("never says where the person's files are in what it throws", () => {
     const secret = "C:\\Users\\Pat Example\\AppData\\Roaming\\models";
-    for (const argv of [["-m", `${secret}\\ggml-medium.bin`], ["-m", `${secret}\\${SMALLER_FILE}`], ["-m"], []]) {
+    for (const argv of [
+      ["-m", `${secret}\\ggml-medium.bin`],
+      ["-m", `${secret}\\${SMALLER_FILE}`],
+      ["-m"],
+      [],
+    ]) {
       let thrown: unknown;
       try {
         assertLaunchArgv(argv);
@@ -170,7 +196,8 @@ describe("assertLaunchArgv, on the arguments about to be spawned", () => {
 
 describe("launchPlan, where the engine's arguments are made", () => {
   it("launches the 8-bit file on the processor whatever was asked, and says so", () => {
-    for (const asked of [true, false]) expect(launchPlan(appArgv(M, 1), asked)).toEqual({ cpuOnly: true, key: SMALLER_KEY });
+    for (const asked of [true, false])
+      expect(launchPlan(appArgv(M, 1), asked)).toEqual({ cpuOnly: true, key: SMALLER_KEY });
   });
 
   it("leaves today's file on the path that was asked", () => {
@@ -201,9 +228,15 @@ describe("launchPlan, where the engine's arguments are made", () => {
       const paths = new Set(backendsOf(entry));
       for (const asked of [true, false]) {
         const argv = appArgv(`C:\\models\\${entry.file}`);
-        if (asked && !paths.has("cpu")) expect(() => launchPlan(argv, asked), `${key} ${asked}`).toThrow(ModelPairingError);
-        else if (!asked && !paths.has("gpu") && !paths.has("cpu")) expect(() => launchPlan(argv, asked)).toThrow(ModelPairingError);
-        else expect(launchPlan(argv, asked), `${key} ${asked}`).toEqual({ cpuOnly: asked || !paths.has("gpu"), key });
+        if (asked && !paths.has("cpu"))
+          expect(() => launchPlan(argv, asked), `${key} ${asked}`).toThrow(ModelPairingError);
+        else if (!asked && !paths.has("gpu") && !paths.has("cpu"))
+          expect(() => launchPlan(argv, asked)).toThrow(ModelPairingError);
+        else
+          expect(launchPlan(argv, asked), `${key} ${asked}`).toEqual({
+            cpuOnly: asked || !paths.has("gpu"),
+            key,
+          });
       }
     }
   });
@@ -211,9 +244,16 @@ describe("launchPlan, where the engine's arguments are made", () => {
   it("accepts the manifest's files and no others", () => {
     expect(new Set(FILES)).toEqual(new Set([BASELINE_FILE, SMALLER_FILE]));
     expect(FILES).toHaveLength(2);
-    for (const file of ["ggml-small.bin.part", "ggml-small-q5_1.bin", "ggml-large-v3.bin", "ggml-tiny.bin"])
+    for (const file of [
+      "ggml-small.bin.part",
+      "ggml-small-q5_1.bin",
+      "ggml-large-v3.bin",
+      "ggml-tiny.bin",
+    ])
       for (const asked of [true, false])
-        expect(() => launchPlan(appArgv(`C:\\models\\${file}`), asked), file).toThrow(ModelPairingError);
+        expect(() => launchPlan(appArgv(`C:\\models\\${file}`), asked), file).toThrow(
+          ModelPairingError,
+        );
   });
 });
 
@@ -221,9 +261,35 @@ describe("launchPlan, where the engine's arguments are made", () => {
 // Fuzz: random spellings of the path, random placement of the flags, both directions
 // ---------------------------------------------------------------------------------------------------------------
 
-const roots = fc.constantFrom("C:\\", "D:\\", "\\\\server\\share\\", "\\\\?\\C:\\", "/", "", "./", "C:/", "~/", "/mnt/c/");
+const roots = fc.constantFrom(
+  "C:\\",
+  "D:\\",
+  "\\\\server\\share\\",
+  "\\\\?\\C:\\",
+  "/",
+  "",
+  "./",
+  "C:/",
+  "~/",
+  "/mnt/c/",
+);
 const segments = fc.oneof(
-  fc.constantFrom("models", "Some One", "App Data", "AppData", "Local", "x.y", "é", "日本語", "a b c", "..", ".", "ggml-small.bin", "-m", "-ng"),
+  fc.constantFrom(
+    "models",
+    "Some One",
+    "App Data",
+    "AppData",
+    "Local",
+    "x.y",
+    "é",
+    "日本語",
+    "a b c",
+    "..",
+    ".",
+    "ggml-small.bin",
+    "-m",
+    "-ng",
+  ),
   fc.stringMatching(/^[A-Za-z0-9 ._-]{1,12}$/),
 );
 const separators = fc.array(fc.constantFrom("\\", "/"), { minLength: 1, maxLength: 4 });
@@ -244,20 +310,44 @@ const flagNoise = fc
   .map((parts) => parts.flat());
 
 /** A path that ends in `file`, spelled with random roots, separators, folders and letter case. */
-const spell = (root: string, dirs: string[], seps: string[], file: string, bits: boolean[]): string => {
-  const cased = [...file].map((c, i) => (bits.length > 0 && bits[i % bits.length] ? c.toUpperCase() : c.toLowerCase())).join("");
+const spell = (
+  root: string,
+  dirs: string[],
+  seps: string[],
+  file: string,
+  bits: boolean[],
+): string => {
+  const cased = [...file]
+    .map((c, i) => (bits.length > 0 && bits[i % bits.length] ? c.toUpperCase() : c.toLowerCase()))
+    .join("");
   return `${root}${dirs.map((d, i) => d + seps[i % seps.length]).join("")}${cased}`;
 };
 const pathOf = (file: fc.Arbitrary<string>): fc.Arbitrary<string> =>
-  fc.tuple(roots, fc.array(segments, { maxLength: 4 }), separators, file, caseBits).map(([r, d, s, f, b]) => spell(r, d, s, f, b));
+  fc
+    .tuple(roots, fc.array(segments, { maxLength: 4 }), separators, file, caseBits)
+    .map(([r, d, s, f, b]) => spell(r, d, s, f, b));
 
 type NgMode = "none" | "before" | "after";
 const ngMode = fc.constantFrom<NgMode>("none", "before", "after");
 
 /** Arguments with the model somewhere among other options, and the graphics chip turned off or not. */
-function build(path: string, mode: NgMode, longM: boolean, longNg: boolean, before: string[], after: string[]): string[] {
+function build(
+  path: string,
+  mode: NgMode,
+  longM: boolean,
+  longNg: boolean,
+  before: string[],
+  after: string[],
+): string[] {
   const ng = longNg ? "--no-gpu" : "-ng";
-  return [...before, ...(mode === "before" ? [ng] : []), longM ? "--model" : "-m", path, ...(mode === "after" ? [ng] : []), ...after];
+  return [
+    ...before,
+    ...(mode === "before" ? [ng] : []),
+    longM ? "--model" : "-m",
+    path,
+    ...(mode === "after" ? [ng] : []),
+    ...after,
+  ];
 }
 
 describe("fuzz: a file the manifest names, spelled any way, on either path", () => {
@@ -291,25 +381,33 @@ describe("fuzz: a file the manifest names, spelled any way, on either path", () 
 
   it("nothing that pairs the 8-bit file with the graphics chip passes, and its processor launch never fails (the owner's decision, as a literal)", () => {
     fc.assert(
-      fc.property(legit, pathOf(fc.constant(SMALLER_FILE)), ({ mode, longM, longNg, before, after, asked }, path) => {
-        const argv = build(path, mode, longM, longNg, before, after);
-        expect(modelKeyOfPath(path)).toBe(SMALLER_KEY);
-        if (mode === "none") expect(() => assertLaunchArgv(argv)).toThrow(ModelPairingError);
-        else expect(() => assertLaunchArgv(argv)).not.toThrow();
-        // Whatever the caller asked, the launch the plan describes is the processor's.
-        expect(launchPlan(argv, asked)).toEqual({ cpuOnly: true, key: SMALLER_KEY });
-      }),
+      fc.property(
+        legit,
+        pathOf(fc.constant(SMALLER_FILE)),
+        ({ mode, longM, longNg, before, after, asked }, path) => {
+          const argv = build(path, mode, longM, longNg, before, after);
+          expect(modelKeyOfPath(path)).toBe(SMALLER_KEY);
+          if (mode === "none") expect(() => assertLaunchArgv(argv)).toThrow(ModelPairingError);
+          else expect(() => assertLaunchArgv(argv)).not.toThrow();
+          // Whatever the caller asked, the launch the plan describes is the processor's.
+          expect(launchPlan(argv, asked)).toEqual({ cpuOnly: true, key: SMALLER_KEY });
+        },
+      ),
       run,
     );
   });
 
   it("today's file is launched on whichever path was asked, and the final check agrees with the arguments", () => {
     fc.assert(
-      fc.property(legit, pathOf(fc.constant(BASELINE_FILE)), ({ mode, longM, longNg, before, after, asked }, path) => {
-        const argv = build(path, mode, longM, longNg, before, after);
-        expect(launchPlan(argv, asked)).toEqual({ cpuOnly: asked, key: BASELINE_KEY });
-        expect(() => assertLaunchArgv(argv)).not.toThrow();
-      }),
+      fc.property(
+        legit,
+        pathOf(fc.constant(BASELINE_FILE)),
+        ({ mode, longM, longNg, before, after, asked }, path) => {
+          const argv = build(path, mode, longM, longNg, before, after);
+          expect(launchPlan(argv, asked)).toEqual({ cpuOnly: asked, key: BASELINE_KEY });
+          expect(() => assertLaunchArgv(argv)).not.toThrow();
+        },
+      ),
       run,
     );
   });
@@ -337,7 +435,17 @@ describe("fuzz: a name that is not one of the manifest's files is refused on eit
     at: fc.nat(),
     ch: fc.constantFrom("x", "-", "_", ".", " ", "0", "é", "\u0000", ":", "/", "\\", "$"),
   });
-  const mutate = ({ file, kind, at, ch }: { file: string; kind: number; at: number; ch: string }): string => {
+  const mutate = ({
+    file,
+    kind,
+    at,
+    ch,
+  }: {
+    file: string;
+    kind: number;
+    at: number;
+    ch: string;
+  }): string => {
     const i = at % (file.length + 1);
     switch (kind) {
       case 0:
@@ -363,17 +471,23 @@ describe("fuzz: a name that is not one of the manifest's files is refused on eit
 
   it("any small change to a manifest file's name is no manifest file, so nothing is launched with it", () => {
     fc.assert(
-      fc.property(mutated, fc.constantFrom("", "C:\\models\\", "/m/", "\\\\h\\s\\"), fc.boolean(), fc.boolean(), (m, dir, asked, withNg) => {
-        const name = mutate(m);
-        const base = name.split(/[\\/]/).pop()!;
-        // The change may have made another manifest file's name, or moved the end of the path onto a real one.
-        fc.pre(!FILES.some((f) => f.toLowerCase() === base.toLowerCase()));
-        const path = dir + name;
-        expect(modelKeyOfPath(path)).toBeNull();
-        const argv = ["-m", path, ...(withNg ? ["-ng"] : [])];
-        expect(() => assertLaunchArgv(argv)).toThrow(ModelPairingError);
-        expect(() => launchPlan(argv, asked)).toThrow(ModelPairingError);
-      }),
+      fc.property(
+        mutated,
+        fc.constantFrom("", "C:\\models\\", "/m/", "\\\\h\\s\\"),
+        fc.boolean(),
+        fc.boolean(),
+        (m, dir, asked, withNg) => {
+          const name = mutate(m);
+          const base = name.split(/[\\/]/).pop()!;
+          // The change may have made another manifest file's name, or moved the end of the path onto a real one.
+          fc.pre(!FILES.some((f) => f.toLowerCase() === base.toLowerCase()));
+          const path = dir + name;
+          expect(modelKeyOfPath(path)).toBeNull();
+          const argv = ["-m", path, ...(withNg ? ["-ng"] : [])];
+          expect(() => assertLaunchArgv(argv)).toThrow(ModelPairingError);
+          expect(() => launchPlan(argv, asked)).toThrow(ModelPairingError);
+        },
+      ),
       { numRuns: 600 },
     );
   });
@@ -381,7 +495,21 @@ describe("fuzz: a name that is not one of the manifest's files is refused on eit
 
 describe("fuzz: arguments in any shape", () => {
   const token = fc.oneof(
-    fc.constantFrom("-m", "--model", "-ng", "--no-gpu", "-f", "-of", "x.wav", BASELINE_FILE, SMALLER_FILE, `/m/${SMALLER_FILE}`, `/m/${BASELINE_FILE}`, "", "-"),
+    fc.constantFrom(
+      "-m",
+      "--model",
+      "-ng",
+      "--no-gpu",
+      "-f",
+      "-of",
+      "x.wav",
+      BASELINE_FILE,
+      SMALLER_FILE,
+      `/m/${SMALLER_FILE}`,
+      `/m/${BASELINE_FILE}`,
+      "",
+      "-",
+    ),
     fc.string({ maxLength: 12 }),
   );
   const argvs = fc.array(token, { maxLength: 8 });
@@ -404,12 +532,15 @@ describe("fuzz: arguments in any shape", () => {
         }
         if (!passed) return;
         // Soundness, read with plain scans: one -m, its value a manifest file, and the 8-bit file only with -ng.
-        const flagAt = argv.map((a, i) => (a === "-m" || a === "--model" ? i : -1)).filter((i) => i >= 0);
+        const flagAt = argv
+          .map((a, i) => (a === "-m" || a === "--model" ? i : -1))
+          .filter((i) => i >= 0);
         expect(flagAt.length).toBeGreaterThanOrEqual(1);
         const file = argv[flagAt[0] + 1]!;
         const key = modelKeyOfPath(file);
         expect(key).not.toBeNull();
-        if (key === SMALLER_KEY) expect(argv.includes("-ng") || argv.includes("--no-gpu")).toBe(true);
+        if (key === SMALLER_KEY)
+          expect(argv.includes("-ng") || argv.includes("--no-gpu")).toBe(true);
       }),
       { numRuns: 1500 },
     );

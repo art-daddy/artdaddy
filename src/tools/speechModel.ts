@@ -83,7 +83,9 @@ export function modelRules(
     return paths.includes("cpu") && !paths.includes("gpu");
   });
   const cleared = processorOnly ? clearedOn(gate, "cpu").get(processorOnly[1].variant) : undefined;
-  const smaller = [...(cleared?.values() ?? [])].some((set) => set.size > 0) ? processorOnly : undefined;
+  const smaller = [...(cleared?.values() ?? [])].some((set) => set.size > 0)
+    ? processorOnly
+    : undefined;
 
   const beamOnProcessor = (code: string): 1 | 5 | null => {
     if (code === "") return null;
@@ -105,7 +107,8 @@ export function modelRules(
   ): ModelPlan => {
     const language = input?.language ?? null;
     // Today's plan, byte for byte: the baseline file, at the beam the chip's gate gives the language.
-    const today = (): ModelPlan => planOf(baselineKey, baseline, beamFor(baseline.variant, language ?? ""));
+    const today = (): ModelPlan =>
+      planOf(baselineKey, baseline, beamFor(baseline.variant, language ?? ""));
     if (input?.backend !== "cpu" || !smaller) return today();
 
     const [smallerKey, smallerEntry] = smaller;
@@ -127,8 +130,12 @@ export function modelRules(
       : today();
   };
 
-  const acceptableRun = (used: { variant: ModelVariant; beam: number }, detected: string): boolean => {
-    if (used?.variant === baseline.variant) return acceptableBeam(used.beam, baseline.variant, detected);
+  const acceptableRun = (
+    used: { variant: ModelVariant; beam: number },
+    detected: string,
+  ): boolean => {
+    if (used?.variant === baseline.variant)
+      return acceptableBeam(used.beam, baseline.variant, detected);
     if (smaller && used?.variant === smaller[1].variant) {
       const beam = beamOnProcessor(whisperCode(detected));
       return beam !== null && used.beam >= beam;
@@ -169,13 +176,17 @@ export function modelRules(
       }
     }
     if (named === 0) throw new ModelPairingError("the engine's arguments name no model file (-m)");
-    if (named > 1) throw new ModelPairingError("the engine's arguments name more than one model file");
+    if (named > 1)
+      throw new ModelPairingError("the engine's arguments name more than one model file");
     const key = modelKeyOfPath(file as string);
     if (key === null) throw new ModelPairingError("the model file is not one the manifest names");
     return { key, noGpu };
   };
 
-  const launchPlan = (args: readonly string[], cpuOnly: boolean): { cpuOnly: boolean; key: string } => {
+  const launchPlan = (
+    args: readonly string[],
+    cpuOnly: boolean,
+  ): { cpuOnly: boolean; key: string } => {
     const { key } = readArgv(args);
     const paths = backendsOf(manifest[key]);
     const onChip = paths.includes("gpu");
@@ -183,7 +194,8 @@ export function modelRules(
     if (!onChip && !onProcessor)
       throw new ModelPairingError(`model "${key}" may not be launched on any path`);
     if (cpuOnly) {
-      if (!onProcessor) throw new ModelPairingError(`model "${key}" may not be launched on the processor`);
+      if (!onProcessor)
+        throw new ModelPairingError(`model "${key}" may not be launched on the processor`);
       return { cpuOnly: true, key };
     }
     // A file that may not run on the chip is converted, not refused: the plan and the launch can disagree for a few

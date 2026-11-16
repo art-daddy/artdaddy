@@ -52,7 +52,11 @@ const FREEZE = freezeData as unknown as FreezeRows;
 const GATE = gateData as unknown as {
   baseline: { variant: string; model: string };
   settings: Record<string, { variant: string; model: string; beam: number; backend?: string }>;
-  rows: Array<{ set: string; language: string; results: Record<string, { diff_points: number; ci_high: number }> }>;
+  rows: Array<{
+    set: string;
+    language: string;
+    results: Record<string, { diff_points: number; ci_high: number }>;
+  }>;
 };
 
 // The two files, by the names the manifest gives them. Written out here on purpose: the module may not know them.
@@ -62,17 +66,34 @@ const SMALLER = "small_q8_0";
 const CODES = Object.keys(WHISPER_LANGUAGES);
 const NAMES = Object.values(WHISPER_LANGUAGES);
 const ALIASES = Object.keys(LANGUAGE_ALIASES);
-const SPELLINGS = [...CODES, ...NAMES, ...ALIASES, "en-US", "EN", "pt_BR", "zh-Hant", " en ", "KOREAN", "Dutch"];
+const SPELLINGS = [
+  ...CODES,
+  ...NAMES,
+  ...ALIASES,
+  "en-US",
+  "EN",
+  "pt_BR",
+  "zh-Hant",
+  " en ",
+  "KOREAN",
+  "Dutch",
+];
 
 /** What the study's table says each language needs on the processor, by code. */
 const NEEDS = new Map<string, 1 | 5 | null>(
-  S1.languageTable.map(([, code, how]) => [code, how === "greedy" ? 1 : how === "5 beams" ? 5 : null]),
+  S1.languageTable.map(([, code, how]) => [
+    code,
+    how === "greedy" ? 1 : how === "5 beams" ? 5 : null,
+  ]),
 );
 const needOf = (code: string): 1 | 5 | null => NEEDS.get(code) ?? null;
 /** Whether a string, in any spelling, names a language the study cleared on the processor. */
 const clearedNeed = (language: unknown): 1 | 5 | null =>
-  typeof language === "string" && whisperCode(language) !== "" ? needOf(whisperCode(language)) : null;
-const resolvable = (language: unknown): boolean => typeof language === "string" && whisperCode(language) !== "";
+  typeof language === "string" && whisperCode(language) !== ""
+    ? needOf(whisperCode(language))
+    : null;
+const resolvable = (language: unknown): boolean =>
+  typeof language === "string" && whisperCode(language) !== "";
 
 describe("the study's table, as the witness", () => {
   it("is the document's: 20 languages, greedy in 10, 5 beams in 9, one that neither passes", () => {
@@ -124,12 +145,14 @@ describe("processorBeam is the study's language table, for every language the en
     const drifted: string[] = [];
     for (const code of CODES) {
       const expected = clearedAt(greedyId, code) ? 1 : clearedAt(beamsId, code) ? 5 : null;
-      if (processorBeam(code) !== expected) drifted.push(`${code}: ${processorBeam(code)} not ${expected}`);
+      if (processorBeam(code) !== expected)
+        drifted.push(`${code}: ${processorBeam(code)} not ${expected}`);
     }
     expect(drifted).toEqual([]);
     // Every language that has a gate row is walked through a row, so the loop above is not a walk over nothing.
     expect(new Set(GATE.rows.map((r) => r.language)).size).toBe(20);
-    for (const row of GATE.rows) expect(processorBeam(row.language), row.set).toBe(needOf(row.language));
+    for (const row of GATE.rows)
+      expect(processorBeam(row.language), row.set).toBe(needOf(row.language));
   });
 
   it("never reads the chip: the chip clears Dutch at greedy and Arabic at 5 beams for the same file, and the processor does not", () => {
@@ -151,10 +174,14 @@ function pathProblems(
   const settings = Object.values(gate.settings);
   const measuredHere = (path: SpeechBackend): boolean =>
     settings.some(
-      (s) => measuredOn(s as { backend?: SpeechBackend }) === path && s.variant === entry.variant && s.model === entry.file,
+      (s) =>
+        measuredOn(s as { backend?: SpeechBackend }) === path &&
+        s.variant === entry.variant &&
+        s.model === entry.file,
     );
   const isBaseline = gate.baseline.variant === entry.variant && gate.baseline.model === entry.file;
-  if (![gate.baseline, ...settings].some((m) => m.variant === entry.variant)) broken.push("variant");
+  if (![gate.baseline, ...settings].some((m) => m.variant === entry.variant))
+    broken.push("variant");
   if (entry.backends === undefined) {
     // No `backends` is both paths, and only today's file may say so: it is the gate's own baseline.
     if (!isBaseline) broken.push("unrestricted_but_not_the_baseline");
@@ -167,7 +194,8 @@ function pathProblems(
   }
   if (entry.backends.includes("cpu")) {
     const cleared = clearedOn(evidence, "cpu").get(entry.variant);
-    if (![...(cleared?.values() ?? [])].some((set) => set.size > 0)) broken.push("nothing_cleared_on_cpu");
+    if (![...(cleared?.values() ?? [])].some((set) => set.size > 0))
+      broken.push("nothing_cleared_on_cpu");
   }
   return broken;
 }
@@ -212,12 +240,39 @@ describe("every manifest entry's paths are justified by the gate (a future entry
     const noChipEightBit = without((s) => s.backend !== "cpu" && s.variant === "q8_0");
     const broken: Array<[string, string, ModelEntry, typeof GATE?]> = [
       ["no_path", "an empty list of paths", { ...smaller, backends: [] }],
-      ["unknown_path", "a path that is neither", { ...smaller, backends: ["tpu" as SpeechBackend] }],
-      ["no_gate_setting_on_cpu", "a restriction to the processor with no processor measurement", smaller, noProcessor],
-      ["nothing_cleared_on_cpu", "a restriction to the processor with nothing cleared there", smaller, noProcessor],
-      ["no_gate_setting_on_gpu", "a launch on the chip of a file measured only elsewhere", { ...smaller, backends: ["gpu"] }, noChipEightBit],
-      ["unrestricted_but_not_the_baseline", "the 8-bit file with no restriction at all", { ...smaller, backends: undefined }],
-      ["variant", "a variant the gate never measured", { ...smaller, variant: "f32" as ModelVariant }],
+      [
+        "unknown_path",
+        "a path that is neither",
+        { ...smaller, backends: ["tpu" as SpeechBackend] },
+      ],
+      [
+        "no_gate_setting_on_cpu",
+        "a restriction to the processor with no processor measurement",
+        smaller,
+        noProcessor,
+      ],
+      [
+        "nothing_cleared_on_cpu",
+        "a restriction to the processor with nothing cleared there",
+        smaller,
+        noProcessor,
+      ],
+      [
+        "no_gate_setting_on_gpu",
+        "a launch on the chip of a file measured only elsewhere",
+        { ...smaller, backends: ["gpu"] },
+        noChipEightBit,
+      ],
+      [
+        "unrestricted_but_not_the_baseline",
+        "the 8-bit file with no restriction at all",
+        { ...smaller, backends: undefined },
+      ],
+      [
+        "variant",
+        "a variant the gate never measured",
+        { ...smaller, variant: "f32" as ModelVariant },
+      ],
     ];
     it.each(broken)("flags %s: %s", (rule, _what, entry, gate = GATE) => {
       const evidence = gate === GATE ? SHIPPED_EVIDENCE : (gate as unknown as GateEvidence);
@@ -235,7 +290,8 @@ const plan = (
   language: string | null,
   installed: readonly string[],
   offer?: boolean,
-): { key: string; variant: ModelVariant; beam: number } => planModel({ backend, language, installed }, offer);
+): { key: string; variant: ModelVariant; beam: number } =>
+  planModel({ backend, language, installed }, offer);
 
 describe("planModel on the graphics chip is today's plan, byte for byte", () => {
   const installedSets: string[][] = [[], [BASELINE], [SMALLER], [BASELINE, SMALLER]];
@@ -263,7 +319,9 @@ describe("planModel on the graphics chip is today's plan, byte for byte", () => 
         expect([old.beam, old.predicted]).toEqual(perVariant.f16[i]);
         const got = plan("gpu", old.predicted, [], false);
         if (got.beam !== old.beam || got.key !== "small" || got.variant !== "f16")
-          drifted.push(`${JSON.stringify(requested)} after ${JSON.stringify(last)}: ${JSON.stringify(got)}`);
+          drifted.push(
+            `${JSON.stringify(requested)} after ${JSON.stringify(last)}: ${JSON.stringify(got)}`,
+          );
       });
     expect(drifted).toEqual([]);
   });
@@ -283,7 +341,9 @@ describe("planModel on the graphics chip is today's plan, byte for byte", () => 
 // greedy (en); cleared at 5 beams, where today's file would run greedy (nl) and where it would not (ko); not cleared
 // because it failed (ar); not cleared because nobody measured it (fi).
 type Outcome = [key: string, beam: number];
-const PROCESSOR_TABLE: Array<[language: string | null, installed: string[], off: Outcome, on: Outcome]> = [
+const PROCESSOR_TABLE: Array<
+  [language: string | null, installed: string[], off: Outcome, on: Outcome]
+> = [
   [null, [], [SMALLER, 5], [SMALLER, 5]],
   [null, [BASELINE], [BASELINE, 5], [BASELINE, 5]],
   [null, [SMALLER], [SMALLER, 5], [SMALLER, 5]],
@@ -322,7 +382,9 @@ describe("planModel on a PC with no usable graphics chip", () => {
       expect(got.variant).toBe(MODEL_MANIFEST[key].variant);
     }
     // With no second argument the plan is the one the module's own switch gives.
-    expect(plan("cpu", language, installed)).toEqual(plan("cpu", language, installed, OFFER_SMALLER_TO_INSTALLED));
+    expect(plan("cpu", language, installed)).toEqual(
+      plan("cpu", language, installed, OFFER_SMALLER_TO_INSTALLED),
+    );
   });
 
   it("walks every language the study measured, not only the representatives above", () => {
@@ -340,11 +402,25 @@ describe("planModel, as rules over any input", () => {
     fc.constantFrom(...NAMES),
     fc.constantFrom(...ALIASES),
     fc.string(),
-    fc.constantFrom("", "auto", "AUTO", " en ", "en-US", "zh_Hant", "__proto__", "constructor", "x".repeat(10_000)),
+    fc.constantFrom(
+      "",
+      "auto",
+      "AUTO",
+      " en ",
+      "en-US",
+      "zh_Hant",
+      "__proto__",
+      "constructor",
+      "x".repeat(10_000),
+    ),
     fc.anything(),
   ) as unknown as fc.Arbitrary<string | null>;
   const installed = fc.array(
-    fc.oneof(fc.constantFrom(BASELINE, SMALLER), fc.constantFrom("nope", "__proto__", "constructor", ""), fc.string()),
+    fc.oneof(
+      fc.constantFrom(BASELINE, SMALLER),
+      fc.constantFrom("nope", "__proto__", "constructor", ""),
+      fc.string(),
+    ),
     { maxLength: 8 },
   );
   const backend = fc.constantFrom<SpeechBackend>("gpu", "cpu");
@@ -356,10 +432,16 @@ describe("planModel, as rules over any input", () => {
 
   it("never plans the smaller file for anything but the processor, whatever the backend is said to be", () => {
     fc.assert(
-      fc.property(fc.oneof(hostileBackend, fc.constant("gpu" as SpeechBackend)), language, installed, fc.boolean(), (b, l, i, offer) => {
-        if (b === "cpu") return;
-        expect(plan(b, l, i, offer).key).toBe(BASELINE);
-      }),
+      fc.property(
+        fc.oneof(hostileBackend, fc.constant("gpu" as SpeechBackend)),
+        language,
+        installed,
+        fc.boolean(),
+        (b, l, i, offer) => {
+          if (b === "cpu") return;
+          expect(plan(b, l, i, offer).key).toBe(BASELINE);
+        },
+      ),
       run,
     );
   });
@@ -410,7 +492,9 @@ describe("planModel, as rules over any input", () => {
         if (!resolvable(l)) return;
         const need = clearedNeed(l);
         const got = plan("cpu", l, [], offer);
-        expect([got.key, got.beam]).toEqual(need === null ? [BASELINE, beamFor("f16", l as string)] : [SMALLER, need]);
+        expect([got.key, got.beam]).toEqual(
+          need === null ? [BASELINE, beamFor("f16", l as string)] : [SMALLER, need],
+        );
       }),
       run,
     );
@@ -449,10 +533,16 @@ describe("planModel, as rules over any input", () => {
 
   it("reads every spelling of a language as the language: letter case, a name, a regional tag", () => {
     fc.assert(
-      fc.property(backend, fc.constantFrom(...SPELLINGS), installed, fc.boolean(), (b, s, i, offer) => {
-        const code = whisperCode(s);
-        expect(plan(b, s, i, offer)).toEqual(plan(b, code === "" ? null : code, i, offer));
-      }),
+      fc.property(
+        backend,
+        fc.constantFrom(...SPELLINGS),
+        installed,
+        fc.boolean(),
+        (b, s, i, offer) => {
+          const code = whisperCode(s);
+          expect(plan(b, s, i, offer)).toEqual(plan(b, code === "" ? null : code, i, offer));
+        },
+      ),
       run,
     );
   });
@@ -485,14 +575,21 @@ describe("planModel, as rules over any input", () => {
 
   it("a refused run is re-planned once with the language it turned out to be in, and that plan is kept (the loop ends)", () => {
     fc.assert(
-      fc.property(backend, language, installed, fc.boolean(), language, (b, predicted, i, offer, detected) => {
-        if (!resolvable(detected)) return;
-        const first = plan(b, predicted, i, offer);
-        if (acceptableRun(first, detected as string)) return;
-        // The first run made its file, so it is installed now.
-        const second = plan(b, detected, [...i, first.key], offer);
-        expect(acceptableRun(second, detected as string)).toBe(true);
-      }),
+      fc.property(
+        backend,
+        language,
+        installed,
+        fc.boolean(),
+        language,
+        (b, predicted, i, offer, detected) => {
+          if (!resolvable(detected)) return;
+          const first = plan(b, predicted, i, offer);
+          if (acceptableRun(first, detected as string)) return;
+          // The first run made its file, so it is installed now.
+          const second = plan(b, detected, [...i, first.key], offer);
+          expect(acceptableRun(second, detected as string)).toBe(true);
+        },
+      ),
       { numRuns: 600 },
     );
   });
@@ -508,7 +605,8 @@ describe("acceptableRun: today's file is judged as it always was, the smaller fi
     for (const [spelling, perVariant] of Object.entries(FREEZE.languages))
       for (let beam = 0; beam <= 6; beam++) {
         const old = perVariant.f16[1][beam] === "1";
-        if (acceptableRun({ variant: "f16", beam }, spelling) !== old) drifted.push(`${JSON.stringify(spelling)} at ${beam}`);
+        if (acceptableRun({ variant: "f16", beam }, spelling) !== old)
+          drifted.push(`${JSON.stringify(spelling)} at ${beam}`);
       }
     expect(drifted).toEqual([]);
   });
@@ -519,22 +617,41 @@ describe("acceptableRun: today's file is judged as it always was, the smaller fi
       for (let beam = 0; beam <= 6; beam++) {
         const need = needOf(whisperCode(spelling));
         const want = need !== null && beam >= need;
-        if (acceptableRun({ variant: "q8_0", beam }, spelling) !== want) drifted.push(`${spelling} at ${beam}`);
+        if (acceptableRun({ variant: "q8_0", beam }, spelling) !== want)
+          drifted.push(`${spelling} at ${beam}`);
       }
     expect(drifted).toEqual([]);
   });
 
   it("never accepts Arabic, nor a language nobody measured, from the smaller file, at any width", () => {
-    for (const language of ["ar", "arabic", "ara", "AR", "ar-EG", "fi", "he", "zz", "", "auto", "klingon", "__proto__"])
+    for (const language of [
+      "ar",
+      "arabic",
+      "ara",
+      "AR",
+      "ar-EG",
+      "fi",
+      "he",
+      "zz",
+      "",
+      "auto",
+      "klingon",
+      "__proto__",
+    ])
       for (const beam of [0, 1, 2, 3, 4, 5, 6, 99, Infinity])
-        expect(acceptableRun({ variant: "q8_0", beam }, language), `${language} at ${beam}`).toBe(false);
+        expect(acceptableRun({ variant: "q8_0", beam }, language), `${language} at ${beam}`).toBe(
+          false,
+        );
   });
 
   it("accepts today's file at the default width for every string, which is what makes the re-plan loop end", () => {
     fc.assert(
-      fc.property(fc.oneof(fc.string(), fc.constantFrom(...SPELLINGS), fc.anything()), (detected) => {
-        expect(acceptableRun({ variant: "f16", beam: 5 }, detected as string)).toBe(true);
-      }),
+      fc.property(
+        fc.oneof(fc.string(), fc.constantFrom(...SPELLINGS), fc.anything()),
+        (detected) => {
+          expect(acceptableRun({ variant: "f16", beam: 5 }, detected as string)).toBe(true);
+        },
+      ),
       { numRuns: 500 },
     );
   });
@@ -557,8 +674,16 @@ describe("acceptableRun: today's file is judged as it always was, the smaller fi
 
   it("accepts nothing made by a variant that no manifest entry carries, or by anything that is not a run", () => {
     for (const language of ["en", "nl", "ko", "ar", ""])
-      for (const beam of [0, 1, 5, 6]) expect(acceptableRun({ variant: "q5_1", beam }, language)).toBe(false);
-    for (const used of [undefined, null, {}, { variant: "constructor", beam: 5 }, { variant: "f16" }, { variant: "q8_0", beam: NaN }])
+      for (const beam of [0, 1, 5, 6])
+        expect(acceptableRun({ variant: "q5_1", beam }, language)).toBe(false);
+    for (const used of [
+      undefined,
+      null,
+      {},
+      { variant: "constructor", beam: 5 },
+      { variant: "f16" },
+      { variant: "q8_0", beam: NaN },
+    ])
       expect(acceptableRun(used as never, "en"), JSON.stringify(used)).toBe(false);
   });
 
@@ -569,7 +694,10 @@ describe("acceptableRun: today's file is judged as it always was, the smaller fi
         [false, off],
         [true, on],
       ] as Array<[boolean, Outcome]>)
-        expect(acceptableRun({ variant: MODEL_MANIFEST[key].variant, beam }, language), `${language} ${offer}`).toBe(true);
+        expect(
+          acceptableRun({ variant: MODEL_MANIFEST[key].variant, beam }, language),
+          `${language} ${offer}`,
+        ).toBe(true);
     }
   });
 });
@@ -611,25 +739,53 @@ describe("hostile input is never a reason to use the smaller file, and never a t
   it("an installed list that is not a list is an empty one, and names the manifest does not have are no files", () => {
     for (const installed of [null, undefined, "small", "small_q8_0", { 0: "small", length: 1 }, 7])
       expect(plan("cpu", "en", installed as never)).toEqual(plan("cpu", "en", []));
-    expect(plan("cpu", "en", ["__proto__", "constructor", "toString", "SMALL", " small", "small ", "small\0"])).toEqual(
-      plan("cpu", "en", []),
-    );
+    expect(
+      plan("cpu", "en", [
+        "__proto__",
+        "constructor",
+        "toString",
+        "SMALL",
+        " small",
+        "small ",
+        "small\0",
+      ]),
+    ).toEqual(plan("cpu", "en", []));
   });
 
   it("a backend that is not exactly 'cpu' is the graphics chip: the smaller file is never planned for it", () => {
-    for (const backend of ["CPU", "cpu ", " cpu", "Cpu", "processor", "", null, undefined, 0, {}, ["cpu"]])
+    for (const backend of [
+      "CPU",
+      "cpu ",
+      " cpu",
+      "Cpu",
+      "processor",
+      "",
+      null,
+      undefined,
+      0,
+      {},
+      ["cpu"],
+    ])
       expect(plan(backend as never, "en", [SMALLER]).key, String(backend)).toBe(BASELINE);
   });
 
   it("an input that is not an object at all is still a plan", () => {
     for (const input of [undefined, null, 0, "cpu", [], () => 1])
-      expect(planModel(input as never)).toEqual({ key: BASELINE, variant: "f16", beam: DEFAULT_BEAM });
+      expect(planModel(input as never)).toEqual({
+        key: BASELINE,
+        variant: "f16",
+        beam: DEFAULT_BEAM,
+      });
   });
 });
 
 // The rules over worlds the shipped files are not: a manifest or a gate that is wrong must not make a wrong launch.
 describe("the rules over a manifest or a gate that is not the shipped one", () => {
-  const entry = (file: string, variant: ModelVariant, backends?: readonly SpeechBackend[]): ModelEntry => ({
+  const entry = (
+    file: string,
+    variant: ModelVariant,
+    backends?: readonly SpeechBackend[],
+  ): ModelEntry => ({
     file,
     bytes: 1,
     sha256: "0".repeat(64),
@@ -645,11 +801,16 @@ describe("the rules over a manifest or a gate that is not the shipped one", () =
     rows: Array<[language: string, results: Record<string, Cell>]>,
   ): GateEvidence =>
     ({
-      settings: Object.fromEntries(Object.entries(settings).map(([id, s]) => [id, { flags: [], ...s }])),
+      settings: Object.fromEntries(
+        Object.entries(settings).map(([id, s]) => [id, { flags: [], ...s }]),
+      ),
       rows: rows.map(([language, results], i) => ({ set: `s${i}`, language, results })),
     }) as unknown as GateEvidence;
   const processorGate = gate(
-    { C1: { variant: "q8_0", beam: 1, backend: "cpu" }, C5: { variant: "q8_0", beam: 5, backend: "cpu" } },
+    {
+      C1: { variant: "q8_0", beam: 1, backend: "cpu" },
+      C5: { variant: "q8_0", beam: 5, backend: "cpu" },
+    },
     [
       ["en", { C1: PASS }],
       ["nl", { C1: FAIL, C5: PASS }],
@@ -658,30 +819,56 @@ describe("the rules over a manifest or a gate that is not the shipped one", () =
       ["de", { C1: PASS }],
       ["de", { C1: FAIL }],
       ["ko", { C5: PASS }],
+      ["it", { C1: PASS, C5: PASS }],
       ["sv", {}],
     ],
   );
-  const shipped = { small: entry("ggml-small.bin", "f16"), small_q8_0: entry("ggml-small-q8_0.bin", "q8_0", ["cpu"]) };
+  const shipped = {
+    small: entry("ggml-small.bin", "f16"),
+    small_q8_0: entry("ggml-small-q8_0.bin", "q8_0", ["cpu"]),
+  };
 
   it("reads a language from its own cells: greedy first, else 5 beams, never a failing or a missing cell, never one set of two", () => {
     const rules = modelRules(shipped, "small", processorGate);
-    const got = Object.fromEntries(["en", "nl", "ar", "fr", "de", "ko", "sv", "fi"].map((l) => [l, rules.processorBeam(l)]));
-    expect(got).toEqual({ en: 1, nl: 5, ar: null, fr: 1, de: null, ko: 5, sv: null, fi: null });
+    const got = Object.fromEntries(
+      ["en", "nl", "ar", "fr", "de", "ko", "it", "sv", "fi"].map((l) => [
+        l,
+        rules.processorBeam(l),
+      ]),
+    );
+    // "it" passes at both widths, and takes the narrower; no language of the shipped gate does, so only this world says so.
+    expect(got).toEqual({
+      en: 1,
+      nl: 5,
+      ar: null,
+      fr: 1,
+      de: null,
+      ko: 5,
+      it: 1,
+      sv: null,
+      fi: null,
+    });
   });
 
   it("plans the smaller file only from processor measurements: a gate that cleared it on the chip alone clears nothing", () => {
-    const chipOnly = gate({ C1: { variant: "q8_0", beam: 1 }, C5: { variant: "q8_0", beam: 5, backend: "gpu" } }, [
-      ["en", { C1: PASS, C5: PASS }],
-    ]);
+    const chipOnly = gate(
+      { C1: { variant: "q8_0", beam: 1 }, C5: { variant: "q8_0", beam: 5, backend: "gpu" } },
+      [["en", { C1: PASS, C5: PASS }]],
+    );
     const rules = modelRules(shipped, "small", chipOnly);
     expect(rules.processorBeam("en")).toBeNull();
-    for (const language of [null, "en", "auto"]) expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
+    for (const language of [null, "en", "auto"])
+      expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
   });
 
   it("a setting that names its path in some other way clears nothing, on either path", () => {
-    const odd = gate({ C1: { variant: "q8_0", beam: 1, backend: "CPU" }, C2: { variant: "q8_0", beam: 5, backend: "processor" } }, [
-      ["en", { C1: PASS, C2: PASS }],
-    ]);
+    const odd = gate(
+      {
+        C1: { variant: "q8_0", beam: 1, backend: "CPU" },
+        C2: { variant: "q8_0", beam: 5, backend: "processor" },
+      },
+      [["en", { C1: PASS, C2: PASS }]],
+    );
     const rules = modelRules(shipped, "small", odd);
     expect(rules.processorBeam("en")).toBeNull();
     expect(rules.planModel({ backend: "cpu", language: "en", installed: [] }).key).toBe("small");
@@ -690,18 +877,40 @@ describe("the rules over a manifest or a gate that is not the shipped one", () =
   it("a file the manifest lists with no path at all is never planned and never launched", () => {
     const manifest = { small: shipped.small, dead: entry("ggml-small-q8_0.bin", "q8_0", []) };
     const rules = modelRules(manifest, "small", processorGate);
-    for (const language of [null, "en", "nl"]) expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
+    for (const language of [null, "en", "nl"])
+      expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
     const argv = ["-m", "/m/ggml-small-q8_0.bin"];
     for (const cpuOnly of [true, false]) expect(() => rules.launchPlan(argv, cpuOnly)).toThrow();
     expect(() => rules.assertLaunchArgv(argv)).toThrow();
     expect(() => rules.assertLaunchArgv([...argv, "-ng"])).toThrow();
   });
 
+  it("a file the manifest allows on the chip only is never launched on the processor", () => {
+    const rules = modelRules(
+      { small: shipped.small, chipOnly: entry("ggml-small-q8_0.bin", "q8_0", ["gpu"]) },
+      "small",
+      processorGate,
+    );
+    const argv = ["-m", "/m/ggml-small-q8_0.bin"];
+    expect(() => rules.launchPlan(argv, true)).toThrow();
+    expect(rules.launchPlan(argv, false)).toEqual({ cpuOnly: false, key: "chipOnly" });
+    expect(() => rules.assertLaunchArgv([...argv, "-ng"])).toThrow();
+    expect(() => rules.assertLaunchArgv(argv)).not.toThrow();
+  });
+
   it("a manifest with no file restricted to the processor plans today's file on every path", () => {
-    const rules = modelRules({ small: shipped.small, big: entry("ggml-small-q8_0.bin", "q8_0") }, "small", processorGate);
-    for (const language of [null, "en", "nl", "ar"]) expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
+    const rules = modelRules(
+      { small: shipped.small, big: entry("ggml-small-q8_0.bin", "q8_0") },
+      "small",
+      processorGate,
+    );
+    for (const language of [null, "en", "nl", "ar"])
+      expect(rules.planModel({ backend: "cpu", language, installed: [] }).key).toBe("small");
     // ...and the unrestricted file keeps both paths: nothing is converted.
-    expect(rules.launchPlan(["-m", "/m/ggml-small-q8_0.bin"], false)).toEqual({ cpuOnly: false, key: "big" });
+    expect(rules.launchPlan(["-m", "/m/ggml-small-q8_0.bin"], false)).toEqual({
+      cpuOnly: false,
+      key: "big",
+    });
   });
 
   it("a restricted file nothing was cleared for is not planned, though the manifest restricts it", () => {
@@ -716,9 +925,17 @@ describe("the rules over a manifest or a gate that is not the shipped one", () =
     const rules = modelRules(
       manifest,
       "small",
-      gate({ C1: { variant: "q8_0", beam: 1, backend: "cpu" }, D1: { variant: "q5_1", beam: 1, backend: "cpu" } }, [["en", { C1: PASS, D1: PASS }]]),
+      gate(
+        {
+          C1: { variant: "q8_0", beam: 1, backend: "cpu" },
+          D1: { variant: "q5_1", beam: 1, backend: "cpu" },
+        },
+        [["en", { C1: PASS, D1: PASS }]],
+      ),
     );
-    expect(rules.planModel({ backend: "cpu", language: "en", installed: [] }).key).toBe("small_q8_0");
+    expect(rules.planModel({ backend: "cpu", language: "en", installed: [] }).key).toBe(
+      "small_q8_0",
+    );
     for (const file of ["ggml-small-q8_0.bin", "ggml-small-q5_1.bin"]) {
       expect(rules.launchPlan(["-m", `/m/${file}`], false).cpuOnly).toBe(true);
       expect(() => rules.assertLaunchArgv(["-m", `/m/${file}`])).toThrow();
@@ -727,7 +944,11 @@ describe("the rules over a manifest or a gate that is not the shipped one", () =
   });
 
   it("two files that differ only in letter case name no one: the file name is ambiguous, so it is refused", () => {
-    const rules = modelRules({ small: shipped.small, twin: entry("GGML-SMALL.BIN", "q8_0", ["cpu"]) }, "small", processorGate);
+    const rules = modelRules(
+      { small: shipped.small, twin: entry("GGML-SMALL.BIN", "q8_0", ["cpu"]) },
+      "small",
+      processorGate,
+    );
     expect(rules.modelKeyOfPath("/m/ggml-small.bin")).toBeNull();
     expect(() => rules.launchPlan(["-m", "/m/ggml-small.bin"], false)).toThrow();
   });
