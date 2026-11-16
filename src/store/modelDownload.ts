@@ -26,11 +26,19 @@ interface ModelDownloadStore extends ModelDownloadState {
   /** Why the last download failed for good, until the person dismisses it or a new attempt begins.
    *  Never held together with a download under way: `report` ends it. */
   failure: ModelFailureKind | null;
+  /** The manifest key of the file whose download failed: the card's Retry asks for THAT file, not for what the
+   *  plan names now. Lives and dies with `failure`. */
+  failureKey: string | null;
+  /** The download under way is not this PC's first speech model: another model file is already here, so the words
+   *  about "the first time you start the app" would be untrue of it. False when nothing is downloading. */
+  again: boolean;
   /** When the app tries again by itself (ms since the epoch); null when no round is scheduled. */
   nextAttemptAt: number | null;
-  report: (received: number, total: number) => void;
+  /** `again` left out: unchanged. */
+  report: (received: number, total: number, again?: boolean) => void;
   setCancel: (cancel: (() => void) | null) => void;
-  setFailure: (failure: ModelFailureKind | null) => void;
+  setFailure: (failure: ModelFailureKind | null, key?: string | null) => void;
+  setAgain: (again: boolean) => void;
   setNextAttemptAt: (at: number | null) => void;
   clear: () => void;
 }
@@ -42,26 +50,31 @@ export const useModelDownload = create<ModelDownloadStore>((set) => ({
   startReceived: 0,
   cancel: null,
   failure: null,
+  failureKey: null,
+  again: false,
   nextAttemptAt: null,
   // A report is a download beginning or moving, so a failure and a scheduled round are over.
-  report: (received, total) =>
+  report: (received, total, again) =>
     set((s) => ({
       ...(s.total > 0
         ? { received, total }
         : { received, total, startedAt: Date.now(), startReceived: received }),
+      ...(again === undefined ? undefined : { again }),
       ...(s.failure !== null || s.nextAttemptAt !== null
-        ? { failure: null, nextAttemptAt: null }
+        ? { failure: null, failureKey: null, nextAttemptAt: null }
         : undefined),
     })),
   setCancel: (cancel) => set({ cancel }),
-  setFailure: (failure) => set({ failure }),
+  setFailure: (failure, key = null) => set({ failure, failureKey: failure === null ? null : key }),
+  setAgain: (again) => set({ again }),
   setNextAttemptAt: (nextAttemptAt) => set({ nextAttemptAt }),
   // What stays: the failure and the next round. The download ending is exactly when they matter.
-  clear: () => set({ received: 0, total: 0, startedAt: 0, startReceived: 0, cancel: null }),
+  clear: () =>
+    set({ received: 0, total: 0, startedAt: 0, startReceived: 0, cancel: null, again: false }),
 }));
 
-export function reportModelDownload(received: number, total: number): void {
-  useModelDownload.getState().report(received, total);
+export function reportModelDownload(received: number, total: number, again?: boolean): void {
+  useModelDownload.getState().report(received, total, again);
 }
 
 /** Say how the download under way is stopped (the person pressed Cancel). Cleared with it. */
@@ -73,9 +86,17 @@ export function clearModelDownload(): void {
   useModelDownload.getState().clear();
 }
 
-/** Say why a download failed for good (null: nothing failed, or the person dismissed it). */
-export function setModelDownloadFailure(failure: ModelFailureKind | null): void {
-  useModelDownload.getState().setFailure(failure);
+/** Say why a download failed for good, and which file it was (null: nothing failed, or the person dismissed it). */
+export function setModelDownloadFailure(
+  failure: ModelFailureKind | null,
+  key: string | null = null,
+): void {
+  useModelDownload.getState().setFailure(failure, key);
+}
+
+/** Say whether the download under way is a second model file (another one is already on this PC). */
+export function setModelDownloadAgain(again: boolean): void {
+  useModelDownload.getState().setAgain(again);
 }
 
 /** Say when the next round starts by itself (null: none is scheduled). */
@@ -117,16 +138,26 @@ export function formatEta(seconds: number): string {
  *  second sentence is part of the message: a 465 MB download that appears on its own needs it. */
 export const MODEL_DOWNLOAD_NOTE = "This only happens when you start the app for the first time.";
 
+/** The same, for a download that is not this PC's first speech model (another model file is already here): "the
+ *  first time you start the app" would be untrue of it. */
+export const MODEL_DOWNLOAD_NOTE_AGAIN = "This only happens once.";
+
+/** The note for the download under way: `again` is the store's flag for a second model file. */
+export function modelDownloadNote(again = false): string {
+  return again ? MODEL_DOWNLOAD_NOTE_AGAIN : MODEL_DOWNLOAD_NOTE;
+}
+
 /** The one user-facing line for this download: what it is, how big, how far, and how long is
  *  left once that can be told. */
 export function modelDownloadMessage(
   received: number,
   total: number,
   etaSeconds: number | null = null,
+  again = false,
 ): string {
   const left = etaSeconds === null ? "" : `, ${formatEta(etaSeconds)} left`;
-  return (
-    `Downloading the speech model (one time, about ${megabytes(total)} MB) - ` +
-    `${percent(received, total)}%${left}`
-  );
+  const what = again
+    ? `another speech model (about ${megabytes(total)} MB)`
+    : `the speech model (one time, about ${megabytes(total)} MB)`;
+  return `Downloading ${what} - ${percent(received, total)}%${left}`;
 }

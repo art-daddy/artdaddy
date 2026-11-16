@@ -48,7 +48,11 @@ vi.mock("./dataRoot", async (orig) => ({
 
 import { platform } from "../platform";
 import { __resetHostInfo } from "../platform/host";
-import { setModelDownloadFailure } from "../store/modelDownload";
+import {
+  clearModelDownload,
+  setModelDownloadFailure,
+  useModelDownload,
+} from "../store/modelDownload";
 import type { ClientToolContext } from "./context";
 import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
 import { __resetPrefetch, retrySpeechModelDownload } from "./modelPrefetch";
@@ -208,6 +212,8 @@ beforeEach(() => {
   localStorage.clear();
   __resetWorkGate();
   __resetPrefetch();
+  clearModelDownload();
+  setModelDownloadFailure(null);
   __setDownloadPolicy(SINGLE_ATTEMPT);
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(WINDOWS_UA);
   __resetHostInfo();
@@ -436,6 +442,51 @@ describe("a language that was only predicted, on a PC that holds only the smalle
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
     expect(r.kept.size).toBe(0);
     expect(await r.words(src, "auto")).toBe("");
+  });
+});
+
+describe("Retry on the failure card, through the app's own start-up code", () => {
+  /** The person presses Retry. The app's start-up code only runs in the desktop shell. */
+  async function pressRetry(): Promise<void> {
+    const shell = platform as { name: string };
+    const was = shell.name;
+    shell.name = "tauri";
+    try {
+      await retrySpeechModelDownload();
+    } finally {
+      shell.name = was;
+    }
+  }
+
+  it("asks for the file the card is about, not for the file the last language this PC heard would need", async () => {
+    // The smaller file is here and the last language was English, so the plan says the smaller file. A request names
+    // Arabic while offline: the full-size file is asked for, cannot be fetched, and the card is about THAT file.
+    noChip();
+    lastHeard("en");
+    const r = rig({ installed: [SMALL] });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "ar").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    expect(useModelDownload.getState()).toMatchObject({ failure: "network", failureKey: FULL });
+
+    fetchedUrls.length = 0;
+    await pressRetry();
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+    // It failed again, offline: the card is back, about the same file, with its Retry.
+    expect(useModelDownload.getState()).toMatchObject({ failure: "network", failureKey: FULL });
+  });
+
+  it("asks for the file that failed even when the language this PC last heard has moved to one that needs the other", async () => {
+    // Nothing is known and nothing is installed: the app's start fetches the smaller file, which fails offline.
+    noChip();
+    await pressRetry();
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[SMALL]));
+    expect(useModelDownload.getState()).toMatchObject({ failure: "network", failureKey: SMALL });
+
+    // Meanwhile the PC heard Arabic: the plan would now name the full-size file, but the card is about the smaller one.
+    lastHeard("ar");
+    fetchedUrls.length = 0;
+    await pressRetry();
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[SMALL]));
   });
 });
 

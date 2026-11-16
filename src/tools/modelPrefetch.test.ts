@@ -197,3 +197,63 @@ describe("the person pressing Retry on the failure card", () => {
     await expect(retrySpeechModelDownload()).resolves.toBeUndefined();
   });
 });
+
+// With two model files, the card says "Could not download the speech model" about ONE of them: Retry asks for that
+// file, whatever the plan names now (which can be a file that is already here: nothing would be retried and the card
+// would simply be gone).
+describe("the file a Retry asks for", () => {
+  const offline = async (): Promise<never> => {
+    throw new Error("network error");
+  };
+
+  it("is the file the failure card was about, once; a plain start asks the plan's, with no second argument", async () => {
+    const e = env(async () => ({ path: "m", downloaded: true }));
+    await startSpeechModelPrefetch(e.environment);
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX);
+
+    setModelDownloadFailure("network", "small");
+    await retrySpeechModelDownload();
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX, "small");
+
+    // The card is gone and the ask is spent: the next start is the plan's again.
+    expect(useModelDownload.getState()).toMatchObject({ failure: null, failureKey: null });
+    await startSpeechModelPrefetch(e.environment);
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX);
+    expect(e.ensure).toHaveBeenCalledTimes(3);
+  });
+
+  it("is the plan's when the card has no file, as a failure said without one has", async () => {
+    const e = env(async () => ({ path: "m", downloaded: true }));
+    await startSpeechModelPrefetch(e.environment);
+    setModelDownloadFailure("network");
+    await retrySpeechModelDownload();
+    expect(e.ensure).toHaveBeenCalledTimes(2);
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX);
+  });
+
+  it("reaches the round whose wait Retry ends, and the next round of a session that keeps failing", async () => {
+    const e = env(offline);
+    let wakeUp!: () => void;
+    // The wait is a minute the test never lets pass: only Retry, then the test, end it.
+    e.environment.sleep = (ms) => new Promise<void>((resolve) => ((wakeUp = resolve), void ms));
+    const running = startSpeechModelPrefetch(e.environment);
+    await vi.waitFor(() => expect(e.ensure).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useModelDownload.getState().nextAttemptAt).not.toBeNull());
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX);
+
+    // A request's download of the OTHER file failed while the round waited: that is what the card is about.
+    setModelDownloadFailure("network", "small");
+    const retried = retrySpeechModelDownload();
+    await vi.waitFor(() => expect(e.ensure).toHaveBeenCalledTimes(2));
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX, "small");
+    expect(retried).toBe(running);
+
+    // That failed too and the card is about the same file again: the round the app makes by itself asks for it.
+    await vi.waitFor(() => expect(useModelDownload.getState().nextAttemptAt).not.toBeNull());
+    setModelDownloadFailure("network", "small");
+    wakeUp();
+    await vi.waitFor(() => expect(e.ensure).toHaveBeenCalledTimes(3));
+    expect(e.ensure).toHaveBeenLastCalledWith(CTX, "small");
+    await running;
+  });
+});

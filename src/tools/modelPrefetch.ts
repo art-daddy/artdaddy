@@ -6,7 +6,11 @@
 // While it runs, the pill on screen says what it is, how far it is, and that it can be cancelled;
 // a look that needs the model in the meantime joins this download and answers within its bound.
 import { platform } from "../platform";
-import { setModelDownloadFailure, setModelNextAttemptAt } from "../store/modelDownload";
+import {
+  setModelDownloadFailure,
+  setModelNextAttemptAt,
+  useModelDownload,
+} from "../store/modelDownload";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import {
@@ -20,7 +24,9 @@ import { ensureLaunchModel } from "./transcribe";
 export interface PrefetchEnv {
   /** A context whose store lies under the app's data root, or null where there is no desktop. */
   context(): Promise<ClientToolContext | null>;
-  ensure(ctx: ClientToolContext): Promise<unknown>;
+  /** The model file to have: the one this PC's plan names, or, when it is given, that manifest key (the file a
+   *  failure card was about, asked for again by Retry). */
+  ensure(ctx: ClientToolContext, key?: string): Promise<unknown>;
   sleep(ms: number): Promise<void>;
 }
 
@@ -38,6 +44,9 @@ let session: Promise<void> | null = null;
 let lastEnv: PrefetchEnv | null = null;
 /** Ends the wait between two rounds now; set only while a round is waiting. */
 let cutWait: (() => void) | null = null;
+/** The file the failure card was about when Retry was pressed, until a round has asked for it: Retry downloads THAT
+ *  file, not whatever the plan names now (which can be a file that is already here). */
+let retryFor: string | null = null;
 
 /** Start fetching the speech model if it is not on this machine. Never rejects, and costs nothing
  *  when the model is already there (its checksum was verified when it landed). A person who
@@ -52,9 +61,11 @@ export function startSpeechModelPrefetch(env: PrefetchEnv = productionEnv): Prom
 }
 
 /** The person pressed Retry on the failure card: a Cancel is forgotten, the card goes, and the model is
- *  asked for now. A round that is waiting for its turn starts at once; with none running, exactly one round
- *  is made, and when it fails the card returns. Never rejects. */
+ *  asked for now, the file the card was about. A round that is waiting for its turn starts at once; with none
+ *  running, exactly one round is made, and when it fails the card returns. Never rejects. */
 export function retrySpeechModelDownload(): Promise<void> {
+  const failed = useModelDownload.getState().failureKey;
+  if (failed !== null) retryFor = failed;
   clearModelDecline();
   setModelDownloadFailure(null);
   if (session) {
@@ -73,7 +84,10 @@ async function run(env: PrefetchEnv, waits: readonly number[]): Promise<void> {
     if (!ctx) return;
     for (let round = 0; ; round++) {
       try {
-        await env.ensure(ctx);
+        // The file the card is about, when there is a card: Retry's, or the one that failed last; else the plan's.
+        const asked = retryFor ?? useModelDownload.getState().failureKey;
+        retryFor = null;
+        await (asked === null ? env.ensure(ctx) : env.ensure(ctx, asked));
         return;
       } catch (e) {
         if (isCancelledDownload(e)) {
@@ -110,6 +124,7 @@ export function __resetPrefetch(): void {
   session = null;
   lastEnv = null;
   cutWait = null;
+  retryFor = null;
   __resetModelDecline();
 }
 
@@ -118,21 +133,28 @@ const NO_COMMANDS: CommandRunner = {
   run: async () => ({ code: 1, stdout: "", stderr: "the model download runs no commands" }),
 };
 
-const productionEnv: PrefetchEnv = {
-  async context() {
-    if (platform.name !== "tauri") return null;
-    const [{ TauriFs }, { ProjectStoreAccess, joinPath }, { projectsRoot }] = await Promise.all([
-      import("./tauri"),
-      import("./store"),
-      import("./dataRoot"),
-    ]);
-    // The model lives under the data root, which a project directory two levels down names; no
-    // project is created or opened.
-    const dir = joinPath(await projectsRoot(), "_app");
-    return { store: new ProjectStoreAccess(dir, new TauriFs()), runner: NO_COMMANDS };
-  },
-  // The file this PC's plan names (speechModel.ts): the smaller one on a PC that transcribes on its processor and
-  // holds neither file, the full-size one everywhere else, and nothing at all where a file the plan accepts is here.
-  ensure: (ctx) => ensureLaunchModel(ctx),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-};
+/** The way the app fetches the model, over a given way to get a context: the app's own ({@link productionEnv}),
+ *  or, in a test, one whose context holds files. */
+export function prefetchEnvFor(context: PrefetchEnv["context"]): PrefetchEnv {
+  return {
+    context,
+    // The file this PC's plan names (speechModel.ts): the smaller one on a PC that transcribes on its processor and
+    // holds neither file, the full-size one everywhere else, and nothing at all where a file the plan accepts is here;
+    // or, for a Retry, the file the failure card was about.
+    ensure: (ctx, key) => ensureLaunchModel(ctx, key),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+}
+
+const productionEnv: PrefetchEnv = prefetchEnvFor(async () => {
+  if (platform.name !== "tauri") return null;
+  const [{ TauriFs }, { ProjectStoreAccess, joinPath }, { projectsRoot }] = await Promise.all([
+    import("./tauri"),
+    import("./store"),
+    import("./dataRoot"),
+  ]);
+  // The model lives under the data root, which a project directory two levels down names; no
+  // project is created or opened.
+  const dir = joinPath(await projectsRoot(), "_app");
+  return { store: new ProjectStoreAccess(dir, new TauriFs()), runner: NO_COMMANDS };
+});

@@ -754,8 +754,9 @@ async function downloadModel(
   } finally {
     clearModelDownload();
     finishActivity();
-    // After the progress is cleared: the card replaces the pill, never sits beside it.
-    if (failure !== null) setModelDownloadFailure(failure);
+    // After the progress is cleared: the card replaces the pill, never sits beside it. It remembers which file it is
+    // about, so that its Retry asks for that file.
+    if (failure !== null) setModelDownloadFailure(failure, size);
   }
 }
 
@@ -1427,10 +1428,15 @@ async function planFor(
 }
 
 /** The file the launch prefetch fetches: the one the plan for this PC names while no language is asked for (the
- *  last language this PC detected, if any, as a guess). A PC that already holds a file the plan accepts fetches nothing. */
+ *  last language this PC detected, if any, as a guess). A PC that already holds a file the plan accepts fetches nothing.
+ *  `retry` is the manifest key of the file a failure card was about, when the person pressed Retry on it: that file is
+ *  asked for, not whatever the plan names now (it may be one that is already here, which would retry nothing). */
 export async function ensureLaunchModel(
   ctx: ClientToolContext,
+  retry?: string,
 ): Promise<{ path: string; downloaded: boolean }> {
+  if (retry !== undefined && Object.hasOwn(WHISPER_MODELS, retry))
+    return ensureWhisperModel(ctx, retry);
   const plan = await planForLanguage(ctx, lastSpeechLanguage(), true);
   return ensureWhisperModel(ctx, plan.key);
 }

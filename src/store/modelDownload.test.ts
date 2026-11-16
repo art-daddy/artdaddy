@@ -7,9 +7,12 @@ import {
   formatEta,
   megabytes,
   MODEL_DOWNLOAD_NOTE,
+  MODEL_DOWNLOAD_NOTE_AGAIN,
   modelDownloadMessage,
+  modelDownloadNote,
   percent,
   reportModelDownload,
+  setModelDownloadAgain,
   setModelDownloadCancel,
   setModelDownloadFailure,
   setModelNextAttemptAt,
@@ -41,6 +44,23 @@ describe("modelDownloadMessage", () => {
     expect(MODEL_DOWNLOAD_NOTE).toBe(
       "This only happens when you start the app for the first time.",
     );
+  });
+
+  // A second model file (another one is already on this PC) is not "the first time you start the app": the owner's
+  // words would be untrue of it, so it says it is another model and that it only happens once.
+  it("says another model, and nothing about the first start, for a second file", () => {
+    expect(modelDownloadMessage(Math.round(TOTAL * 0.4), TOTAL, null, true)).toBe(
+      "Downloading another speech model (about 465 MB) - 40%",
+    );
+    expect(modelDownloadMessage(Math.round(TOTAL * 0.4), TOTAL, 130, true)).toBe(
+      "Downloading another speech model (about 465 MB) - 40%, about 3 min left",
+    );
+    expect(modelDownloadNote(true)).toBe(MODEL_DOWNLOAD_NOTE_AGAIN);
+    expect(modelDownloadNote(false)).toBe(MODEL_DOWNLOAD_NOTE);
+    expect(modelDownloadNote()).toBe(MODEL_DOWNLOAD_NOTE);
+    // The rule that survives a rewrite of the words: no claim about the first start or about "one time".
+    for (const said of [modelDownloadMessage(1, TOTAL, null, true), MODEL_DOWNLOAD_NOTE_AGAIN])
+      expect(said).not.toMatch(/first time|one time|for the first/i);
   });
 
   it("sizes in MiB, which is the unit the model is measured in", () => {
@@ -162,6 +182,45 @@ describe("the download that failed, and the round that is waiting", () => {
     setModelDownloadFailure("disk_write");
     setModelDownloadFailure(null);
     expect(useModelDownload.getState()).toMatchObject({ received: 120, total: 400, failure: null });
+  });
+
+  it("remembers which file it is about, for as long as it lasts and no longer: its Retry asks for that file", () => {
+    setModelDownloadFailure("network", "small");
+    expect(useModelDownload.getState()).toMatchObject({ failure: "network", failureKey: "small" });
+    // The download ending leaves the card, so it leaves the file the card is about.
+    clearModelDownload();
+    expect(useModelDownload.getState().failureKey).toBe("small");
+    // A new download begins: the card is over.
+    reportModelDownload(0, 400);
+    expect(useModelDownload.getState()).toMatchObject({ failure: null, failureKey: null });
+    clearModelDownload();
+    // A dismissed card has no file, and a failure said without one does not keep an old one.
+    setModelDownloadFailure("disk_write", "small_q8_0");
+    setModelDownloadFailure(null);
+    expect(useModelDownload.getState().failureKey).toBeNull();
+    setModelDownloadFailure("disk_write", "small_q8_0");
+    setModelDownloadFailure("network");
+    expect(useModelDownload.getState()).toMatchObject({ failure: "network", failureKey: null });
+  });
+});
+
+describe("the download that is a second model file", () => {
+  afterEach(() => clearModelDownload());
+
+  it("is said by a report, left alone by one that does not say, and over with the download", () => {
+    reportModelDownload(0, 400, true);
+    expect(useModelDownload.getState().again).toBe(true);
+    reportModelDownload(100, 400);
+    expect(useModelDownload.getState().again).toBe(true);
+    clearModelDownload();
+    expect(useModelDownload.getState().again).toBe(false);
+    reportModelDownload(0, 400);
+    expect(useModelDownload.getState().again).toBe(false);
+    // Learned from the disk while the download runs.
+    setModelDownloadAgain(true);
+    expect(useModelDownload.getState().again).toBe(true);
+    reportModelDownload(100, 400, false);
+    expect(useModelDownload.getState().again).toBe(false);
   });
 });
 
