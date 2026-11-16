@@ -9,7 +9,7 @@ WHAT NEVER LEAVES YOUR MACHINE
 
 - Your media. Files are referenced where they already sit on disk. They are not copied to a cloud library and they are not uploaded in order to be edited.
 - Editing and export. Rendering runs locally through a bundled copy of ffmpeg. Exported files are written to a folder you choose.
-- Transcription. Speech-to-text runs on your own machine using Whisper. Audio is not sent anywhere for captioning or search. The Whisper speech model itself, about 465 MB (about 252 MB when the app already knows the PC transcribes on its processor), is downloaded once, the first time you start the app (see "The speech model" below).
+- Transcription. Speech-to-text runs on your own machine using Whisper. Audio is not sent anywhere for captioning or search. The Whisper speech model itself, about 465 MB (about 252 MB when the app already knows the PC transcribes on its processor), is downloaded once, the first time you start the app; on a PC that starts with the 252 MB file, a second download of the full-size model can follow later for some languages (see "The speech model" below).
 - Your projects. A project is an ordinary folder on your disk.
 
 The application is open source under GPL-3.0, so the code that touches your files is public: https://github.com/art-daddy/artdaddy
@@ -33,7 +33,7 @@ If you never use an AI feature, none of this happens. ArtDaddy is a complete edi
 
 The speech model
 
-The first time you start ArtDaddy it downloads the speech-recognition model that Whisper uses, once. It comes from Hugging Face (huggingface.co), where the model is published. When Hugging Face is unavailable, the app asks a second place, models.artdaddy.app, which ArtDaddy runs on Cloudflare's network. Each place the app asks sees your IP address and which file you asked for, as any website does; nothing about you, your media or your projects is sent with the request. The file is about 252 MB when the app already knows the PC transcribes on its processor and about 465 MB otherwise; in the first case the full-size file, about 465 MB, is downloaded as well, once, the first time Arabic is transcribed, because Arabic keeps the full-size model. The app checks the file's size and its fixed checksum itself before it uses it, wherever it came from. You can cancel the download from the progress shown in the app; transcription then waits until the model has been downloaded.
+The first time you start ArtDaddy it downloads the speech-recognition model that Whisper uses, once. It comes from Hugging Face (huggingface.co), where the model is published. When Hugging Face is unavailable, the app asks a second place, models.artdaddy.app, which ArtDaddy runs on Cloudflare's network. Each place the app asks sees your IP address and which file you asked for, as any website does; nothing about you, your media or your projects is sent with the request. The file is about 252 MB when the app already knows the PC transcribes on its processor and about 465 MB otherwise; in the first case the full-size file, about 465 MB, is downloaded as well, once, the first time you transcribe speech in Arabic or in another language the smaller model has not yet been checked for, because those languages keep the full-size model. The app checks the file's size and its fixed checksum itself before it uses it, wherever it came from. You can cancel the download from the progress shown in the app; transcription then waits until the model has been downloaded.
 
 Your account
 
