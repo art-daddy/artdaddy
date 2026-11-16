@@ -52,6 +52,7 @@ import { assertLaunchArgv, processorBeam } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
 import { __resetWordTimesShipped, __setWordTimesShipped, DTW_ARGS } from "./speechWordTimes";
 import {
+  __resetModelDownloads,
   __resetSmallerFileFailure,
   __setDownloadPolicy,
   ensureLaunchModel,
@@ -226,6 +227,8 @@ beforeEach(() => {
   lastCheck.passed.length = 0;
   lastCheck.unchecked.length = 0;
   __resetWorkGate();
+  // An install a test left running (a failed assertion before its Cancel) must not make the next one wait for it.
+  __resetModelDownloads();
   __resetSmallerFileFailure();
   __setDownloadPolicy(SINGLE_ATTEMPT);
   hostIs(WINDOWS_UA);
@@ -630,7 +633,7 @@ describe("the file the app fetches when it starts", () => {
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
   });
 
-  it("is nothing at all on a PC that holds only the smaller file, even when the last language it heard was Arabic: a guess fetches nothing", async () => {
+  it("is nothing at all on a PC that holds only the smaller file, even when the last language it heard was Arabic: a guess fetches nothing while a file is here", async () => {
     noChip();
     localStorage.setItem("artdaddy.speech_language", "ar");
     const r = rig({ installed: [SMALL] });

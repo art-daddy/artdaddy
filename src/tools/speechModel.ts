@@ -4,8 +4,9 @@
 // path, the launch with `-ng`, never on the graphics chip; and a language the gate did not clear on the processor
 // uses the baseline file on every path and is never kept from the smaller one. (The one exception is to the PLAN, never
 // to what is kept: a language that is only PREDICTED may start on the smaller file when it is here and the baseline
-// file is not, so that a guess never makes a PC download anything; the commit point sends a wrong guess back.) A PC
-// with a graphics chip is planned exactly as it was before this existed.
+// file is not, so that a guess does not make a PC that holds the smaller file download the baseline one; with neither
+// file here a guess still picks a file to fetch. The commit point sends a wrong guess back.) A PC with a graphics chip
+// is planned exactly as it was before this existed.
 //
 // Two authorities, and nothing copied from them: the manifest (`backends` of an entry says which paths a FILE may
 // be launched on) and the accuracy gate (speechGate.json says which LANGUAGE a variant is cleared for, on which path,
@@ -49,8 +50,9 @@ export interface PlanInput {
   /** The manifest keys whose file is whole on disk. Keys the manifest does not have are ignored. */
   installed: readonly string[];
   /** True when `language` is only a GUESS (the last language this PC heard), not one the request named and not one
-   *  the engine has just heard. A guess never makes the app fetch a file for a language the smaller file is not
-   *  cleared for while the smaller file is here: see {@link planModel}. Anything but `true` is not a guess. */
+   *  the engine has just heard. A guess does not make the app fetch a file for a language the smaller file is not
+   *  cleared for while the smaller file is here and the baseline file is not: see {@link planModel}. With neither file
+   *  here it still picks a file to fetch. Anything but `true` is not a guess. */
   predicted?: boolean;
   /** True when the engine failed on the smaller file on this PC and the full-size file then ran the same request: the
    *  smaller file is the likely cause, so it is not planned (every language is planned as on any PC that runs the

@@ -3,8 +3,8 @@
 // The invariant under test: the 8-bit file is launched on the processor path and never on the graphics chip; a
 // language the gate did not clear on the processor uses today's file on every path (a language that is only a
 // prediction may start on the smaller file when that is the one that is here: nothing is kept from it, and a guess
-// never makes a PC download); a PC with a graphics chip is planned exactly as before. The oracles here are NOT the
-// module: they are the study's own table (the document's
+// does not make a PC that holds only the smaller file download the other one); a PC with a graphics chip is planned
+// exactly as before. The oracles here are NOT the module: they are the study's own table (the document's
 // section 10.1, __fixtures__/speechGateCpuS1.json), the raw cells of the gate re-read with the owner's rule, the
 // frozen answers of the old code (speechDecodingFreeze.json), and the manifest's own `backends`.
 import fc from "fast-check";
@@ -398,9 +398,9 @@ describe("planModel on a PC with no usable graphics chip", () => {
   });
 });
 
-// A language that is only a GUESS (the last one this PC heard) never makes a PC fetch a file: the plan for it names a
-// file that is here whenever one is, and the commit point still refuses what a wrong guess made. A language that was
-// named or heard keeps the rule above (the baseline file, downloaded when it is not here).
+// A language that is only a GUESS (the last one this PC heard) does not make a PC that holds a file fetch the other:
+// the plan for it names a file that is here whenever one is, and the commit point still refuses what a wrong guess
+// made. A language that was named or heard keeps the rule above (the baseline file, downloaded when it is not here).
 const guess = (
   backend: SpeechBackend,
   language: string | null,
@@ -442,7 +442,7 @@ describe("planModel for a language that is only predicted", () => {
       );
   });
 
-  it("names a file that is installed whenever one is, on the processor with the owner's switch off: a guess never needs a download", () => {
+  it("names a file that is installed whenever one is, on the processor with the owner's switch off: a guess needs no download while a file is here", () => {
     fc.assert(
       fc.property(
         fc.oneof(fc.constantFrom(...SPELLINGS), fc.string(), fc.constant(null)),

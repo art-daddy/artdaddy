@@ -705,11 +705,11 @@ async function downloadModel(
   // The pill's Cancel stops this install, whoever is waiting for it.
   setModelDownloadCancel(cancelModelDownload);
   // Whether this is a second model file is read off the disk beside the download and told to the screens when it is
-  // known: the first request never waits for the words on them.
+  // known: the first request never waits for the words on them. The file being downloaded is not asked about.
   let over = false;
-  void installedModels(ctx).then(
+  void installedModels(ctx, size).then(
     (here) => {
-      self.again = here.some((other) => other !== size);
+      self.again = here.length > 0;
       if (!over) setModelDownloadAgain(self.again);
     },
     () => undefined,
@@ -1461,10 +1461,13 @@ function engineFailedOnSmallerFile(e: unknown, plan: ModelPlan): boolean {
   return e instanceof SyntaxError;
 }
 
-/** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed). */
-async function installedModels(ctx: ClientToolContext): Promise<string[]> {
+/** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed).
+ *  `except`: a key that is not asked about, the file a download is making: it is not here, and reading it again could
+ *  mean reading all of it for its checksum. */
+async function installedModels(ctx: ClientToolContext, except?: string): Promise<string[]> {
   const here: string[] = [];
   for (const [key, spec] of Object.entries(WHISPER_MODELS)) {
+    if (key === except) continue;
     try {
       if (await validModel(ctx, whisperModelPath(ctx.store.projectDir, key, spec.file), spec))
         here.push(key);
@@ -1476,7 +1479,8 @@ async function installedModels(ctx: ClientToolContext): Promise<string[]> {
 }
 
 /** The plan for a language that is known (named, predicted or just detected), on the path a run started now takes.
- *  `predicted`: the language is only a guess from the last run, which never makes the PC fetch a file (speechModel.ts). */
+ *  `predicted`: the language is only a guess from the last run, which does not make a PC that holds the smaller file
+ *  fetch the full-size one (speechModel.ts). */
 async function planForLanguage(
   ctx: ClientToolContext,
   language: string | null,
@@ -1497,8 +1501,9 @@ function replanFor(ctx: ClientToolContext, detected: string): Promise<ModelPlan>
 }
 
 /** What to run with, BEFORE the run. A named language is known; "auto" is predicted from the last language this
- *  machine detected and CHECKED once the engine has said (finishWhisper), and a prediction never makes the PC fetch a
- *  file. A model size the gate did not measure is never narrowed, and a re-run is given what it was sent for. */
+ *  machine detected and CHECKED once the engine has said (finishWhisper), and a prediction does not make a PC that
+ *  holds the smaller file fetch the full-size one. A model size the gate did not measure is never narrowed, and a
+ *  re-run is given what it was sent for. */
 async function planFor(
   ctx: ClientToolContext,
   size: string,

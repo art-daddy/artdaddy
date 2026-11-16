@@ -70,6 +70,7 @@ import { DEFAULT_BEAM, SPEECH_LANGUAGE_KEY } from "./speechDecoding";
 import { TranscriptionFailure } from "./speechFailure";
 import { recordSpeechRun } from "./speechPace";
 import {
+  __resetModelDownloads,
   __resetSmallerFileFailure,
   __setDownloadPolicy,
   ensureTranscripts,
@@ -225,6 +226,8 @@ beforeEach(() => {
   lastCheck.passed.length = 0;
   lastCheck.unchecked.length = 0;
   __resetWorkGate();
+  // An install a test left running (a failed assertion before its Cancel) must not make the next one wait for it.
+  __resetModelDownloads();
   __resetSmallerFileFailure();
   __resetPrefetch();
   clearModelDownload();

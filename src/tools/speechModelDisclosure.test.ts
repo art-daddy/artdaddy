@@ -44,7 +44,10 @@ describe("the privacy text about the second, full-size download", () => {
     const said = sentences(readFileSync(PRIVACY, "utf8")).filter(
       (s) => /full-size/i.test(s) && /\bas well\b/i.test(s),
     );
-    expect(said.length, "the policy says when the full-size file is downloaded as well").toBeGreaterThan(0);
+    expect(
+      said.length,
+      "the policy says when the full-size file is downloaded as well",
+    ).toBeGreaterThan(0);
     for (const sentence of said) {
       if (fullSizeLanguages.length > 1)
         expect(
