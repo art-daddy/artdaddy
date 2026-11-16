@@ -8,11 +8,16 @@
 // reads it. A language the gate cleared for a setting decodes with it. Every other language, and any
 // language not known yet, keeps the engine's default, with exactly the arguments it always had.
 //
+// A setting records the path it was measured on (one that names none is a graphics-chip measurement), because
+// the two paths give different results for one file. beamFor and greedyTable read the chip's only; the
+// processor's are read through clearedOn, by speechModel.ts, which chooses the file a processor-only PC uses.
+//
 // Without a named language the language is only known AFTER the engine has run. So the first run
 // PREDICTS it from what this machine last detected, and the result is CHECKED: a setting narrower
 // than the one the detected language needs is never kept. finishWhisper refuses it and runWhisper
 // runs again at the width that language needs.
 import evidence from "./speechGate.json";
+import type { SpeechBackend } from "./speechPace";
 import { whisperCode } from "./whisperLanguages";
 
 /** The engine's own default beam, and so every transcript made before this existed. */
@@ -43,6 +48,11 @@ export interface GateSetting {
   variant: string;
   beam: number;
   flags: readonly string[];
+  /** The engine path the setting was measured on. Absent means the graphics chip, which is what every setting was
+   *  before the processor was measured. The two paths give different results for one file (Dutch and Arabic cross
+   *  the line on one and not the other), so a chip measurement is never read for a processor launch, nor the
+   *  other way round. */
+  backend?: SpeechBackend;
 }
 export interface GateEvidence {
   settings: Readonly<Record<string, GateSetting>>;
@@ -73,17 +83,48 @@ export function clearedLanguages(rows: readonly GateRow[], settingId: string): R
   return new Set([...allClear].filter(([, ok]) => ok).map(([language]) => language));
 }
 
-/** For each model variant, the languages greedy decoding is cleared for. */
+/** The path a setting was measured on: the chip unless it says the processor. A setting that names any other path
+ *  is on none, so it clears nothing anywhere. */
+export function measuredOn(setting: Pick<GateSetting, "backend">): SpeechBackend | null {
+  const where: unknown = setting.backend;
+  return where === undefined || where === "gpu" ? "gpu" : where === "cpu" ? "cpu" : null;
+}
+
+/** For each model variant, the languages greedy decoding is cleared for on the graphics chip, which is what
+ *  {@link beamFor} reads. A setting measured on the processor is not read here: see {@link clearedOn}. */
 export function greedyTable(ev: GateEvidence): ReadonlyMap<ModelVariant, ReadonlySet<string>> {
   const table = new Map<ModelVariant, ReadonlySet<string>>();
   for (const [id, setting] of Object.entries(ev.settings)) {
-    if (setting.beam === GREEDY_BEAM && isVariant(setting.variant))
+    const onChip = measuredOn(setting) === "gpu";
+    if (onChip && setting.beam === GREEDY_BEAM && isVariant(setting.variant))
       table.set(setting.variant, clearedLanguages(ev.rows, id));
   }
   return table;
 }
 
-const GREEDY = greedyTable(evidence as GateEvidence);
+/** For each model variant and beam width, the languages the gate cleared on `backend`'s own measurements. What was
+ *  measured on the other path says nothing here. When two settings measure one variant and width on one path, a
+ *  language is cleared only if both clear it. */
+export function clearedOn(
+  ev: GateEvidence,
+  backend: SpeechBackend,
+): ReadonlyMap<ModelVariant, ReadonlyMap<number, ReadonlySet<string>>> {
+  const table = new Map<ModelVariant, Map<number, ReadonlySet<string>>>();
+  for (const [id, setting] of Object.entries(ev.settings)) {
+    if (measuredOn(setting) !== backend || !isVariant(setting.variant)) continue;
+    const byBeam = table.get(setting.variant) ?? new Map<number, ReadonlySet<string>>();
+    const cleared = clearedLanguages(ev.rows, id);
+    const before = byBeam.get(setting.beam);
+    byBeam.set(setting.beam, before ? new Set([...before].filter((l) => cleared.has(l))) : cleared);
+    table.set(setting.variant, byBeam);
+  }
+  return table;
+}
+
+/** The gate's evidence as the app ships it. */
+export const SHIPPED_EVIDENCE: GateEvidence = evidence as GateEvidence;
+
+const GREEDY = greedyTable(SHIPPED_EVIDENCE);
 
 /** The beam this language decodes with on this model file: greedy where the gate cleared it, the
  *  engine's default everywhere else (and for any language it cannot name). */
