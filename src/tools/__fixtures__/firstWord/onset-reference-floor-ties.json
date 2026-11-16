@@ -1,0 +1,117 @@
+{
+ "about": "Ties on a two-valued floor (work/freeze_floor_ties.py); expectations are the study's reference answers; never regenerate to make a test pass.",
+ "cases": [
+  {
+   "id": "tie-two-valued-floor-0",
+   "what": "3 frames exactly on the threshold of a floor interpolated between two different quiet levels (index 0.6 of 7 frames): the study's two-sided interpolation answers one thing, `lower + span * weight` another",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 1,
+     "first": 0.004390931026106345
+    },
+    {
+     "count": 3,
+     "first": 0.02203729712236814
+    },
+    {
+     "count": 3,
+     "first": 0.06500086759061452
+    }
+   ],
+   "reference": {
+    "onset_ms": 80
+   },
+   "plain_interpolation_would_answer": null,
+   "floor_ref": -63.79311638686324,
+   "floor_plain": -63.79311638686323,
+   "threshold_ref": -48.79311638686324,
+   "threshold_plain": -48.79311638686323,
+   "loud_level": -48.79311638686323
+  },
+  {
+   "id": "tie-two-valued-floor-1",
+   "what": "3 frames exactly on the threshold of a floor interpolated between two different quiet levels (index 0.6 of 7 frames): the study's two-sided interpolation answers one thing, `lower + span * weight` another",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 1,
+     "first": 0.004555197754338257
+    },
+    {
+     "count": 3,
+     "first": 0.022163237926037933
+    },
+    {
+     "count": 3,
+     "first": 0.06618875741952585
+    }
+   ],
+   "reference": {
+    "onset_ms": null
+   },
+   "plain_interpolation_would_answer": 80,
+   "floor_ref": -63.63581490537104,
+   "floor_plain": -63.63581490537105,
+   "threshold_ref": -48.63581490537104,
+   "threshold_plain": -48.63581490537105,
+   "loud_level": -48.63581490537104
+  },
+  {
+   "id": "tie-two-valued-floor-2",
+   "what": "3 frames exactly on the threshold of a floor interpolated between two different quiet levels (index 0.6 of 7 frames): the study's two-sided interpolation answers one thing, `lower + span * weight` another",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 1,
+     "first": 0.004514250138155292
+    },
+    {
+     "count": 3,
+     "first": 0.021086942855046784
+    },
+    {
+     "count": 3,
+     "first": 0.06400941548951869
+    }
+   ],
+   "reference": {
+    "onset_ms": null
+   },
+   "plain_interpolation_would_answer": 80,
+   "floor_ref": -63.92662221608354,
+   "floor_plain": -63.926622216083544,
+   "threshold_ref": -48.92662221608354,
+   "threshold_plain": -48.926622216083544,
+   "loud_level": -48.92662221608354
+  },
+  {
+   "id": "tie-two-valued-floor-3",
+   "what": "3 frames exactly on the threshold of a floor interpolated between two different quiet levels (index 0.6 of 7 frames): the study's two-sided interpolation answers one thing, `lower + span * weight` another",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 1,
+     "first": 0.004827042179885483
+    },
+    {
+     "count": 3,
+     "first": 0.022517726951145817
+    },
+    {
+     "count": 3,
+     "first": 0.06838934226694829
+    }
+   ],
+   "reference": {
+    "onset_ms": null
+   },
+   "plain_interpolation_would_answer": 80,
+   "floor_ref": -63.35173094735904,
+   "floor_plain": -63.351730947359044,
+   "threshold_ref": -48.35173094735904,
+   "threshold_plain": -48.351730947359044,
+   "loud_level": -48.35173094735904
+  }
+ ]
+}
