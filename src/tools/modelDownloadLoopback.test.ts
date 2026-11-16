@@ -48,8 +48,8 @@ const NO_COMMANDS: CommandRunner = { run: async () => ({ code: 1, stdout: "", st
 
 /** The app's four attempts, without the waiting between them. */
 const FOUR_ATTEMPTS: DownloadPolicy = { stallMs: Infinity, backoffMs: [0, 0, 0] };
-/** The same, with a request that is quiet for half a second counted as stalled. */
-const FOUR_QUICK_STALLS: DownloadPolicy = { stallMs: 500, backoffMs: [0, 0, 0] };
+/** The same, with a request that is quiet for a second counted as stalled. */
+const FOUR_QUICK_STALLS: DownloadPolicy = { stallMs: 1000, backoffMs: [0, 0, 0] };
 
 const KEYS = Object.keys(MODEL_MANIFEST);
 
