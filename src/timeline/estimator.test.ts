@@ -11,7 +11,7 @@ import {
 } from "./costShape";
 import { FEATURE_PRICES, RANGE } from "./costTable";
 import { estimate, type EstimateRequest, type PcPace } from "./estimator";
-import type { ExportCalibration } from "./exportOptions";
+import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
 import { emptyTimeline, type Clip } from "./model";
 import { summarizeRenderWorkload, type RenderWorkload } from "./renderPlan";
 
@@ -87,7 +87,7 @@ const sample = (over: Partial<ExportCalibration> = {}): ExportCalibration => ({
   quality: "medium",
   engine: "file-sequence-v1",
   encoder: "x264-crf",
-  revision: 1,
+  revision: EXPORT_SPEED_REVISION,
   elapsedSeconds: 130,
   finalBytes: 90e6,
   memoryBytes: 1.4e9,
