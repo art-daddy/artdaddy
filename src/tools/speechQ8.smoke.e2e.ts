@@ -464,6 +464,8 @@ describe.skipIf(missing.length > 0)(
       killAlive();
       __setDownloadPolicy(PATIENT_DOWNLOAD);
       for (const undo of restore.splice(0).reverse()) undo();
+      // The app's cache index is written behind a run's back: let the last write land before the folder goes.
+      await new Promise((resolve) => setTimeout(resolve, 400));
       await fsp.rm(SCRATCH, { recursive: true, force: true }).catch(() => undefined);
     });
 
