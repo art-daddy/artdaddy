@@ -331,6 +331,32 @@ describe("what the detector must always do, for any seed and any length", () => 
     );
   });
 
+  it("finds a step from digital silence to noise within one frame of the step, at any sample", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 5 * HOP, max: 300 * HOP }),
+        fc.integer({ min: 0, max: 100_000 }),
+        fc.integer({ min: 1, max: 2 ** 30 }),
+        fc.integer({ min: -45, max: -10 }),
+        (quiet, spare, seed, db) => {
+          // at least a seventh of the frames are silent, so the quietest tenth is silence whatever the length after the step
+          const loudFrames = 5 + (spare % (5 * Math.floor(quiet / HOP)));
+          const samples = render({
+            rate: 16000,
+            seed,
+            segments: [Z(quiet), N(loudFrames * HOP, db)],
+          });
+          const found = speechOnsetMs(samples);
+          const stepMs = (quiet * 1000) / 16000;
+          expect(found).not.toBeNull();
+          expect(found as number).toBeGreaterThan(stepMs - FRAME_MS);
+          expect(found as number).toBeLessThan(stepMs + FRAME_MS);
+        },
+      ),
+      PROPERTY,
+    );
+  });
+
   it("moves the voice by exactly the quiet put in front of it (whole frames of digital silence)", () => {
     fc.assert(
       fc.property(
