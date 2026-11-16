@@ -6,18 +6,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { MODEL_MANIFEST } from "./modelManifest";
+import { WINDOWS_LOAD_FAILURES } from "./speechBackend";
+import { LEADING_QUIET_MS, type VoiceStart } from "./speechLeadingQuiet";
 import {
   __resetWordTimesShipped,
+  __setWordTimesChipShipped,
   __setWordTimesShipped,
   DTW_ARGS,
+  retryWithoutWordTimes,
   segmentFollowsWords,
   settleWords,
   tokenOnSound,
   WINDOW_MS,
+  WORD_TIMES_CHIP_MODELS,
+  WORD_TIMES_CHIP_SHIPPED,
   WORD_TIMES_MODELS,
   WORD_TIMES_SHIPPED,
   wordTimesArgs,
   wordTimesOn,
+  wordTimesPossible,
 } from "./speechWordTimes";
 
 beforeEach(() => {
@@ -30,10 +37,18 @@ afterEach(() => {
 });
 
 const SIZES = ["small", "base", "large", ""];
-const arguments_ = (gate: boolean, flag: boolean, size: string, cpuOnly: boolean): string[] => {
+/** A voice that starts well after the quiet the rule allows. */
+const LATE: VoiceStart = { kind: "at", ms: 2000 };
+const arguments_ = (
+  gate: boolean,
+  flag: boolean,
+  size: string,
+  cpuOnly: boolean,
+  voice: VoiceStart = LATE,
+): string[] => {
   __setWordTimesShipped(gate);
   __setExportFlag("speech_word_times", flag);
-  return wordTimesArgs({ size, cpuOnly });
+  return wordTimesArgs({ size, cpuOnly, voice });
 };
 
 describe("which launches carry word times", () => {
@@ -41,20 +56,42 @@ describe("which launches carry word times", () => {
   // on purpose, after the owner has looked at real captions and a graphics-chip PC has been measured.
   it("ships dark: the build's own gate is off, so nothing carries them", () => {
     expect(WORD_TIMES_SHIPPED).toBe(false);
+    expect(WORD_TIMES_CHIP_SHIPPED).toBe(false);
     expect(wordTimesOn()).toBe(false);
     for (const size of SIZES)
-      for (const cpuOnly of [true, false]) expect(wordTimesArgs({ size, cpuOnly })).toEqual([]);
+      for (const cpuOnly of [true, false])
+        expect(wordTimesArgs({ size, cpuOnly, voice: LATE })).toEqual([]);
   });
 
-  it("is ONE launch of the 32 combinations of gate, flag, size and backend: the processor, on the measured model, with both on", () => {
-    const rows: Array<{ gate: boolean; flag: boolean; size: string; cpuOnly: boolean }> = [];
+  it("is ONE kind of launch of the 192 combinations of gate, flag, size, backend and where the voice starts: the processor, on the measured model, with both on, and a voice that starts more than a second in", () => {
+    const voices: VoiceStart[] = [
+      { kind: "none" },
+      { kind: "unknown" },
+      { kind: "at", ms: 0 },
+      { kind: "at", ms: LEADING_QUIET_MS },
+      { kind: "at", ms: LEADING_QUIET_MS + 20 },
+      LATE,
+    ];
+    const rows: Array<{
+      gate: boolean;
+      flag: boolean;
+      size: string;
+      cpuOnly: boolean;
+      voice: VoiceStart;
+    }> = [];
     for (const gate of [true, false])
       for (const flag of [true, false])
         for (const size of SIZES)
-          for (const cpuOnly of [true, false]) rows.push({ gate, flag, size, cpuOnly });
-    expect(rows).toHaveLength(32);
-    const carrying = rows.filter((r) => arguments_(r.gate, r.flag, r.size, r.cpuOnly).length > 0);
-    expect(carrying).toEqual([{ gate: true, flag: true, size: "small", cpuOnly: true }]);
+          for (const cpuOnly of [true, false])
+            for (const voice of voices) rows.push({ gate, flag, size, cpuOnly, voice });
+    expect(rows).toHaveLength(192);
+    const carrying = rows.filter(
+      (r) => arguments_(r.gate, r.flag, r.size, r.cpuOnly, r.voice).length > 0,
+    );
+    expect(carrying).toEqual([
+      { gate: true, flag: true, size: "small", cpuOnly: true, voice: { kind: "at", ms: 1020 } },
+      { gate: true, flag: true, size: "small", cpuOnly: true, voice: LATE },
+    ]);
     expect(arguments_(true, true, "small", true)).toEqual(["-dtw", "small", "-nfa"]);
   });
 
@@ -70,6 +107,13 @@ describe("which launches carry word times", () => {
     ).toEqual([...WORD_TIMES_MODELS]);
   });
 
+  it("takes the voice's start strictly: exactly one second in is today's, one frame later is not", () => {
+    expect(arguments_(true, true, "small", true, { kind: "at", ms: LEADING_QUIET_MS })).toEqual([]);
+    expect(arguments_(true, true, "small", true, { kind: "at", ms: LEADING_QUIET_MS + 1 })).toEqual(
+      [...DTW_ARGS],
+    );
+  });
+
   it("is 0.27.0 for the opposite ordering: the gate on and the flag off (the operator's way back) carries nothing, on any model and backend", () => {
     for (const size of SIZES)
       for (const cpuOnly of [true, false])
@@ -80,7 +124,7 @@ describe("which launches carry word times", () => {
     const first = arguments_(true, true, "small", true);
     first.push("-x");
     first[0] = "changed";
-    expect(wordTimesArgs({ size: "small", cpuOnly: true })).toEqual([...DTW_ARGS]);
+    expect(wordTimesArgs({ size: "small", cpuOnly: true, voice: LATE })).toEqual([...DTW_ARGS]);
   });
 
   it("follows the flag live: the answer changes when the server's answer does, not only at start", () => {
@@ -90,6 +134,91 @@ describe("which launches carry word times", () => {
     expect(wordTimesOn()).toBe(false);
     __setExportFlag("speech_word_times", true);
     expect(wordTimesOn()).toBe(true);
+  });
+});
+
+describe("which model files and engine paths the alignment was measured for", () => {
+  it("lists only files of the manifest, and the processor path is where the first measurement is", () => {
+    for (const key of [...WORD_TIMES_MODELS, ...WORD_TIMES_CHIP_MODELS])
+      expect(MODEL_MANIFEST[key], key).toBeDefined();
+    expect(WORD_TIMES_MODELS).toEqual(["small"]);
+  });
+
+  it("refuses every file of the manifest that is not listed for the path, on every combination of the switches", () => {
+    __setWordTimesShipped(true);
+    __setWordTimesChipShipped(true);
+    __setExportFlag("speech_word_times", true);
+    for (const key of Object.keys(MODEL_MANIFEST)) {
+      expect(wordTimesPossible({ size: key, cpuOnly: true }), `${key} processor`).toBe(
+        WORD_TIMES_MODELS.includes(key),
+      );
+      expect(wordTimesPossible({ size: key, cpuOnly: false }), `${key} chip`).toBe(
+        WORD_TIMES_CHIP_MODELS.includes(key),
+      );
+    }
+  });
+
+  it("keeps the graphics chip off while its own constant is off, whatever else is on", () => {
+    __setWordTimesShipped(true);
+    __setExportFlag("speech_word_times", true);
+    expect(wordTimesPossible({ size: "small", cpuOnly: false })).toBe(false);
+    expect(wordTimesPossible({ size: "small", cpuOnly: true })).toBe(true);
+    // The chip's constant alone is not enough either: the file must be listed for it.
+    __setWordTimesChipShipped(true);
+    expect(wordTimesPossible({ size: "small", cpuOnly: false })).toBe(
+      WORD_TIMES_CHIP_MODELS.includes("small"),
+    );
+    __setWordTimesShipped(false);
+    expect(wordTimesPossible({ size: "small", cpuOnly: true })).toBe(false);
+    expect(wordTimesPossible({ size: "small", cpuOnly: false })).toBe(false);
+  });
+
+  it("does not let a name from the object prototype or an empty key through", () => {
+    __setWordTimesShipped(true);
+    __setWordTimesChipShipped(true);
+    __setExportFlag("speech_word_times", true);
+    for (const size of ["", "toString", "__proto__", "constructor", "hasOwnProperty"])
+      for (const cpuOnly of [true, false])
+        expect(arguments_(true, true, size, cpuOnly), `${size} ${cpuOnly}`).toEqual([]);
+  });
+});
+
+describe("which launches that carried word times are made once more without them", () => {
+  const failed = {
+    carried: true,
+    stopped: false,
+    code: 1 as number | null,
+    stderr: "",
+    output: "missing" as "readable" | "missing" | "unreadable",
+  };
+
+  it("retries a launch that carried them and ended in failure: a non-zero exit, no output, an output that is not JSON", () => {
+    expect(retryWithoutWordTimes(failed)).toBe(true);
+    expect(retryWithoutWordTimes({ ...failed, code: null })).toBe(true);
+    expect(retryWithoutWordTimes({ ...failed, code: 0, output: "missing" })).toBe(true);
+    expect(retryWithoutWordTimes({ ...failed, code: 0, output: "unreadable" })).toBe(true);
+    expect(retryWithoutWordTimes({ ...failed, code: -1073740791 })).toBe(true);
+    expect(retryWithoutWordTimes({ ...failed, code: 1, output: "readable" })).toBe(true);
+  });
+
+  it("never retries a launch that worked, that did not carry them, or that was stopped", () => {
+    expect(retryWithoutWordTimes({ ...failed, code: 0, output: "readable" })).toBe(false);
+    expect(retryWithoutWordTimes({ ...failed, carried: false })).toBe(false);
+    expect(retryWithoutWordTimes({ ...failed, stopped: true })).toBe(false);
+    expect(retryWithoutWordTimes({ ...failed, stderr: "cancelled" })).toBe(false);
+  });
+
+  it("never retries what a launch without them would end in the same way: an engine that cannot start (every load failure the app knows), a language it does not know", () => {
+    expect(WINDOWS_LOAD_FAILURES.size).toBeGreaterThan(0);
+    for (const code of WINDOWS_LOAD_FAILURES)
+      expect(retryWithoutWordTimes({ ...failed, code }), String(code)).toBe(false);
+    expect(
+      retryWithoutWordTimes({
+        ...failed,
+        code: 0,
+        stderr: "error: unknown language 'xx'\nusage: whisper-cli",
+      }),
+    ).toBe(false);
   });
 });
 

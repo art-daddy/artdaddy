@@ -51,12 +51,16 @@ import { backendNow, backendOfRun, readPace, recordSpeechRun } from "./speechPac
 import { padded, playedSpan, spanWindows } from "./speechSpans";
 import { CAP_S } from "./speechPlan";
 import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
+import { measureVoiceStart } from "./speechLeadingQuiet";
 import {
+  type AlignmentOutput,
+  retryWithoutWordTimes,
   segmentFollowsWords,
   settleWords,
   tokenOnSound,
   wordTimesArgs,
   wordTimesOn,
+  wordTimesPossible,
 } from "./speechWordTimes";
 import { exportFlag, speechModelSources } from "../api/exportFlags";
 import { joinPath } from "./store";
@@ -1807,6 +1811,8 @@ type EngineRun = CommandResult & {
   stoppedBy?: StopReason;
   startupS?: number;
   liveProjectedS?: number;
+  /** This launch carried the word-times arguments (speechWordTimes.ts). Written only when true. */
+  wordTimes?: boolean;
 };
 
 /** A signal that aborts when either `a` or `b` does, and the way to let go of both. */
@@ -1871,6 +1877,65 @@ function noteWordTimes(meta: JobMeta, on: boolean): void {
   }
 }
 
+/** The audio files a launch with `args` is handed: the value of each `-f`. */
+function heardBy(args: readonly string[]): string[] {
+  return args.flatMap((a, i) => (a === "-f" && i + 1 < args.length ? [args[i + 1]] : []));
+}
+
+/** What a launch of `files` adds for the engine's own word times (speechWordTimes.ts): the arguments when the rule allows
+ *  them for this model file and engine path and the voice starts later than a second into the ONE file the launch hears,
+ *  else nothing. Nothing is read from the audio while the rule cannot apply, so a build, a model or a PC where it is off
+ *  does no more than it did. A launch over several files never carries them. Never throws. */
+async function alignmentFor(
+  ctx: ClientToolContext,
+  files: readonly string[],
+  input: { size: string; cpuOnly: boolean },
+): Promise<string[]> {
+  if (!wordTimesPossible(input)) return [];
+  const voice =
+    files.length === 1
+      ? await measureVoiceStart(ctx.store, files[0])
+      : { kind: "unknown" as const };
+  return wordTimesArgs({ ...input, voice });
+}
+
+/** For each of the audio files `wavs` a run over several files was about to hear: would a launch of that file ALONE carry
+ *  the alignment (speechWordTimes.ts)? `model` is the file the run would launch and `key` its manifest key; the engine
+ *  path is the one the launch would take now. Nothing is read, and nothing can fail, while the rule cannot apply. */
+async function alignedAlone(
+  ctx: ClientToolContext,
+  model: string,
+  key: string,
+  wavs: readonly string[],
+): Promise<boolean[]> {
+  if (!wordTimesOn()) return wavs.map(() => false);
+  let cpuOnly: boolean;
+  try {
+    cpuOnly = enginePath(["-m", model], cpuOnlyNow());
+  } catch {
+    return wavs.map(() => false); // the launch itself says what is wrong with the file
+  }
+  const answers: boolean[] = [];
+  for (const wav of wavs)
+    answers.push((await alignmentFor(ctx, [wav], { size: key, cpuOnly })).length > 0);
+  return answers;
+}
+
+/** What a launch that carried the alignment left at its output path: a JSON, nothing, or something that is not one. */
+async function outputState(
+  ctx: ClientToolContext,
+  meta: TranscriptJobMeta,
+): Promise<AlignmentOutput> {
+  const json = `${meta.scratch}.json`;
+  try {
+    if (!(await ctx.store.exists(json))) return "missing";
+    JSON.parse(await ctx.store.readText(json));
+    return "readable";
+  } catch {
+    return "unreadable";
+  }
+}
+
 /** The engine for one run of whisper-cli with `args`, and the way to let go of it afterwards.
  *
  *  In the app, whisper is a job of the app process: a crash of the page neither stops it nor loses its
@@ -1890,13 +1955,16 @@ async function engineFor(
   args: string[],
   meta: JobMeta,
   info: RunInfo,
-  /** The model the run is made with: the engine's word times are measured for one model only. */
+  /** The manifest key of the model file the run is made with: the engine's word times are measured for particular files
+   *  only (speechWordTimes.ts, WORD_TIMES_MODELS). */
   size: string,
 ): Promise<{ engine: () => Promise<EngineRun>; release: () => Promise<void> }> {
   const sup = await jobSupervisor();
   const jobs: string[] = [];
   /** How the run was stopped, if it was: shared by the launches of one run, so a stop never leads to a retry. */
   const stopped: { by: StopReason | null } = { by: null };
+  /** Set once a launch with the alignment has failed: no later launch of this run carries it. */
+  let alignmentFailed = false;
   const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
     // THE place whisper-cli is started (the test "where the engine is started" in speechModelRun.test.ts walks the
     // sources for any other). The model file `args` name says which path it may take: a file the manifest restricts
@@ -1905,9 +1973,15 @@ async function engineFor(
     const onProcessor = enginePath(args, cpuOnly);
     const id = `whisper-${scratchToken()}`;
     jobs.push(id);
-    const wordTimes = wordTimesArgs({ size, cpuOnly: onProcessor });
+    // Decided here, at the spawn, from the path this launch takes and the audio it will be handed (speechWordTimes.ts).
+    // While the rule cannot apply nothing is awaited, so such a launch is started exactly as it was.
+    const alignment = { size, cpuOnly: onProcessor };
+    const wordTimes =
+      alignmentFailed || !wordTimesPossible(alignment)
+        ? []
+        : await alignmentFor(ctx, meta.kind === "transcript" ? heardBy(args) : [], alignment);
     noteWordTimes(meta, wordTimes.length > 0);
-    const run = onProcessor ? [...args, "-ng", ...wordTimes] : args;
+    const run = onProcessor ? [...args, "-ng", ...wordTimes] : [...args, ...wordTimes];
     checkLaunch(run);
     const own = new AbortController();
     const both = eitherSignal(ctx.signal, own.signal);
@@ -1942,6 +2016,7 @@ async function engineFor(
       const end = watch.finish(result.code, stopped.by);
       return {
         ...result,
+        ...(wordTimes.length > 0 ? { wordTimes: true } : {}),
         ...(end.startupS === null ? {} : { startupS: end.startupS }),
         ...(stopped.by ? { stoppedBy: stopped.by } : {}),
         ...(end.liveProjectedS === null ? {} : { liveProjectedS: end.liveProjectedS }),
@@ -1953,13 +2028,32 @@ async function engineFor(
       both.off();
     }
   };
+  /** A launch, and when it carried the alignment and failed, ONE more of the same run without it: the launch 0.27.0
+   *  made, so a PC the alignment does not run on gets today's words and never a failed transcription. It is settled
+   *  before the chip-crash check below sees the result, so a failed alignment is never read as a crash of the chip and
+   *  never keeps it off; a stop is never retried (speechWordTimes.ts, retryWithoutWordTimes). */
+  const launchWithFallback = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
+    const run = await launch(cpuOnly, afterCrash);
+    if (!run.wordTimes || meta.kind !== "transcript") return run;
+    const retry = retryWithoutWordTimes({
+      carried: true,
+      stopped: stopped.by !== null || ctx.signal?.aborted === true,
+      code: run.code,
+      stderr: run.stderr,
+      output: run.code === 0 ? await outputState(ctx, meta) : "missing",
+    });
+    if (!retry) return run;
+    alignmentFailed = true;
+    await ctx.store.remove(`${meta.scratch}.json`).catch(() => undefined);
+    return launch(cpuOnly, afterCrash);
+  };
   const engine = async (): Promise<EngineRun> => {
     // A file that may only run on the processor makes this a processor run from its first launch: no chip is tried,
     // so a crash is never taken for the chip's and no hold is kept for it.
     const cpuOnly = cpuOnlyNow() || enginePath(args, false);
-    const first = await launch(cpuOnly, false);
+    const first = await launchWithFallback(cpuOnly, false);
     if (stopped.by || cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
-    const second = await launch(true, true);
+    const second = await launchWithFallback(true, true);
     if (stopped.by) return second;
     const worked = second.code === 0;
     if (worked) holdCpuOnly(first.code);
@@ -2533,8 +2627,18 @@ async function runTogether(
           settle(n, { error });
         }
       }
+      // The alignment is for a launch over ONE file (speechWordTimes.ts): a file whose voice starts late leaves this run
+      // and is run alone after it, as a file the run missed is. Nothing is read while the rule cannot apply.
+      const lateOnes = await alignedAlone(
+        ctx,
+        model,
+        plan.key,
+        ready.map((n) => wavs[n]),
+      );
+      const late = ready.filter((_, i) => lateOnes[i]);
+      for (const n of late) ready.splice(ready.indexOf(n), 1);
       if (ready.length < 2) {
-        for (const n of ready) await alone(n);
+        for (const n of [...ready, ...late]) await alone(n);
         return;
       }
       const metas: TranscriptJobMeta[] = ready.map((n) => ({
@@ -2585,7 +2689,7 @@ async function runTogether(
         },
         plan.key,
       );
-      const missed: number[] = [];
+      const missed: number[] = [...late];
       try {
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came

@@ -21,7 +21,14 @@ vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fo
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { FakeJobs } from "../test/fakeJobs";
-import { DIR, flagValues, freshSource, speechRig, type SpeechRigOptions } from "../test/speechRig";
+import {
+  DIR,
+  flagValues,
+  freshSource,
+  speechRig,
+  wavWithVoiceAt,
+  type SpeechRigOptions,
+} from "../test/speechRig";
 import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
 import { MODEL_MANIFEST } from "./modelManifest";
 import { __resetSpeechSession } from "./speechAdmission";
@@ -56,9 +63,11 @@ const configure = (gate: boolean, flag: boolean): void => {
 };
 const hold = (): void => holdCpuOnly(CRASH);
 
-/** A rig whose engine writes what the real one writes for the arguments it was given. */
+/** A rig whose engine writes what the real one writes for the arguments it was given. The audio each extract holds has
+ *  its voice where the clip's first word sounds (SOUND), so the rule that only a voice starting later than a second
+ *  carries the alignment applies to every launch below, unless a test says otherwise. */
 function engineRig(options: SpeechRigOptions = {}) {
-  const rig = speechRig(options);
+  const rig = speechRig({ audio: () => wavWithVoiceAt(Math.round(SOUND * 1000)), ...options });
   const inner = rig.runner.run;
   const runner = {
     run: vi.fn(async (program: string, args: string[], signal?: AbortSignal) => {
@@ -294,19 +303,51 @@ describe("a window is transcribed from its own audio, so its dtw times are on it
 });
 
 describe("one run over several files", () => {
-  it("is one launch on the processor, with the arguments once, and every file's first word is on the sound", async () => {
+  /** The place of each file in the `-f` arguments of a launch. */
+  const filesOf = (launch: string[]): number => flagValues(launch, "-f").length;
+
+  it("never gives a launch over several files the arguments: a file whose voice starts late is run alone, with them, and its first word is on the sound", async () => {
     hold();
     configure(true, true);
     const rig = engineRig();
     const [a, b] = [freshSource(), freshSource()];
     const outcomes = await ensureTranscripts(rig.ctx(), [a, b], "small", "en");
     expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
-    expect(rig.launches).toHaveLength(1);
-    expect(rig.launches[0].slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
-    expect(rig.launches[0].filter((x) => x === "-dtw")).toHaveLength(1);
+    expect(rig.launches).toHaveLength(2);
+    for (const launch of rig.launches) {
+      expect(filesOf(launch)).toBe(1);
+      expect(launch.slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
+      expect(launch.filter((x) => x === "-dtw")).toHaveLength(1);
+    }
     for (const src of [a, b])
       expect((await peekTranscript(rig.ctx(), src, "small", "en"))!.words[0].start_seconds).toBe(
         SOUND,
+      );
+  });
+
+  it("keeps the files whose voice starts within a second in one launch without them, and runs the late one alone", async () => {
+    hold();
+    configure(true, true);
+    const [late, early1, early2] = [freshSource(), freshSource(), freshSource()];
+    const rig = engineRig({
+      audio: (source) => wavWithVoiceAt(source === late ? Math.round(SOUND * 1000) : 400),
+    });
+    const outcomes = await ensureTranscripts(rig.ctx(), [late, early1, early2], "small", "en");
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true, true]);
+    const batch = rig.launches.filter((l) => filesOf(l) === 2);
+    const alone = rig.launches.filter((l) => filesOf(l) === 1);
+    expect(rig.launches).toHaveLength(2);
+    expect(batch).toHaveLength(1);
+    expect(batch[0]).not.toContain("-dtw");
+    expect(batch[0].slice(-1)).toEqual(["-ng"]);
+    expect(alone).toHaveLength(1);
+    expect(alone[0].slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
+    expect((await peekTranscript(rig.ctx(), late, "small", "en"))!.words[0].start_seconds).toBe(
+      SOUND,
+    );
+    for (const src of [early1, early2])
+      expect((await peekTranscript(rig.ctx(), src, "small", "en"))!.words[0].start_seconds).toBe(
+        STORED,
       );
   });
 
@@ -372,7 +413,7 @@ describe("what a launch records on its job", () => {
     expect(off.spec.meta).not.toHaveProperty("wordTimes");
     expect(off.transcript.words[0].start_seconds).toBe(STORED);
   });
-  it("records it on each file's own meta of the job of a run over several files, for a launch on the processor only", async () => {
+  it("records it on the job of each late file's own run of a run over several files, and on no item of a launch over several, for a launch on the processor", async () => {
     const run = async (processor: boolean) => {
       localStorage.clear();
       const jobs = new FakeJobs();
@@ -392,18 +433,23 @@ describe("what a launch records on its job", () => {
       const outcomes = await ensureTranscripts(rig.ctx(), files, "small", "en");
       expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
       const first = (await peekTranscript(rig.ctx(), files[0], "small", "en"))!.words[0];
-      return { spec: jobs.submitted[0], first: first.start_seconds };
+      return { specs: jobs.submitted, first: first.start_seconds };
     };
     const processor = await run(true);
-    expect(processor.spec.args.slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
-    const items = (processor.spec.meta as { items: unknown[] }).items;
-    expect(items).toHaveLength(2);
-    for (const item of items) expect(item).toMatchObject({ kind: "transcript", wordTimes: true });
+    // Each file's voice starts late, so each leaves the shared run and is run alone with the arguments.
+    expect(processor.specs).toHaveLength(2);
+    for (const spec of processor.specs) {
+      expect(spec.args.slice(-4)).toEqual(["-ng", "-dtw", "small", "-nfa"]);
+      expect(spec.meta).toMatchObject({ kind: "transcript", wordTimes: true });
+    }
     expect(processor.first).toBe(SOUND);
+    // On the chip nothing is possible, so the two files stay one launch whose items record nothing.
     const chip = await run(false);
-    expect(chip.spec.args).not.toContain("-dtw");
-    for (const item of (chip.spec.meta as { items: unknown[] }).items)
-      expect(item).not.toHaveProperty("wordTimes");
+    expect(chip.specs).toHaveLength(1);
+    expect(chip.specs[0].args).not.toContain("-dtw");
+    const items = (chip.specs[0].meta as { items: unknown[] }).items;
+    expect(items).toHaveLength(2);
+    for (const item of items) expect(item).not.toHaveProperty("wordTimes");
     expect(chip.first).toBe(STORED);
   });
 });

@@ -27,6 +27,43 @@ export const transcriptJson = (text: string, language = "en"): string =>
 export const flagValues = (args: readonly string[], flag: string): string[] =>
   args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
 
+/** The bytes of a 16 kHz mono 16-bit WAV file that holds `quietMs` of faint noise and then `voiceMs` of a loud voice-like
+ *  signal (bursts of 180 ms, a pause of 60 ms between them), so the speech detector finds the voice at `quietMs`
+ *  (exactly, when it is a multiple of 20). Whole-number arithmetic only: what a test expects never depends on a
+ *  platform's floating point. */
+export function wavWithVoiceAt(quietMs: number, voiceMs = 3000): Uint8Array {
+  const rate = 16_000;
+  const quiet = Math.round((quietMs * rate) / 1000);
+  const total = quiet + Math.round((voiceMs * rate) / 1000);
+  const bytes = new Uint8Array(44 + 2 * total);
+  const view = new DataView(bytes.buffer);
+  const text = (at: number, s: string): void =>
+    [...s].forEach((c, i) => (bytes[at + i] = c.charCodeAt(0)));
+  text(0, "RIFF");
+  view.setUint32(4, 36 + 2 * total, true);
+  text(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, "data");
+  view.setUint32(40, 2 * total, true);
+  let state = 12345;
+  for (let i = 0; i < total; i++) {
+    state = (Math.imul(state, 1103515245) + 12345) & 0x7fffffff;
+    const noise = (state >> 15) - 32768; // -32768 .. 32767
+    const inVoice = i >= quiet && (i - quiet) % 3840 < 2880; // 240 ms periods: 180 ms of voice, 60 ms of pause
+    const sample = inVoice
+      ? (Math.floor(i / 40) % 2 === 0 ? 9000 : -9000) + (noise >> 4)
+      : (noise * 12 + 16384) >> 15;
+    view.setInt16(44 + 2 * i, sample, true);
+  }
+  return bytes;
+}
+
 export interface EngineAnswer {
   code: number;
   stdout?: string;
@@ -40,6 +77,9 @@ export interface SpeechRigOptions {
   /** How many seconds of audio each extract holds (its size is 44 bytes of header and 32,000 a second).
    *  Absent: the extracts are empty files, whose length cannot be told. */
   audioSeconds?: number;
+  /** The audio each extract holds, as its WAV bytes, for tests of what a launch does with the audio it hears: `null` is a
+   *  file that cannot be read. Absent: the store has no ranged read at all, as a build without one. */
+  audio?: (source: string, wav: string) => Uint8Array | null;
 }
 
 let seq = 0;
@@ -81,6 +121,15 @@ export function speechRig(options: SpeechRigOptions = {}) {
     },
     remove: async (p: string) => void files.delete(p),
     byteSize: async (p: string) => sizes.get(p) ?? (p === MODEL ? WHISPER_MODELS.small.bytes : 0),
+    ...(options.audio
+      ? {
+          readHead: async (p: string, maxBytes: number): Promise<Uint8Array | null> => {
+            const source = wavSource.get(p);
+            const bytes = source === undefined ? null : options.audio!(source, p);
+            return bytes === null ? null : bytes.subarray(0, maxBytes);
+          },
+        }
+      : {}),
     probeMedia: async () => ({
       id12: WHISPER_MODELS.small.sha256.slice(0, 12),
       sha256: WHISPER_MODELS.small.sha256,

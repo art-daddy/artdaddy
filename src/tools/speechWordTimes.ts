@@ -5,30 +5,49 @@
 // to two and a half seconds of silence in front, 20 languages, the app's own flags) no first word was early by more
 // than half a second with the alignment, against every clip with about a second of silence without it; the median
 // first word came 0.1 s after the sound began, the word error moved by -0.13 points (inside the noise) and a run took
-// about a tenth longer.
+// about a tenth longer. On the owner's second demo page (seven clips with 1 to 8 s of quiet in front, one engine run
+// each way) the first word landed 0.12 to 1.14 s after the voice, median 0.26 s, where without the alignment it sat at
+// the start of the audio in six of the seven: measured on those clips, not a promise for any clip.
 //
-// SHIPPED DARK. This release carries the code and does not use it: `WORD_TIMES_SHIPPED` is off, so no launch of the
-// engine is changed and no transcript is read differently, whatever the server says. The remote switch
-// `speech_word_times` is an off-switch that starts on, like every other: once a release turns the behaviour on it can
-// take it away again (a launch without the arguments, a read of the kept words as 0.27.0 read them), never give it.
+// THE RULE (the owner, 16 Nov 2026: "the quiet that counts is 1 second"). A launch of the engine carries the alignment
+// only when the voice in the ONE audio file that launch hears starts MORE than LEADING_QUIET_MS (one second) after the
+// start of that file, measured before the launch (speechLeadingQuiet.ts), and only for a model file and an engine path
+// that were measured (WORD_TIMES_MODELS, WORD_TIMES_CHIP_MODELS). A voice that starts within a second: the launch, the
+// words that are kept and every word time are exactly what 0.27.0 made. At about a second of quiet the aligned captions
+// looked laggy beside today's, which were fine; with longer quiet today's appear well before the speech and the aligned
+// ones as it is spoken. The threshold is hard: a voice that starts at 0.98 s and one that starts at 1.02 s are treated
+// differently, by about the quiet in front of the first caption.
 //
-// Not in this slice (each named so nobody assumes it):
-//   * the graphics-chip path: with a chip, `-dtw` needs flash attention off and nobody has measured that, and a
-//     failure there would be read by `isGpuCrash` as a crash of the chip and pause it for hours, so only a launch
-//     with `-ng` carries the arguments (a PC whose chip has not crashed launches without `-ng`, even one with no
-//     usable chip, so it runs as in 0.27.0);
-//   * any model other than "small" (the other sizes need another alignment preset; "base" is not measured);
+// Whether a build uses any of this is `WORD_TIMES_SHIPPED` (and `WORD_TIMES_CHIP_SHIPPED` for the graphics chip). The
+// remote switch `speech_word_times` is an off-switch that starts on, like every other: once a release turns the
+// behaviour on it can take it away again (a launch without the arguments, a read of the kept words as 0.27.0 read
+// them), never give it.
+//
+// Not covered, each named so nobody assumes it:
+//   * the graphics-chip path, until its constant is on and a model is in WORD_TIMES_CHIP_MODELS: with a chip `-dtw` needs
+//     flash attention off, which has to be measured on its own;
+//   * any model file that is not in the list for its path (another size needs another alignment preset; a squeezed copy
+//     of "small" has other weights);
+//   * a launch over several files: it never carries the arguments, and a file whose voice starts late is run alone;
+//   * a voice that starts after the first VOICE_SCAN_S seconds of the audio, or that comes after a click or a breath
+//     the detector reads as the voice: both launch as 0.27.0 did;
 //   * transcripts already kept are not repaired: one is made again only when its cache entry is gone;
-//   * the `trim` fallback (cut the window's leading silence, add the cut back), `clipWordFrames`' tolerance, any
+//   * a long pause INSIDE a recording (the same effect at whisper's own 30 s windows), `clipWordFrames`' tolerance, any
 //     change to the audio the engine hears, any telemetry or privacy text, and the pace model (a run with the
 //     alignment is about a tenth slower and the pace is measured from runs).
 import { exportFlag } from "../api/exportFlags";
+import { WINDOWS_LOAD_FAILURES } from "./speechBackend";
+import { voiceStartsLate, type VoiceStart } from "./speechLeadingQuiet";
 
-/** Shipped dark (see above). A later release turns it on, after the owner has looked at real captions made this way
- *  and a PC with a graphics chip has been measured. */
+/** Whether this build uses the alignment on the processor path. Off in every commit but the one that turns it on. */
 export const WORD_TIMES_SHIPPED = false;
 
+/** Whether this build also uses it on the graphics-chip path (a launch without `-ng`). Off until that path has been
+ *  measured and the owner has agreed; independent of {@link WORD_TIMES_SHIPPED} so the processor path can ship alone. */
+export const WORD_TIMES_CHIP_SHIPPED = false;
+
 let shipped: boolean = WORD_TIMES_SHIPPED;
+let chipShipped: boolean = WORD_TIMES_CHIP_SHIPPED;
 
 /** Tests only. */
 export function __setWordTimesShipped(value: boolean): void {
@@ -36,15 +55,27 @@ export function __setWordTimesShipped(value: boolean): void {
 }
 
 /** Tests only. */
-export function __resetWordTimesShipped(): void {
-  shipped = WORD_TIMES_SHIPPED;
+export function __setWordTimesChipShipped(value: boolean): void {
+  chipShipped = value;
 }
 
-/** The manifest keys (modelManifest.ts) of the model files whose alignment was measured: the ONE place that says which model
- *  files may carry the arguments below, and the app's own default model is the only one in it. The smaller file
- *  (`small_q8_0`, the processor-only model) is NOT in it: nobody has measured `-dtw` with it. A release that measures it
- *  adds its key here and changes nothing else (`transcribe.ts` hands the engine the key of the file it launches). */
+/** Tests only: both constants back to what the build says. */
+export function __resetWordTimesShipped(): void {
+  shipped = WORD_TIMES_SHIPPED;
+  chipShipped = WORD_TIMES_CHIP_SHIPPED;
+}
+
+/** The manifest keys (modelManifest.ts) of the model files whose alignment was measured on the PROCESSOR path (the launch
+ *  with `-ng`): the ONE place that says which model files may carry the arguments there, and the app's own default model
+ *  is the only one in it. A file that is not here never carries them, so a model added to the manifest is refused until
+ *  somebody has measured it. The smaller file (`small_q8_0`, the processor-only model) is NOT in it: nobody has measured
+ *  `-dtw` with it. A release that measures it adds its key here and changes nothing else (`transcribe.ts` hands the
+ *  engine the key of the file it launches). "small": the speech study and the sweep over 240 real outputs. */
 export const WORD_TIMES_MODELS: readonly string[] = ["small"];
+
+/** The same for the GRAPHICS-CHIP path (a launch without `-ng`), which also needs {@link WORD_TIMES_CHIP_SHIPPED}. The
+ *  smaller file is never launched there (the launch boundary converts it to the processor's). */
+export const WORD_TIMES_CHIP_MODELS: readonly string[] = [];
 
 /** What the engine is given: `-dtw small` aligns each token with the audio (the alignment heads of the "small"
  *  model), and `-nfa` turns flash attention off, which that alignment needs. */
@@ -55,13 +86,50 @@ export function wordTimesOn(): boolean {
   return shipped && exportFlag("speech_word_times");
 }
 
-/** What a launch of the engine adds to its arguments. Only a launch with the chip off (`cpuOnly`, the `-ng` one: the
- *  retry after the chip crashed is one too) and only a measured model (`size` is the manifest key of the file the
- *  launch names); every other launch is what 0.27.0 made. */
-export function wordTimesArgs(input: { size: string; cpuOnly: boolean }): string[] {
-  return wordTimesOn() && WORD_TIMES_MODELS.includes(input.size) && input.cpuOnly
-    ? [...DTW_ARGS]
-    : [];
+/** Could a launch with these facts carry the arguments at all, before any audio is looked at? The build and the server
+ *  allow it, the model file was measured, and so was this engine path (the chip also needs its own constant). A caller
+ *  asks this first so that nothing is read from the audio while the rule cannot apply. */
+export function wordTimesPossible(input: { size: string; cpuOnly: boolean }): boolean {
+  if (!wordTimesOn()) return false;
+  if (input.cpuOnly) return WORD_TIMES_MODELS.includes(input.size);
+  return chipShipped && WORD_TIMES_CHIP_MODELS.includes(input.size);
+}
+
+/** What a launch of the engine adds to its arguments. `voice` is where the voice starts in the one file the launch
+ *  hears (speechLeadingQuiet.ts), measured before it: required, so no caller can leave the rule out. The arguments only
+ *  when the rule says so; every other launch is what 0.27.0 made. `size` is the manifest key of the model file the
+ *  launch names. */
+export function wordTimesArgs(input: {
+  size: string;
+  cpuOnly: boolean;
+  voice: VoiceStart;
+}): string[] {
+  return wordTimesPossible(input) && voiceStartsLate(input.voice) ? [...DTW_ARGS] : [];
+}
+
+/** What a launch that carried the arguments left at its output path. */
+export type AlignmentOutput = "readable" | "missing" | "unreadable";
+
+/** What the engine prints for a language it does not know (the same text `finishWhisper` reads). */
+const UNKNOWN_LANGUAGE = /error: unknown language '/;
+
+/** Should a launch that carried the arguments be made once more without them? When it ended in failure and was not
+ *  stopped: a non-zero exit, no output, an output that is not JSON. Then the run is the one 0.27.0 made, so a PC the
+ *  alignment does not run on gets today's words, never a failed transcription. Never for a stop (the person's Cancel,
+ *  the live check, the caller's signal), for an engine that cannot start at all, or for a language the engine does not
+ *  know: a launch without the arguments would end the same way. */
+export function retryWithoutWordTimes(input: {
+  carried: boolean;
+  stopped: boolean;
+  code: number | null;
+  stderr: string;
+  output: AlignmentOutput;
+}): boolean {
+  if (!input.carried || input.stopped) return false;
+  if (input.stderr === "cancelled") return false; // how the runner answers a process it was told to kill
+  if (input.code === 0 && input.output === "readable") return false;
+  if (input.code !== null && WINDOWS_LOAD_FAILURES.has(input.code)) return false;
+  return !UNKNOWN_LANGUAGE.test(input.stderr);
 }
 
 /** One whisper window is 30 s. A time further than that from where the token was stored is the alignment of

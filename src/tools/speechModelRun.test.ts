@@ -44,6 +44,7 @@ const wasChecked = (argv: readonly string[]): boolean =>
 import type { ClientToolContext } from "./context";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { __resetHostInfo } from "../platform/host";
+import { wavWithVoiceAt } from "../test/speechRig";
 import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
 import { cpuOnlyNow, holdCpuOnly, releaseCpuOnly, SPEECH_CPU_ONLY_KEY } from "./speechBackend";
 import { beamFor, DEFAULT_BEAM } from "./speechDecoding";
@@ -114,6 +115,9 @@ interface RigOptions {
   /** Runs when the audio is extracted: after the plan, before the launch. */
   onExtract?: () => void;
   background?: boolean;
+  /** The WAV bytes each extract holds (the first-word rule reads where the voice starts before a launch). Absent: the
+   *  store has no ranged read, so the voice start is not known and no launch carries the alignment. */
+  audio?: (source: string) => Uint8Array | null;
 }
 
 const flagValues = (args: readonly string[], flag: string): string[] =>
@@ -154,6 +158,15 @@ function rig(options: RigOptions = {}) {
     },
     remove: async (p: string) => void files.delete(p),
     byteSize: async (p: string) => specs.get(p)?.bytes ?? 0,
+    ...(options.audio
+      ? {
+          readHead: async (p: string, maxBytes: number): Promise<Uint8Array | null> => {
+            const source = wavSource.get(p);
+            const bytes = source === undefined ? null : options.audio!(source);
+            return bytes === null ? null : bytes.subarray(0, maxBytes);
+          },
+        }
+      : {}),
     probeMedia: async (p: string) => {
       const spec = specs.get(p);
       return {
@@ -786,22 +799,37 @@ describe("the file the app fetches when it starts", () => {
 });
 
 describe("the first-word fix's arguments, with it switched on", () => {
-  it("are carried by the full-size file's processor launch and never by the smaller file's", async () => {
+  it("are carried by the full-size file's processor launch when the voice starts late, and never by the smaller file's", async () => {
     __setWordTimesShipped(true);
     __setExportFlag("speech_word_times", true);
     chipHeldOff();
-    // English on a processor PC with both files: the smaller file, on the processor, WITHOUT the arguments.
-    const english = rig();
+    const late = (): Uint8Array => wavWithVoiceAt(2000);
+    // English on a processor PC with both files: the smaller file, on the processor, WITHOUT the arguments, however
+    // late the voice starts: nobody measured the alignment with that file.
+    const english = rig({ audio: late });
     await runWhisper(english.ctx, fresh(), "small", "en");
     expect(modelOf(english.launches[0])).toBe(pathOf(SMALL));
     expect(onProcessor(english.launches[0])).toBe(true);
     expect(english.launches[0]).not.toContain("-dtw");
     expect(english.launches[0]).not.toContain("-nfa");
     // Arabic: the full-size file, on the processor, with them (the file whose alignment was measured).
-    const arabic = rig();
+    const arabic = rig({ audio: late });
     await runWhisper(arabic.ctx, fresh(), "small", "ar");
     expect(modelOf(arabic.launches[0])).toBe(pathOf(FULL));
     expect(arabic.launches[0].join(" ")).toContain(DTW_ARGS.join(" "));
+  });
+
+  it("are not carried by the full-size file's processor launch when the voice starts within a second, or is not known", async () => {
+    __setWordTimesShipped(true);
+    __setExportFlag("speech_word_times", true);
+    chipHeldOff();
+    for (const audio of [() => wavWithVoiceAt(600), () => null, undefined]) {
+      const arabic = rig({ audio });
+      await runWhisper(arabic.ctx, fresh(), "small", "ar");
+      expect(modelOf(arabic.launches[0])).toBe(pathOf(FULL));
+      expect(arabic.launches[0]).not.toContain("-dtw");
+      expect(arabic.launches[0]).not.toContain("-nfa");
+    }
   });
 });
 
