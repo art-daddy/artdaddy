@@ -256,11 +256,13 @@ describe("no banner on a healthy export (B2)", () => {
   }
 
   const healthyLines = LINES.filter((line) => line.measured <= 2 * line.estimate);
-  /** Long projects whose estimate was right to within 1.8 times, with the start-up each kind of project can have inside ffmpeg: the case the 2 % wait is for (a minute of start-up on a big project makes the share produced tiny for minutes). */
+  /** Long projects whose estimate was right to within 1.8 times, with the start-up each kind of project can have inside ffmpeg: the case the 2 % wait is for (a minute of start-up on a big project makes the share produced tiny for minutes) and the one the
+   *  pace read from the first picture is for. The start-ups go up to four minutes (a big 4K or streamed project whose first picture is that late), and the 1.4-times runs are the shape that was shown the banner while it was healthy. */
   const longProjects = [
-    { estimate: 4000, measured: 7200, startups: [30, 60] },
-    { estimate: 1500, measured: 2100, startups: [30] },
-    { estimate: 600, measured: 800, startups: [30] },
+    { estimate: 4000, measured: 7200, startups: [30, 60, 120, 240] },
+    { estimate: 1500, measured: 2100, startups: [30, 60, 120, 240] },
+    { estimate: 600, measured: 800, startups: [30, 60, 120, 240] },
+    { estimate: 300, measured: 420, startups: [60, 120] },
   ];
   const everyHealthyRun = (): Array<[string, number, number, { d: number; startup: number }]> => [
     ...healthyLines.flatMap((line) =>
@@ -287,7 +289,7 @@ describe("no banner on a healthy export (B2)", () => {
     ),
   ];
 
-  it("never shows one on any recorded run that finished within twice its estimate, whatever shape its start-up took, and the same for long projects", () => {
+  it("never shows one on a run that finished within twice its estimate: every recorded line with a start-up of up to 30 s, and long projects at 1.3 to 1.8 times their estimate with a start-up of up to 4 minutes", () => {
     const runs = everyHealthyRun();
     expect(runs.length).toBeGreaterThan(100);
     for (const [name, estimate, total, shape] of runs)
@@ -332,13 +334,26 @@ describe("no banner on a healthy export (B2)", () => {
     }
   });
 
-  it("names its limit: a run that finishes at 1.4 times its estimate but spends a minute inside the process before its first picture is over three times by the time 2 % is made, and is shown the banner", () => {
-    // 1,500 s said, 2,100 s taken, 60 s of start-up inside ffmpeg: ffmpeg's own time left counts that minute at every second after it, which at the first look after 2 %
-    // makes the projection about 4,800 s against 4,500 s allowed. Nothing in the 90 s, 2 % and three-times rules can tell this from a slow run.
-    const run = play(1500, 2100, { d: 5, startup: 60 });
-    expect(run.firstBanner).toBe(110);
+  it("is not shown the banner for a late first picture: a run that finishes at 1.4 times its estimate after a minute inside the process before its first picture looks over three times from its start, and is told nothing", () => {
+    // 1,500 s said, 2,100 s taken, 60 s of start-up inside ffmpeg: ffmpeg's own time left counts that minute at every second after it, so at the first look after 2 % the projection counted from
+    // the start is about 4,750 s against 4,500 s allowed. The rule that counted from the start showed the banner here at 110 s, telling a person whose export was healthy to cancel it; the pace
+    // is now read from the first picture, so nothing is shown.
+    const fromStart = 110 + steady(2100, 5, 60)(110).etaSec!;
+    expect(
+      fromStart,
+      "the premise: counted from the start this run is over three times",
+    ).toBeGreaterThan(3 * 1500);
+    expect(play(1500, 2100, { d: 5, startup: 60 }).firstBanner).toBeNull();
     // the same run with half the start-up is quiet
     expect(play(1500, 2100, { d: 5, startup: 30 }).firstBanner).toBeNull();
+  });
+
+  it("still shows one, within 180 s of the projection passing three times, for a run that is really slow after the same late first picture: 4 times its estimate", () => {
+    // 1,500 s said, 6,000 s taken, 60 s of start-up: the pace after the first picture is a real four times, and reading the pace from the first picture lowers nothing that was true
+    const run = play(1500, 6000, { d: 5, startup: 60 });
+    expect(run.firstBanner).not.toBeNull();
+    expect(run.firstBanner!).toBeGreaterThanOrEqual(SLOW_AFTER_SECONDS);
+    expect(run.firstBanner! - run.firstOver!).toBeLessThanOrEqual(180);
   });
 });
 
