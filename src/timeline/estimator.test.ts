@@ -205,6 +205,23 @@ describe("estimate: where the number comes from", () => {
     expect(estimate(request({ history, correction: 5 }))).toEqual(result);
   });
 
+  it("an estimate that rests on an export that ran here never says it could take much longer, whatever else is unknown about the project", () => {
+    // The history range is at most 1.3 times its figure and the derived one at most 1.6 times: "much longer" (over 4 times) can never be true of them, so the amber line
+    // must not show for the figures the PC measured, with the project's shape known, unknown or unpriced.
+    const own = [sample({ elapsedSeconds: 130 }), sample({ elapsedSeconds: 200 })];
+    const processorRun = sample({ elapsedSeconds: 600 });
+    const chip = { family: "chip", faster: false, chipMaker: "amd", quick: false } as const;
+    const unpriced = { ...shapeOf([clip()]), unpricedFeatures: 3 };
+    for (const shape of [shapeOf([clip()]), null, unpriced]) {
+      const measured = estimate(request({ history: own, shape }))!;
+      expect(measured.basis, "own history").toBe("history");
+      expect(measured.muchLonger, "own history").toBe(false);
+      const derived = estimate(request({ history: [processorRun], route: chip, shape }))!;
+      expect(derived.basis, "derived from the processor's run").toBe("history");
+      expect(derived.muchLonger, "derived from the processor's run").toBe(false);
+    }
+  });
+
   it("an export of another shape is not matched and does not throw the estimate off", () => {
     const other = sample({ workload: workload({ peakVisualLayers: 3, peakMediaLayers: 3 }) });
     const result = estimate(request({ history: [other] }))!;
