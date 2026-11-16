@@ -72,6 +72,7 @@ import {
   type ExportAssessment,
   type ExportCalibration,
   type ExportEstimates,
+  type ExportPreflightReason,
   type Expectation,
 } from "./exportOptions";
 import {
@@ -552,6 +553,16 @@ const ENVIRONMENT_FAILURES: ReadonlySet<string> = new Set([
   "storage_full",
 ]);
 
+/** Whether starting a failed export again builds 0.27.0's recipe (`plain` of {@link ExportRetry}): it ran a lean render path, so that path cannot fail the same project
+ *  twice. Not after a failure no recipe can cause (ENVIRONMENT_FAILURES). The ONE rule: the person's Try again ({@link retryExport}) and the app's own restart on the
+ *  processor ({@link continueRestart}) both read it, so after the same failure they build the same export. */
+function startsPlain(
+  record: Pick<ExportRecord, "lean"> | undefined,
+  error: string | undefined,
+): boolean {
+  return record?.lean === true && !ENVIRONMENT_FAILURES.has(failureOf(error).code);
+}
+
 /** The rungs Try again may step through on this export: the ones its command really has, and only the normal one
  *  while the switch for rungs is off (nothing gentler is then offered, and nothing is promised). */
 export function ladderOfRecord(record: Pick<ExportRecord, "maxRung" | "ladder">): Ladder {
@@ -583,7 +594,6 @@ export async function retryExport(
   if (!record || !retry || record.state !== "failed" || record.retrying) return;
   patch(failedId, { retrying: true, note: undefined });
   const failedRung = rungOf(record.rung);
-  const failure = failureOf(record.error).code;
   // A failure only the chip can explain is tried again on the processor, from its normal rung: the processor has rungs
   // of its own. Any other failure steps down the rungs, as before, except a stop at the ceiling of the no-progress rule:
   // a busy export that made no picture for that long is not helped by a gentler rung, so it starts again as it was.
@@ -598,11 +608,9 @@ export async function retryExport(
     result = await retry(minRung, failedRung, {
       store,
       ...(processor ? { processor: true as const } : {}),
-      // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice. Not after a failure no recipe can
-      // cause (a full or unwritable drive, a source file that is gone): 0.27.0's recipe would only be slower there, and a retry in another folder keeps the speed.
-      ...(record.lean === true && !ENVIRONMENT_FAILURES.has(failure)
-        ? { plain: true as const }
-        : {}),
+      // A lean render path ran: the person's click builds 0.27.0's recipe. Not after a failure no recipe can cause (a full or unwritable drive, a source file
+      // that is gone): 0.27.0's recipe would only be slower there, and a retry in another folder keeps the speed.
+      ...(startsPlain(record, record.error) ? { plain: true as const } : {}),
       ...(options.saveTo ? { saveTo: options.saveTo } : {}),
     });
   } catch (error) {
@@ -1485,12 +1493,29 @@ function estimateRead(spec: ExportSpec): {
 }
 
 /** What the pre-start check judges an export on. An export the app starts again by itself is judged on 0.27.0's own
- *  figure for its time: the honest one prices the gentler setting (or the slower encoder after a chip failure) it goes
- *  to, which would put a time question to a request nobody is there to answer, and a question refuses an automatic
- *  restart. Its card and the assistant still say the honest time (the record is made from {@link estimateRead}). */
+ *  figure for its time: the hard warning that it cannot finish inside the PC's execution limit reads it as it always did
+ *  (the honest one prices the gentler setting, or the slower encoder after a chip failure, it goes to). Its time raises
+ *  no heads-up whatever the figure ({@link raisedFor}). Its card and the assistant still say the honest time (the record
+ *  is made from {@link estimateRead}). */
 function estimateOf(spec: ExportSpec): ExportEstimates {
   const { estimates, legacy } = estimateRead(spec);
   return spec.restart?.kind === "auto" ? legacy : estimates;
+}
+
+/** What the check found for one export, as far as it may be raised. A copy renders nothing: it has no size, rate or length to be outside what ArtDaddy was
+ *  tested with (its zero workload is "unknown", not "huge"), so that finding is not raised for it. An export the app starts again by itself is the same
+ *  export carrying on, and nobody is there to answer: a heads-up about its time ("long", "slow") would be a question, and a question refuses it, over a
+ *  figure that is not the one the first attempt was judged on (the gentler setting, the slower encoder, 0.27.0's guess), so it raises none, whatever
+ *  figure it is judged on. The hard warning on time (`execution_limit`) is not one of those heads-ups and is raised as before. */
+function raisedFor(
+  spec: ExportSpec,
+  reasons: readonly ExportPreflightReason[],
+): readonly ExportPreflightReason[] {
+  let raised = reasons;
+  if (spec.copyOf) raised = raised.filter((reason) => reason !== "outside_promise");
+  if (spec.restart?.kind === "auto")
+    raised = raised.filter((reason) => reason !== "long" && reason !== "slow");
+  return raised;
 }
 
 /** Measure the PC and the requested exports and say what the check found. Everything is read afresh,
@@ -1537,13 +1562,7 @@ async function measurePreflight(
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
     return refuse("cancelled");
   const reasons = new Set(
-    // A copy renders nothing: it has no size, rate or length to be outside what ArtDaddy was tested with
-    // (its zero workload is "unknown", not "huge"), so that finding is not raised for it.
-    checks.flatMap((check, index) =>
-      specs[index].copyOf
-        ? check.reasons.filter((reason) => reason !== "outside_promise")
-        : check.reasons,
-    ),
+    checks.flatMap((check, index) => raisedFor(specs[index], check.reasons)),
   );
   let spaceNeeded: number | null = null;
   let destinationShort = false;
@@ -1767,7 +1786,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     // An export the app starts again by itself asks nobody anything: no one may be there (an assistant started it), and a
     // question means the room it bet on is not there. It is a refusal, and the first attempt's plain failure stands. The one
     // exception is a heads-up whose every reason the person already continued past in the first attempt: it is not a
-    // shortage and nothing in it is new.
+    // shortage and nothing in it is new. (Its time raises none of its own: see raisedFor.)
     if (specs[0].restart?.kind === "auto") {
       const seen = specs[0].restart?.noticesAnswered ?? 0;
       const nothingNew = questions.every(
@@ -2675,8 +2694,20 @@ async function continueRestart(
       result = await retry(rungOf(decision.override.rung), rungOf(decision.failedRungN), {
         store: x.store,
         signal: gap.signal,
-        // A failed chip is started again on the processor's own encoder, from its normal setting: what Try again does.
-        ...(decision.override.processor ? { processor: true as const } : {}),
+        // A failed chip is started again on the processor's own encoder, from its normal setting, and built as Try again would build it (plain after a lean
+        // path: two of the chip's three triggers, a failed check and an idle stall, cannot tell the chip from the recipe, and the same recipe on x264 would fail
+        // the same way). The memory rows change one thing at a time, the rung: a lean export stays lean (rule E3b-09).
+        ...(decision.override.processor
+          ? {
+              processor: true as const,
+              ...(startsPlain(
+                records.find((r) => r.job_id === x.jobId),
+                error,
+              )
+                ? { plain: true as const }
+                : {}),
+            }
+          : {}),
         restart: {
           kind: "auto",
           from: x.jobId,
