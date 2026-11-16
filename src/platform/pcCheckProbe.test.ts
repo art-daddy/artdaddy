@@ -5,7 +5,9 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { crfFor } from "../timeline/exportOptions";
+import { WEAK_PRIOR_PACE } from "../timeline/costTable";
 import { classOf, readPcCheck, rHatOf, writePcCheck, type StorageLike } from "../timeline/pcClass";
+import { paceOfCheck } from "../timeline/pcPace";
 import { createPcCheckService, type PcCheckDeps, type PcCheckSignals } from "./pcCheck";
 import {
   EXPORT_SPEED_PROBE_ID,
@@ -1061,5 +1063,166 @@ describe("the export speed test as a probe of the service", () => {
     expect(JSON.stringify(deps.storage!.getItem("artdaddy.pcCheck.v1"))).toBe(before);
     expect(service.pcClass()).toBe("unknown");
     expect(service.status().lastOutcome).toEqual({ "export-speed": "aborted" });
+  });
+
+  describe("a refusal by the job supervisor is not a PC that could not finish", () => {
+    const BOOK = "artdaddy.pcCheck.v1";
+    const FAST = { a: 40, b: 20, c: 35 } as const;
+    let refusing = true;
+    /** Three ways the supervisor refuses (an export it lists that the queue does not know yet, no supervisor to ask, a failed submit), each
+     *  until `refusing` is turned off: the job of B, the job that makes the clip, and a longer B after a first one that was over too soon. */
+    const refusals: [string, () => Script][] = [
+      [
+        "the job of B",
+        () => ({ speed: (kind) => (kind === "b" && refusing ? "busy" : FAST[kind]) }),
+      ],
+      [
+        "the job that makes the clip",
+        () => ({
+          existing: null,
+          get reference() {
+            return refusing ? { outcome: "busy" as const } : {};
+          },
+          speed: (kind) => FAST[kind],
+        }),
+      ],
+      [
+        "the longer B that follows a first one that was over too soon",
+        () => ({
+          speed: (kind, _nth, frames) =>
+            kind !== "b" ? FAST[kind] : refusing ? (frames === 60 ? 900 : "busy") : FAST.b,
+        }),
+      ],
+    ];
+
+    for (const [name, make] of refusals) {
+      it(`stores nothing when ${name} is refused: the class stays unknown and the estimate is not priced weak for it`, async () => {
+        refusing = true;
+        const { pc, service, advance, quiet, deps } = inService(make());
+        service.setSignals(quiet());
+        await advance(20_000);
+        expect(pc.calls.length).toBeGreaterThan(0); // it did ask the supervisor
+        expect(service.status()).toEqual({
+          running: null,
+          lastOutcome: { "export-speed": "skipped" },
+        });
+        expect(service.pcClass()).toBe("unknown");
+        expect(service.result("export-speed")).toBeNull();
+        expect(deps.storage!.getItem(BOOK)).toBeNull();
+        // what the estimate reads: no pace at all, not the weak guess that a check which could not finish is priced at
+        expect(paceOfCheck(service.result("export-speed"), undefined, 8)).toBeNull();
+      });
+
+      it(`is not asked again inside the same quiet stretch, and is asked in the next one (${name})`, async () => {
+        refusing = true;
+        const { pc, service, advance, quiet, timers } = inService(make());
+        service.setSignals(quiet());
+        await advance(20_000);
+        const asked = pc.calls.length;
+        expect(asked).toBeGreaterThan(0);
+        await advance(3 * 3_600_000);
+        expect(pc.calls.length, "no second attempt in the same stretch").toBe(asked);
+        expect(timers(), "nothing is armed to try again").toBe(0);
+        // the person touches the editor and the supervisor is free: the next quiet stretch measures
+        refusing = false;
+        service.setSignals(quiet());
+        await advance(20_000);
+        expect(pc.calls.length).toBeGreaterThan(asked);
+        expect(service.pcClass()).toBe("ok");
+        expect(service.status().lastOutcome).toEqual({ "export-speed": "done" });
+      });
+    }
+
+    it("leaves an earlier answer exactly as it was: a 'Check again' that is refused changes nothing", async () => {
+      refusing = false;
+      const { service, advance, quiet, deps } = inService({
+        speed: (kind) => (kind === "b" && refusing ? "busy" : FAST[kind]),
+      });
+      service.setSignals(quiet());
+      await advance(20_000);
+      expect(service.pcClass()).toBe("ok");
+      const before = deps.storage!.getItem(BOOK);
+      expect(before).not.toBeNull();
+      refusing = true;
+      service.requestRun({ reason: "dialog", force: true, id: "export-speed" });
+      await advance(1_000);
+      expect(service.status().lastOutcome).toEqual({ "export-speed": "skipped" });
+      expect(service.pcClass()).toBe("ok");
+      expect(deps.storage!.getItem(BOOK)).toBe(before);
+    });
+
+    it("still stores a check that really could not finish, and prices that PC weak: B times out or fails, the clip cannot be made", async () => {
+      const failing: [string, Script][] = [
+        ["B times out", { speed: (kind) => (kind === "b" ? "timeout" : 40) }],
+        ["B exits with an error", { speed: (kind) => (kind === "b" ? "fail" : 40) }],
+        ["B says nothing readable", { speed: (kind) => (kind === "b" ? null : 40) }],
+        ["the clip's making times out", { existing: null, reference: { outcome: "timeout" } }],
+        ["the clip's making fails", { existing: null, reference: { code: 1 } }],
+      ];
+      for (const [name, script] of failing) {
+        const { service, advance, quiet, deps } = inService(script);
+        service.setSignals(quiet());
+        await advance(20_000);
+        expect(service.pcClass(), name).toBe("unfinished");
+        expect(service.status().lastOutcome, name).toEqual({ "export-speed": "unfinished" });
+        expect(JSON.parse(deps.storage!.getItem(BOOK)!)["export-speed"], name).toMatchObject({
+          outcome: "unfinished",
+          r_hat: null,
+        });
+        expect(paceOfCheck(service.result("export-speed"), undefined, 8)?.rHat, name).toBe(
+          WEAK_PRIOR_PACE.rHat,
+        );
+      }
+    });
+  });
+});
+
+describe("measureSpeed says when the supervisor refused it", () => {
+  const refusedBy = async (script: Script) => {
+    const pc = rig(script);
+    let told = 0;
+    const got = await measureSpeed(pc.deps, new AbortController().signal, () => void told++);
+    return { got, told, pc };
+  };
+
+  it("for the clip's making, for B, and for a longer B: no answer, and told once", async () => {
+    for (const script of [
+      { existing: null, reference: { outcome: "busy" as const } },
+      { speed: (kind: ProbeKind) => (kind === "b" ? ("busy" as const) : 40) },
+      {
+        speed: (kind: ProbeKind, _nth: number, frames: number) =>
+          kind !== "b" ? 40 : frames === 60 ? 900 : ("busy" as const),
+      },
+    ] satisfies Script[]) {
+      const { got, told } = await refusedBy(script);
+      expect(got).toBeNull();
+      expect(told).toBe(1);
+    }
+  });
+
+  it("not for a PC that failed or ran out of time, nor for a run that was stopped: those are answers about the PC (or about the caller)", async () => {
+    for (const script of [
+      { existing: null, reference: { outcome: "timeout" as const } },
+      { existing: null, reference: { code: 1 } },
+      { existing: null, reference: { outcome: "stopped" as const } },
+      { speed: (kind: ProbeKind) => (kind === "b" ? ("timeout" as const) : 40) },
+      { speed: (kind: ProbeKind) => (kind === "b" ? ("fail" as const) : 40) },
+      { speed: (kind: ProbeKind) => (kind === "b" ? ("stopped" as const) : 40) },
+      { speed: (kind: ProbeKind) => (kind === "b" ? null : 40) },
+    ] satisfies Script[]) {
+      const { got, told } = await refusedBy(script);
+      expect(got).toBeNull();
+      expect(told, JSON.stringify(script)).toBe(0);
+    }
+  });
+
+  it("not once B has been read: a refused C, A or repeat of B leaves the answer standing, and is not a refusal", async () => {
+    for (const refused of ["a", "b", "c"] as const) {
+      const { got, told } = await refusedBy({
+        speed: (kind, nth) => (kind === refused && (kind !== "b" || nth > 0) ? "busy" : 30),
+      });
+      expect(got, refused).toMatchObject({ outcome: "done" });
+      expect(told, refused).toBe(0);
+    }
   });
 });

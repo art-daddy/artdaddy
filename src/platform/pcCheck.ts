@@ -80,11 +80,13 @@ export interface ProbeDefinition {
   /** The record of the probe that says so (else of the first one registered) is the PC's class. */
   definesClass?: boolean;
   /** Measures. `record` is a finished check, or null when it could not finish; `stored` says the probe keeps its own answer
-   *  elsewhere (the service then writes nothing). A probe must stop at once when `signal` aborts, and must not store after it. */
+   *  elsewhere (the service then writes nothing). `refused` (with no record) says the probe was not allowed to start, which is not a PC that
+   *  could not finish: nothing is stored, no failure is counted and it is not tried again in the same quiet stretch. A probe must stop at
+   *  once when `signal` aborts, and must not store after it. */
   run(ctx: {
     signal: AbortSignal;
     deps: PcCheckDeps;
-  }): Promise<{ record: PcCheckRecord | null; stored: boolean }>;
+  }): Promise<{ record: PcCheckRecord | null; stored: boolean; refused?: boolean }>;
 }
 
 export interface PcCheckService {
@@ -148,6 +150,13 @@ interface Waiter {
 }
 
 const isAutomatic = (reason: PcCheckReason): boolean => reason === "idle" || reason === "update";
+
+/** An answer that says the probe was refused and has no record: a record that was measured is never turned into a refusal. */
+function isRefusal(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const { refused, record } = value as Record<string, unknown>;
+  return refused === true && (record === null || record === undefined);
+}
 
 function acceptDefinition(def: unknown): ProbeDefinition | null {
   if (def === null || typeof def !== "object") return null;
@@ -238,7 +247,7 @@ export function createPcCheckService(deps: PcCheckDeps): PcCheckService {
   /** Since when nothing has been busy; the idle wait counts from the later of this and the last input. */
   let quietSince: number | null = null;
   let idle: Timer | null = null;
-  /** The idle stretch (its start) in which a battery already kept the automatic run from starting. */
+  /** The idle stretch (its start) in which a battery already kept the automatic run from starting, or the run was refused. */
   let skippedStretch: number | null = null;
   let current: Run | null = null;
   let holder: { id: string } | null = null;
@@ -369,11 +378,17 @@ export function createPcCheckService(deps: PcCheckDeps): PcCheckService {
   }
 
   /** The probe answered (or failed). An answer for a run that is no longer the current one, because the box or a disposal
-   *  ended it first, is thrown away; so is one for a run that was stopped, or that the world has since made busy. */
+   *  ended it first, is thrown away; so is one for a run that was stopped, or that the world has since made busy. A refusal measured
+   *  nothing: it stores nothing and counts no failure, and `skippedStretch` is set BEFORE the run ends (ending it lets the next run be
+   *  scheduled, which for a probe with no record would be at once), exactly as a battery keeps a run from starting. */
   function settle(run: Run, value: unknown): void {
     try {
       if (current !== run) return;
       if (run.aborted || blocked()) return end(run, "aborted");
+      if (isRefusal(value)) {
+        skippedStretch = idleStretch();
+        return end(run, "skipped");
+      }
       end(run, commit(run.def, value));
     } catch {
       end(run, "unfinished");

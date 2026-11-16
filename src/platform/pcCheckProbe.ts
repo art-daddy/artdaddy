@@ -263,11 +263,14 @@ function discard(files: SpeedProbeDeps["files"], path: string): void {
 
 /** Measures this PC: makes the reference clip if it is not there, runs B (the reference export's work: read, mix and encode at
  *  Medium), C (with the faster setting) and A (read and mix only), then B again and keeps the faster of its two runs (a disturbance
- *  can only slow a run). The whole of it is inside 20 s; null means the time ran out, a command failed or the run was stopped.
+ *  can only slow a run). The whole of it is inside 20 s; null means the time ran out, a command failed, the run was refused or it was
+ *  stopped. `onRefused` is told when the job supervisor answers busy to the clip's making or to a run before B has been read: that is a
+ *  refusal (an export it lists that the queue does not know yet, no supervisor to ask), not a PC that could not finish.
  *  Never throws. A run that is stopped leaves nothing behind but the finished reference clip, which is kept on purpose. */
 export async function measureSpeed(
   deps: SpeedProbeDeps,
   signal: AbortSignal,
+  onRefused?: () => void,
 ): Promise<PcCheckRecord | null> {
   const clock = (): number => {
     const t = deps.now();
@@ -308,6 +311,7 @@ export async function measureSpeed(
           signal,
         }),
       );
+      if (made !== STOPPED && made.kind === "busy") onRefused?.();
       if (made === STOPPED || made.kind !== "ran" || made.code !== 0) return null;
       const size = await guard(deps.files.size(part));
       if (size === STOPPED || !sound(size)) return null;
@@ -318,6 +322,7 @@ export async function measureSpeed(
     type Read =
       | { ok: true; fps: number }
       | { ok: false; why: "stopped" | "failed" | "no_time" | "too_short" | "unreadable" };
+    let bRead = false;
     const timed = async (kind: ProbeKind, frames: number): Promise<Read> => {
       if (signal.aborted) return { ok: false, why: "stopped" };
       const left = timeLeft();
@@ -330,6 +335,8 @@ export async function measureSpeed(
         }),
       );
       if (outcome === STOPPED) return { ok: false, why: "stopped" };
+      // Before B has been read every run decides the answer: a refusal there is no answer, and not a slow PC.
+      if (outcome.kind === "busy" && !bRead) onRefused?.();
       if (outcome.kind !== "ran" || outcome.code !== 0) return { ok: false, why: "failed" };
       const seen = speedFromProgress(outcome.stdout);
       if (seen.fps !== null) return { ok: true, fps: seen.fps };
@@ -352,6 +359,7 @@ export async function measureSpeed(
 
     const b = await measure("b", 0);
     if (!b) return null;
+    bRead = true;
     const c = await measure("c", b.step);
     const a = await measure("a", b.step);
     const again = await measure("b", b.step);
@@ -379,7 +387,8 @@ export async function measureSpeed(
   }
 }
 
-/** The export speed test as a probe the service runs: nothing about it is the service's to know. */
+/** The export speed test as a probe the service runs: nothing about it is the service's to know. A refusal by the job supervisor is
+ *  said as such (`refused`): the service then stores nothing and does not ask again in the same quiet stretch. */
 export function exportSpeedProbe(): ProbeDefinition {
   return {
     id: EXPORT_SPEED_PROBE_ID,
@@ -387,6 +396,14 @@ export function exportSpeedProbe(): ProbeDefinition {
     ttlMs: 30 * 86_400_000,
     budgetMs: SPEED_PROBE.boxMs,
     definesClass: true,
-    run: async ({ signal, deps }) => ({ record: await measureSpeed(deps, signal), stored: false }),
+    run: async ({ signal, deps }) => {
+      let refused = false;
+      const record = await measureSpeed(deps, signal, () => {
+        refused = true;
+      });
+      return record === null && refused
+        ? { record, stored: false, refused: true }
+        : { record, stored: false };
+    },
   };
 }

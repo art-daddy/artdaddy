@@ -123,7 +123,7 @@ function probeOf(w: World, id: string, over: Partial<ProbeDefinition> = {}) {
     at: number;
     signal: AbortSignal;
     abortedAt: number | null;
-    resolve: (answer: { record: PcCheckRecord | null; stored: boolean }) => void;
+    resolve: (answer: { record: PcCheckRecord | null; stored: boolean; refused?: boolean }) => void;
   }[] = [];
   const def: ProbeDefinition = {
     id,
@@ -145,6 +145,9 @@ function probeOf(w: World, id: string, over: Partial<ProbeDefinition> = {}) {
     runs,
     answer: (rec: PcCheckRecord | null, stored = false, which = runs.length - 1) =>
       runs[which].resolve({ record: rec, stored }),
+    /** The probe says it was refused: it was not allowed to start, which measured nothing. */
+    refuse: (which = runs.length - 1) =>
+      runs[which].resolve({ record: null, stored: false, refused: true }),
   };
 }
 
@@ -1158,6 +1161,135 @@ describe("the wait after a check that did not finish", () => {
     service.requestRun({ reason: "update", force: true });
     await w.advance(IDLE_BEFORE_RUN_MS);
     expect(speed.runs).toHaveLength(2);
+  });
+});
+
+describe("a probe that was refused (not allowed to start) measured nothing", () => {
+  it("stores nothing and leaves the class as it was: unknown for a PC with no record, not 'not finished'", async () => {
+    const { w, service, speed } = quietService();
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    expect(speed.runs).toHaveLength(1);
+    speed.refuse();
+    await w.flush();
+    expect(service.status()).toEqual({ running: null, lastOutcome: { speed: "skipped" } });
+    expect(service.pcClass()).toBe("unknown");
+    expect(service.result("speed")).toBeNull();
+    expect(w.store.calls.set).toBe(0);
+    expect(w.store.map.size).toBe(0);
+  });
+
+  it("is not tried again inside the same quiet stretch, however long it lasts, and arms no timer for it", async () => {
+    const { w, service, speed } = quietService();
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    speed.refuse();
+    await w.flush();
+    expect(w.timerCount()).toBe(0);
+    // `advance` fails the test when a timer keeps arming itself with no delay: that is the spin of a probe with no record
+    await w.advance(2 * DAY);
+    expect(speed.runs).toHaveLength(1);
+    // the same signals again, as the lane sends them whenever anything changes, are not a new stretch
+    service.setSignals(signalsAt(START));
+    await w.advance(DAY);
+    expect(speed.runs).toHaveLength(1);
+    expect(w.timerCount()).toBe(0);
+  });
+
+  it("is tried again in the next quiet stretch: after the person has touched the editor, or an export has come and gone", async () => {
+    const touched = quietService();
+    touched.service.setSignals(signalsAt(touched.w.now()));
+    await touched.w.advance(IDLE_BEFORE_RUN_MS);
+    touched.speed.refuse();
+    await touched.w.flush();
+    await touched.w.advance(HOUR);
+    touched.service.setSignals(signalsAt(touched.w.now()));
+    await touched.w.advance(IDLE_BEFORE_RUN_MS - 1);
+    expect(touched.speed.runs).toHaveLength(1);
+    await touched.w.advance(1);
+    expect(touched.speed.runs).toHaveLength(2);
+
+    const exported = quietService();
+    exported.service.setSignals(signalsAt(exported.w.now()));
+    await exported.w.advance(IDLE_BEFORE_RUN_MS);
+    exported.speed.refuse();
+    await exported.w.flush();
+    exported.service.setSignals(signalsAt(exported.w.now(), { exportBusy: true }));
+    await exported.w.advance(MIN);
+    exported.service.setSignals(signalsAt(START));
+    await exported.w.advance(IDLE_BEFORE_RUN_MS);
+    expect(exported.speed.runs).toHaveLength(2);
+  });
+
+  it("is not a failure: the wait after a stored 'not finished' is not refreshed, and the next real failure waits 30 minutes, not 6 hours", async () => {
+    const { w, service, speed } = quietService();
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    speed.answer(null); // failure 1: stored as not finished
+    await w.flush();
+    const stored = w.store.bytes();
+    await w.advance(10 * MIN);
+    expect(speed.runs).toHaveLength(2);
+    speed.refuse();
+    await w.flush();
+    expect(w.store.bytes()).toBe(stored);
+    expect(service.pcClass()).toBe("unfinished");
+    expect(service.status().lastOutcome).toEqual({ speed: "skipped" });
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    expect(speed.runs).toHaveLength(3);
+    speed.answer(null); // the next real failure is the second one in a row
+    await w.flush();
+    const endedAt = w.now();
+    await w.advance(30 * MIN - 1);
+    expect(speed.runs).toHaveLength(3);
+    await w.advance(1);
+    expect(speed.runs).toHaveLength(4);
+    expect(speed.runs[3].at - endedAt).toBe(30 * MIN);
+  });
+
+  it("leaves a finished answer alone: a 'Check again' that is refused keeps the class and the record", async () => {
+    const { w, service, speed } = quietService();
+    writePcCheck(w.deps.storage, "speed", record());
+    service.setSignals(signalsAt(w.now()));
+    const before = w.store.bytes();
+    service.requestRun({ reason: "dialog", force: true });
+    expect(speed.runs).toHaveLength(1);
+    speed.refuse();
+    await w.flush();
+    expect(service.pcClass()).toBe(classOf(30 / 24));
+    expect(w.store.bytes()).toBe(before);
+    expect(service.status()).toEqual({ running: null, lastOutcome: { speed: "skipped" } });
+  });
+
+  it("is a stop first: a refusal that arrives after the person typed, or an export came, is an aborted run", async () => {
+    for (const stop of [{ exportBusy: true }, {}] as const) {
+      const { w, service, speed } = quietService();
+      service.setSignals(signalsAt(w.now()));
+      await w.advance(IDLE_BEFORE_RUN_MS);
+      service.setSignals(signalsAt(w.now(), stop));
+      speed.refuse();
+      await w.flush();
+      expect(service.status().lastOutcome).toEqual({ speed: "aborted" });
+      expect(w.store.calls.set).toBe(0);
+    }
+  });
+
+  it("is only a refusal with no record: a record that was measured is stored, whatever else the probe said", async () => {
+    const { w, service, speed } = quietService();
+    service.setSignals(signalsAt(w.now()));
+    await w.advance(IDLE_BEFORE_RUN_MS);
+    speed.runs[0].resolve({ record: record(), stored: false, refused: true });
+    await w.flush();
+    expect(service.status().lastOutcome).toEqual({ speed: "done" });
+    expect(service.result("speed")).toMatchObject({ outcome: "done" });
+    // and a probe that merely could not finish, with no word about a refusal, is still a check that did not finish
+    const other = quietService();
+    other.service.setSignals(signalsAt(other.w.now()));
+    await other.w.advance(IDLE_BEFORE_RUN_MS);
+    other.speed.runs[0].resolve({ record: null, stored: false, refused: false });
+    await other.w.flush();
+    expect(other.service.status().lastOutcome).toEqual({ speed: "unfinished" });
   });
 });
 
