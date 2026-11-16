@@ -28,9 +28,11 @@ describe("every door that puts media on an empty timeline settles the canvas fir
   const commands = read("src/store/editorCommands.ts");
 
   // The two tools, the person's two commands and the code that defines or registers them are the only places that place clips. A new one has to be added here WITH its canvas rule.
+  // Test support (src/test) is not a door: a kit that puts a clip on a fake disk for a suite is never reached from the app.
   it("no other source file places clips: a new door must be listed here and call prepareCanvas", () => {
     const files = walk("src")
       .filter((f) => /\.tsx?$/.test(f) && !/\.(test|e2e)\.tsx?$/.test(f))
+      .filter((f) => !f.startsWith("src/test/"))
       .filter((f) =>
         /\b(addClipsTool|insertClipsTool|resolveAddSpecs|placeClips|insertClips)\(/.test(read(f)),
       );

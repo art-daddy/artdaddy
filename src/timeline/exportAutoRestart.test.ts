@@ -324,12 +324,13 @@ describe("the app starts an export again by itself when the PC ran short of memo
     });
     expect(listExportRecords()[0].restarting).toBeUndefined();
     expect(restartDecisions().map((d) => d.record)).toEqual(["eligible"]);
-    // What the decision was shown: a memory stop at the PC's floor, and no stop for standing still.
+    // What the decision was shown: a memory stop at the PC's floor, and no stop for standing still. Its words do not name the chip.
     expect(restartDecisions()[0].failure).toEqual({
       code: "memory_limit",
       guard: "pc_floor",
       stopKind: null,
       stopSeconds: null,
+      namesChip: false,
     });
 
     // The assistant holds the first id and sees one export, running, on its second attempt: not a failure and not two.

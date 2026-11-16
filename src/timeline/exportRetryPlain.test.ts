@@ -692,6 +692,8 @@ describe("the export tool: the retry builds 0.27.0's command", () => {
   it("(d) after a graphics chip failure the retry is on the processor and plain, with the command 0.27.0 gives the processor", async () => {
     const t = await world();
     leanSwitches(true);
+    // The person's click on the failure: the app's own restart on the processor (chip_restart) is off, as 0.27.0 ran. It has its own suites.
+    __setExportFlag("chip_restart", false);
     const chip: ChipVerdict = {
       maker: "amd",
       adapter: { maker: "amd", device: "15bf", driver: "32.0.1" },
