@@ -16,6 +16,13 @@
 //     one whisper window);
 //   * audio that is not what the app extracts for the engine (16 kHz, mono, 16-bit PCM), cut short, unreadable or too slow
 //     to read: `unknown`. Nothing here throws and nothing waits longer than MEASURE_GUARD_MS.
+// Found while freezing the reference (each is a case of __fixtures__/firstWord/onset-reference.json), all the same direction:
+//   * a hiss or a steady tone (music) in front of the voice that is 15 dB or more over the pauses of the voice reads as the
+//     voice from its first three frames, so a voice that starts seconds later is `at` 0; a constant offset or a loud hum that
+//     lifts the quietest tenth hides the voice (`none`); so does a voice with no pause and no quiet in front of it;
+//   * a `fmt ` chunk too short to hold the format fields, a `data` size of 0 (an empty file: `none`), a format tag other than
+//     1 (extensible included), and a chunk in front of `data` longer than the 4 KiB of room the read leaves (a shorter
+//     scan, or `unknown` when `data` is not in the read) are read as written, never guessed.
 //
 // Arithmetic: the levels are computed from the integer samples exactly as the reference computes them from the same
 // samples divided by 32768 (the sum of squares is exact in a double, so only `log10` could differ from the reference, and
@@ -115,7 +122,7 @@ export function pcm16WavSamples(bytes: Uint8Array): { samples: Int16Array; rate:
     const size = view.getUint32(at + 4, true);
     const body = at + 8;
     if (id === "fmt ") {
-      if (body + 16 > bytes.length) return null;
+      if (size < 16 || body + 16 > bytes.length) return null;
       format = {
         tag: view.getUint16(body, true),
         channels: view.getUint16(body + 2, true),

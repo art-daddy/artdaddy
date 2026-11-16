@@ -475,6 +475,62 @@ describe("a file that is not the extract's is unknown, never a wrong number, and
     expect(voiceStartOf(riff([{ id: "fmt ", body: fmtBody() }]))).toEqual(UNKNOWN);
   });
 
+  it("reads nothing from a file whose form is not RIFF/WAVE, however the rest looks", () => {
+    for (const [offset, text] of [
+      [0, "RIFX"],
+      [0, "RF64"],
+      [8, "AVI "],
+      [8, "WAVX"],
+    ] as const) {
+      const bytes = Uint8Array.from(wav);
+      bytes.set(
+        Uint8Array.from(text, (c) => c.charCodeAt(0)),
+        offset,
+      );
+      expect(voiceStartOf(bytes), text).toEqual(UNKNOWN);
+    }
+  });
+
+  it("hands back null, and does not throw, for a file the samples cannot be read from", () => {
+    const fmt: Chunk = { id: "fmt ", body: fmtBody() };
+    const data: Chunk = { id: "data", body: pcmBody(samples) };
+    expect(pcm16WavSamples(riff([data, fmt]))).toBeNull();
+    expect(pcm16WavSamples(riff([fmt]))).toBeNull();
+    expect(pcm16WavSamples(wav.subarray(0, 30))).toBeNull();
+    expect(pcm16WavSamples(wav.subarray(0, 11))).toBeNull();
+    expect(pcm16WavSamples(new Uint8Array(0))).toBeNull();
+    expect(pcm16WavSamples(wav)?.rate).toBe(16000);
+  });
+
+  it("takes the format fields from inside a `fmt ` chunk only: one too short to hold them is unreadable", () => {
+    const body = pcmBody(samples);
+    // a chunk id that begins 0x10 0x00 would read as "16 bits" if the reader looked 14 bytes past the start of a 14-byte chunk
+    const trap: Chunk = { id: "\u0010\u0000AB", body: new Uint8Array(0) };
+    const file = riff([
+      { id: "fmt ", body: fmtBody().subarray(0, 14) },
+      trap,
+      { id: "data", body },
+    ]);
+    expect(voiceStartOf(file)).toEqual(UNKNOWN);
+    expect(pcm16WavSamples(file)).toBeNull();
+    // and the pad byte after a 15-byte chunk (a zero) must not complete the 16-bit field of the chunk
+    for (let size = 0; size < 16; size++) {
+      const short = riff([
+        { id: "fmt ", body: fmtBody().subarray(0, size) },
+        { id: "data", body },
+      ]);
+      expect(voiceStartOf(short), `a fmt chunk of ${size} bytes`).toEqual(UNKNOWN);
+    }
+    expect(
+      voiceStartOf(
+        riff([
+          { id: "fmt ", body: fmtBody() },
+          { id: "data", body },
+        ]),
+      ),
+    ).toEqual(cleanAnswer);
+  });
+
   it("is not fooled by sizes that lie: a huge declared chunk, a data size of 0 and of 0xFFFFFFFF", () => {
     const fmt: Chunk = { id: "fmt ", body: fmtBody() };
     const body = pcmBody(samples);
@@ -636,6 +692,21 @@ describe("measureVoiceStart: the head read, the guard and what the launch does a
     expect(result).toEqual(UNKNOWN);
     await vi.advanceTimersByTimeAsync(100);
     expect(result).toEqual(UNKNOWN);
+  });
+
+  it("is silent about a read that fails after the guard has answered", async () => {
+    vi.useFakeTimers();
+    const store: HeadReader = {
+      readHead: () =>
+        new Promise<Uint8Array | null>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("too late")), 100),
+        ),
+    };
+    const answer = measureVoiceStart(store, "a.wav", 50);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await answer).toEqual(UNKNOWN);
+    // an unhandled rejection here would fail the whole run, not only this test
+    await vi.advanceTimersByTimeAsync(100);
   });
 
   it("leaves no timer behind, whichever way the read ends", async () => {
