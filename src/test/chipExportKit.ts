@@ -156,8 +156,15 @@ export async function setupExport() {
       name ? { name } : {},
       agentToolContext(base, new AbortController().signal),
     )) as Any;
+  /** The same request from an outside assistant (MCP). The pre-start check warns such a request before a long or slow export; the menu's own request is not
+   *  warned, because the dialog has just shown the estimate (exportQuestions.ts). */
+  const exportFromAssistant = async (name?: string) =>
+    (await exportTimelineTool(
+      name ? { name } : {},
+      agentToolContext({ ...base, surface: "mcp" }, new AbortController().signal),
+    )) as Any;
   const nextPage = () => ({ store: new ProjectStoreAccess(DIR, fs), runner });
-  return { fs, store, jobs, exportNow, nextPage };
+  return { fs, store, jobs, exportNow, exportFromAssistant, nextPage };
 }
 export type ExportRig = Awaited<ReturnType<typeof setupExport>>;
 

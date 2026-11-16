@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { __setExportFlag, type ExportFlagName } from "../api/exportFlags";
+import { __setExportConfirmationForTests } from "../lib/confirm";
 import { useAuth } from "../store/auth";
 import { useExportJob } from "../store/exportJob";
 import {
@@ -57,8 +58,12 @@ vi.mock("./chipTest", async (importOriginal) => ({
   findChip: vi.fn(async () => ({ chip: null, events: [] })),
   markChipSuspect: vi.fn(),
 }));
-// What the PC says about itself, as the pre-start check and the decision to start again read it.
-const pc = vi.hoisted(() => ({ available: null as number | null }));
+// What the PC says about itself, as the pre-start check and the decision to start again read it. The longest an export may run is what the pre-start
+// check needs before it judges an export "long" or "slow" (a heads-up): nothing says it unless a test does.
+const pc = vi.hoisted(() => ({
+  available: null as number | null,
+  executionSeconds: null as number | null,
+}));
 // What the restarted export's report says of the restart is held until the owner approves the privacy text.
 const held = vi.hoisted(() => ({ send: false }));
 vi.mock("./exportRestart", async (importOriginal) => ({
@@ -74,7 +79,7 @@ vi.mock("../platform/host", async (importOriginal) => ({
     available_memory_bytes: pc.available,
     scratch_free_bytes: null,
     destination_free_bytes: null,
-    budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+    budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: pc.executionSeconds },
     adapters: [],
   })),
 }));
@@ -97,6 +102,7 @@ beforeEach(() => {
   reported.length = 0;
   useAuth.setState({ profile: null });
   pc.available = 8 * GIB;
+  pc.executionSeconds = null;
   held.send = false;
   __setExportFlag("faster_x264", false);
   vi.mocked(findChip).mockReset();
@@ -105,6 +111,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.useRealTimers();
+  __setExportConfirmationForTests(null);
   await resetTestDocuments();
   // A test that failed half way leaves exports running: they are cancelled, and the wait is bounded.
   for (const open of listExports()) cancelExport(open.job_id, "app");
@@ -604,5 +611,55 @@ describe("an export stopped by the no-progress rule", () => {
     expect(markChipSuspect).toHaveBeenCalledTimes(1);
     const [row] = await outcomes();
     expect(row).toMatchObject({ state: "failed", failure_code: "time_limit", chip_failed: true });
+  });
+});
+
+// A request from an outside assistant is warned before a long or slow export, and a warning is a question, which refuses a restart nobody is there to answer. The first attempt is judged on the honest figure
+// (a chip is priced quicker than the processor) and the restart on 0.27.0's, so a restart could be refused for a "long" its first attempt, told only that it would take a while, never heard. The time of a
+// restart raises no heads-up of its own.
+describe("a chip that fails an export an outside assistant started", () => {
+  it("is started again on the processor, and finishes, though 0.27.0's time for the processor is a long one the first attempt was not told", async () => {
+    pc.executionSeconds = 28_800;
+    const told: string[] = [];
+    __setExportConfirmationForTests(async (message) => {
+      told.push(message);
+      return "continue";
+    });
+    const t = await longProject(amdChip());
+    // This PC measured the project at a little over twenty minutes on the processor; on the chip it is priced under that.
+    useExportJob.setState({
+      calibrations: useExportJob
+        .getState()
+        .calibrations.map((sample) => ({ ...sample, elapsedSeconds: 1250 })),
+    });
+    const started = await t.exportFromAssistant("long");
+    await flush();
+    expect(started.ok, JSON.stringify(started)).toBe(true);
+    expect(encoderOf(t.jobs.submitted.at(-1)!), "the first attempt runs on the chip").toBe("amd");
+    expect(told, "the first attempt was told it would take a while, and went on").toHaveLength(1);
+    expect(told[0]).toMatch(/take a while/);
+    expect(told[0]).not.toMatch(/long time/);
+    const jobsBefore = t.jobs.submitted.length;
+    t.jobs.stdout(started.job_id, progressBlock(30, 1000));
+    await flush(5);
+    t.jobs.exit(started.job_id, -1, DRIVER_ERROR);
+    await until(() => expect(t.jobs.submitted.length).toBe(jobsBefore + 1));
+    await flush(40);
+    expect(t.jobs.submitted, "one successor, not two").toHaveLength(jobsBefore + 1);
+    const second = t.jobs.submitted.at(-1)!;
+    expect(encoderOf(second), "on the processor").toBe("x264");
+    expect(told, "nobody was asked about the restart").toHaveLength(1);
+    expect(restartDecisions().map((d) => d.record)).toEqual(["eligible"]);
+    expect(listExportRecords()).toHaveLength(1);
+    expect(listExportRecords()[0]).toMatchObject({
+      job_id: second.id,
+      state: "running",
+      attempt: 2,
+      restarted: "processor",
+    });
+    t.jobs.exit(second.id, 0);
+    expect(await whenExportEnds(started.job_id)).toMatchObject({ job_id: second.id, state: "done" });
+    await whenExportsSettle();
+    expect(await t.fs.exists(DEST_LONG)).toBe(true);
   });
 });
