@@ -16,16 +16,21 @@ import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { cpuOnlyNow, holdCpuOnly, isGpuCrash, WINDOWS_LOAD_FAILURES } from "./speechBackend";
 import {
-  acceptableBeam,
-  beamFor,
   decodeArgs,
   DEFAULT_BEAM,
   lastSpeechLanguage,
-  planDecode,
   rememberSpeechLanguage,
   WeakDecodeError,
   type ModelVariant,
 } from "./speechDecoding";
+import {
+  acceptableRun,
+  assertLaunchArgv,
+  launchPlan,
+  ModelPairingError,
+  planModel,
+  type ModelPlan,
+} from "./speechModel";
 import {
   classifyTranscriptFailure,
   failureText,
@@ -42,7 +47,7 @@ import {
   SpeechDeferredError,
   wasRunCancelledByPerson,
 } from "./speechAdmission";
-import { backendOfRun, recordSpeechRun } from "./speechPace";
+import { backendNow, backendOfRun, readPace, recordSpeechRun } from "./speechPace";
 import { padded, playedSpan, spanWindows } from "./speechSpans";
 import { CAP_S } from "./speechPlan";
 import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
@@ -76,7 +81,13 @@ import {
 } from "../store/modelDownload";
 import { clearModelDecline, declineModel } from "./modelDecline";
 import { kindOfHttpStatus, type ModelFailureKind } from "./modelFailure";
-import { DEFAULT_MODEL_KEY, MODEL_MANIFEST, modelOrigins } from "./modelManifest";
+import {
+  DEFAULT_MODEL_KEY,
+  MODEL_MANIFEST,
+  modelOrigins,
+  remotePlacesFor,
+  secondPlaces,
+} from "./modelManifest";
 import {
   noteWordsFetched,
   registerCachedWords,
@@ -109,11 +120,18 @@ export interface WhisperModelSpec {
   mirrors?: readonly string[];
 }
 
-/** Every model the app can install, read from the one table that states its size, checksum and revision. */
+/** Every model the app can install, read from the one table that states its size, checksum and revision, with the
+ *  places it is fetched from after the first (the table derives them: a new entry has its own). */
 export const WHISPER_MODELS: Readonly<Record<string, WhisperModelSpec>> = Object.fromEntries(
   Object.entries(MODEL_MANIFEST).map(([key, e]) => [
     key,
-    { file: e.file, revision: e.revision, bytes: e.bytes, sha256: e.sha256 },
+    {
+      file: e.file,
+      revision: e.revision,
+      bytes: e.bytes,
+      sha256: e.sha256,
+      mirrors: secondPlaces(e),
+    },
   ]),
 );
 
@@ -677,7 +695,10 @@ async function downloadModel(
         );
       // The places are worked out for EVERY attempt: an answer from the server that comes after the download
       // began (the launch prefetch starts before the first answer) is used by the next attempt.
-      const origins = modelOrigins(pinned, [...(spec.mirrors ?? []), ...speechModelSources()]);
+      const origins = modelOrigins(pinned, [
+        ...(spec.mirrors ?? []),
+        ...remotePlacesFor(pinned, speechModelSources()),
+      ]);
       const open = origins.filter((o) => !refused.has(o));
       if (open.length === 0) break; // every origin has refused
       const origin = open[attempt % open.length];
@@ -1308,10 +1329,11 @@ export async function transcriptRunning(
   return out !== null && inflight.has(out);
 }
 
-/** A transcription, kept for the file and language it was asked for. Whisper's decoding setting
- *  follows speechDecoding.ts: a language the accuracy gate cleared is decoded with the faster
- *  setting, and a transcript made with a setting narrower than its detected language needs is never
- *  kept (finishWhisper refuses it, and this runs once more at the width that language needs). */
+/** A transcription, kept for the file and language it was asked for. What it is made with follows speechModel.ts
+ *  and speechDecoding.ts: a language the accuracy gate cleared is decoded with the faster setting (and on a PC
+ *  that transcribes on its processor, with the smaller model file where the gate cleared that too), and a
+ *  transcript made with a file or setting that its detected language does not allow is never kept (finishWhisper
+ *  refuses it, and this runs once more with what that language needs). */
 export async function runWhisper(
   ctx: ClientToolContext,
   src: string,
@@ -1321,19 +1343,20 @@ export async function runWhisper(
   /** The caller already holds this transcript's place in the one-run-per-file join (a batch that falls
    *  back to running one of its files alone), so it must not wait on itself. */
   joined = false,
-  /** The width a run over several files refused this file at, for being narrower than its language
-   *  needs: it is run at that width at once instead of being predicted again. */
-  widenTo?: number,
+  /** The file and width a run over several files refused this file at, for not being what its language
+   *  needs: it is run with what that language needs at once instead of being predicted again. */
+  redoWith?: ModelPlan,
 ): Promise<ParsedTranscript> {
-  let widen = widenTo;
+  let redo = redoWith;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await runWhisperOnce(ctx, src, size, language, window, widen, joined);
+      return await runWhisperOnce(ctx, src, size, language, window, redo, joined);
     } catch (e) {
       if (!(e instanceof WeakDecodeError) || attempt >= 2) throw e;
-      // The language turned out to need a wider beam than the prediction gave it. If a second run
-      // finds yet another language, the engine's own default settles it: it is acceptable for all.
-      widen = attempt === 0 ? beamFor(MODEL_VARIANT, e.detected) : DEFAULT_BEAM;
+      // The language turned out to need another file or a wider beam than the prediction gave it. If a second
+      // run finds yet another language, the full-size file with the engine's own default beam settles it: it is
+      // acceptable for all (speechModel.ts, acceptableRun).
+      redo = attempt === 0 ? await replanFor(ctx, e.detected) : universalPlan();
     }
   }
 }
@@ -1342,13 +1365,79 @@ export async function runWhisper(
  *  size that was not measured is never given a narrower beam. */
 const MODEL_VARIANT: ModelVariant = MODEL_MANIFEST[DEFAULT_MODEL_KEY].variant;
 
+/** What every language accepts on every path: the full-size file at the engine's own default beam. */
+function universalPlan(): ModelPlan {
+  return { key: DEFAULT_MODEL_KEY, variant: MODEL_VARIANT, beam: DEFAULT_BEAM };
+}
+
+/** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed). */
+async function installedModels(ctx: ClientToolContext): Promise<string[]> {
+  const here: string[] = [];
+  for (const [key, spec] of Object.entries(WHISPER_MODELS)) {
+    try {
+      if (await validModel(ctx, whisperModelPath(ctx.store.projectDir, key, spec.file), spec))
+        here.push(key);
+    } catch {
+      /* a file that cannot be read is not here */
+    }
+  }
+  return here;
+}
+
+/** The plan for a language that is known (named, predicted or just detected), on the path a run started now takes. */
+async function planForLanguage(
+  ctx: ClientToolContext,
+  language: string | null,
+): Promise<ModelPlan> {
+  return planModel({
+    backend: backendNow(readPace()),
+    language,
+    installed: await installedModels(ctx),
+  });
+}
+
+/** The plan after a run was refused for its detected language: the language is known now. */
+function replanFor(ctx: ClientToolContext, detected: string): Promise<ModelPlan> {
+  return planForLanguage(ctx, detected || null);
+}
+
+/** What to run with, BEFORE the run. A named language is known; "auto" is predicted from the last language this
+ *  machine detected and CHECKED once the engine has said (finishWhisper). A model size the gate did not measure is
+ *  never narrowed, and a re-run is given what it was sent for. */
+async function planFor(
+  ctx: ClientToolContext,
+  size: string,
+  lang: string,
+  redo: ModelPlan | undefined,
+): Promise<ModelPlan> {
+  if (redo) return redo;
+  // A size the gate did not measure is handed to the engine as it always was: the default beam. Its variant is the
+  // manifest's word for its file, so that what is checked at the commit point is what was really run.
+  if (size !== DEFAULT_MODEL)
+    return {
+      key: size,
+      variant: MODEL_MANIFEST[size]?.variant ?? MODEL_VARIANT,
+      beam: DEFAULT_BEAM,
+    };
+  return planForLanguage(ctx, whisperCode(lang) || lastSpeechLanguage());
+}
+
+/** The file the launch prefetch fetches: the one the plan for this PC names while no language is asked for (the
+ *  last language this PC detected, if any). A PC that already holds a file the plan accepts fetches nothing. */
+export async function ensureLaunchModel(
+  ctx: ClientToolContext,
+): Promise<{ path: string; downloaded: boolean }> {
+  const plan = await planForLanguage(ctx, lastSpeechLanguage());
+  return ensureWhisperModel(ctx, plan.key);
+}
+
 async function runWhisperOnce(
   ctx: ClientToolContext,
   src: string,
   size: string,
   language: string | undefined,
   window: TranscribeWindow | null | undefined,
-  widen: number | undefined,
+  redo: ModelPlan | undefined,
   joined = false,
 ): Promise<ParsedTranscript> {
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
@@ -1387,7 +1476,10 @@ async function runWhisperOnce(
       });
       if (admission?.plan === "ondemand") throw new SpeechDeferredError(admission);
     }
-    const model = await modelFor(ctx, size);
+    // What to run with is decided before the model is fetched, because it says WHICH file: the smaller one on a PC
+    // that transcribes on its processor, for a language the gate cleared it for; the full-size one everywhere else.
+    const plan = await planFor(ctx, size, lang, redo);
+    const model = await modelFor(ctx, plan.key);
     // A window is transcribed from its OWN audio only. Extracting a 2-hour file to transcribe 30
     // seconds of it was most of the wait (UJ-012); and whisper loads the whole file it is handed, so
     // `-ot/-d` on an 80-minute extract took 11.9 s for a 60 s window where the window's own WAV took
@@ -1412,15 +1504,6 @@ async function runWhisperOnce(
       // again by it before the engine is launched (below).
       const spanS = await wavSeconds(ctx, wav);
       const purpose: SpeechPurpose = ctx.background ? "index" : (ctx.speechPurpose ?? "look");
-      // The decoding setting. A named language is known now; "auto" is predicted from what this
-      // machine last detected and CHECKED once the engine has said (finishWhisper). A model size
-      // the gate did not measure is never narrowed, and a re-run is given the width it was sent for.
-      const plan =
-        widen !== undefined
-          ? { beam: widen }
-          : size === DEFAULT_MODEL
-            ? planDecode(MODEL_VARIANT, lang, lastSpeechLanguage())
-            : { beam: DEFAULT_BEAM };
       // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
       // already on the file's timeline. Shifting it in place after whisper had written it would
       // leave a window cached on its own clock if anything stopped between the two writes.
@@ -1433,9 +1516,9 @@ async function runWhisperOnce(
         shiftMs: Math.floor(start * 1000),
         wavs,
         beam: plan.beam,
-        variant: MODEL_VARIANT,
+        variant: plan.variant,
         requested: lang,
-        ...(widen !== undefined ? { rerun: true } : {}),
+        ...(redo !== undefined ? { rerun: true } : {}),
         label: fileLabel(src),
         purpose,
         spanS,
@@ -1494,7 +1577,7 @@ async function runWhisperOnce(
           liveStop: ctx.background === true && win.key === "",
           several: false,
         },
-        size,
+        plan.key,
       );
       try {
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
@@ -1606,6 +1689,34 @@ function eitherSignal(
  *  meta, as the page that started the run wrote them). */
 type JobMeta = TranscriptJobMeta | { kind: "transcripts"; items: TranscriptJobMeta[] };
 
+/** A launch the manifest does not allow is a failure of the run, said plainly, never a crash of something else. */
+function refusedLaunch(e: unknown): unknown {
+  return e instanceof ModelPairingError
+    ? new TranscriptionFailure("engine_failed", `the speech engine was not started: ${e.message}`, {
+        cause: e,
+      })
+    : e;
+}
+
+/** Whether a launch of the model file `args` name is a processor launch (the launch with `-ng`): when the caller asked
+ *  for one, and always for a file the manifest does not allow on the graphics chip. */
+function enginePath(args: readonly string[], cpuOnly: boolean): boolean {
+  try {
+    return launchPlan(args, cpuOnly).cpuOnly;
+  } catch (e) {
+    throw refusedLaunch(e);
+  }
+}
+
+/** The last check on the arguments about to be spawned. */
+function checkLaunch(argv: readonly string[]): void {
+  try {
+    assertLaunchArgv(argv);
+  } catch (e) {
+    throw refusedLaunch(e);
+  }
+}
+
 /** Say on each transcription's meta whether this launch carries the engine's word times, before the job is made from
  *  it: the page that ran it and a page that takes it over after a crash both read it when the words are kept. It is
  *  written only when true, so a launch without them leaves the meta exactly as 0.27.0 made it. */
@@ -1643,17 +1754,23 @@ async function engineFor(
   /** How the run was stopped, if it was: shared by the launches of one run, so a stop never leads to a retry. */
   const stopped: { by: StopReason | null } = { by: null };
   const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
+    // THE place whisper-cli is started (speechLaunchBoundary.test.ts walks the sources for any other). The model file
+    // `args` name says which path it may take: a file the manifest restricts to the processor is launched with `-ng`
+    // whatever was asked, so it can never run on the graphics chip, and the final arguments are checked once more
+    // just before the spawn.
+    const onProcessor = enginePath(args, cpuOnly);
     const id = `whisper-${scratchToken()}`;
     jobs.push(id);
-    const wordTimes = wordTimesArgs({ size, cpuOnly });
+    const wordTimes = wordTimesArgs({ size, cpuOnly: onProcessor });
     noteWordTimes(meta, wordTimes.length > 0);
-    const run = cpuOnly ? [...args, "-ng", ...wordTimes] : args;
+    const run = onProcessor ? [...args, "-ng", ...wordTimes] : args;
+    checkLaunch(run);
     const own = new AbortController();
     const both = eitherSignal(ctx.signal, own.signal);
     const watch = watchSpeechRun({
       ...info,
       id,
-      cpuOnly,
+      cpuOnly: onProcessor,
       afterCrash,
       stop: (how) => {
         stopped.by ??= how;
@@ -1693,7 +1810,9 @@ async function engineFor(
     }
   };
   const engine = async (): Promise<EngineRun> => {
-    const cpuOnly = cpuOnlyNow();
+    // A file that may only run on the processor makes this a processor run from its first launch: no chip is tried,
+    // so a crash is never taken for the chip's and no hold is kept for it.
+    const cpuOnly = cpuOnlyNow() || enginePath(args, false);
     const first = await launch(cpuOnly, false);
     if (stopped.by || cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
     const second = await launch(true, true);
@@ -1820,16 +1939,16 @@ async function finishWhisper(
         `the speech engine's output for this file was cut short (code=${run.code})`,
       );
     }
-    // The commit point, before anything reaches the cache and once the language is known: a run
-    // narrower than its language needs (speechDecoding.ts) is refused here, whoever finishes it,
-    // the page that ran it or a page that adopted it. It is never kept.
+    // The commit point, before anything reaches the cache and once the language is known: a run made
+    // with a file or a setting its language does not allow (speechModel.ts, speechDecoding.ts) is refused
+    // here, whoever finishes it, the page that ran it or a page that adopted it. It is never kept.
     const detected = detectedLanguage(data, meta.requested);
     // What this machine hears next is predicted from what it was last told it heard, so the
     // language is remembered even when this transcript is refused: it is still what was heard.
     if (meta.requested === "auto" && detected) rememberSpeechLanguage(detected);
     if (
       meta.beam !== undefined &&
-      !acceptableBeam(meta.beam, meta.variant ?? MODEL_VARIANT, detected)
+      !acceptableRun({ variant: meta.variant ?? MODEL_VARIANT, beam: meta.beam }, detected)
     )
       throw new WeakDecodeError(detected, meta.beam);
     shiftWhisperJson(data, meta.shiftMs);
@@ -2232,8 +2351,8 @@ async function runTogether(
       held[n].resolve(result.parsed);
     }
   };
-  /** The width each file the run refused as too narrow needs, by place in `ours`. */
-  const widenTo = new Map<number, number>();
+  /** What each file the run refused (for not being what its language needs) is run with alone, by place in `ours`. */
+  const widenTo = new Map<number, ModelPlan>();
   /** A file the run did not make a transcript of, run alone as it always was. */
   const alone = async (n: number): Promise<void> => {
     try {
@@ -2246,7 +2365,9 @@ async function runTogether(
   };
   try {
     await adoptTranscriptions(ctx.store);
-    const model = await modelFor(ctx, size);
+    // One file and one beam for the whole run, decided before the model is fetched because it says WHICH file.
+    const plan = await planFor(ctx, size, lang, undefined);
+    const model = await modelFor(ctx, plan.key);
     const wavs = await Promise.all(ours.map((k) => wavPathFor(ctx, k.keys.identity ?? k.src)));
     await holdingWavs(ctx.store, wavs, async () => {
       // The audio of each file, held until its words are kept. One that cannot be read fails alone.
@@ -2263,10 +2384,6 @@ async function runTogether(
         for (const n of ready) await alone(n);
         return;
       }
-      const plan =
-        size === DEFAULT_MODEL
-          ? planDecode(MODEL_VARIANT, lang, lastSpeechLanguage())
-          : { beam: DEFAULT_BEAM };
       const metas: TranscriptJobMeta[] = ready.map((n) => ({
         kind: "transcript",
         key: ours[n].keys.out,
@@ -2275,7 +2392,7 @@ async function runTogether(
         shiftMs: 0,
         wavs: [wavs[n]],
         beam: plan.beam,
-        variant: MODEL_VARIANT,
+        variant: plan.variant,
         requested: lang,
         label: fileLabel(ours[n].src),
         purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
@@ -2313,7 +2430,7 @@ async function runTogether(
           // Each file's segments restart at 0: the run has no one position to read a speed from.
           several: true,
         },
-        size,
+        plan.key,
       );
       const missed: number[] = [];
       try {
@@ -2328,7 +2445,7 @@ async function runTogether(
           } catch (error) {
             if (error instanceof SpeechEngineUnavailableError) unavailable = error;
             if (error instanceof WeakDecodeError)
-              widenTo.set(n, beamFor(MODEL_VARIANT, error.detected));
+              widenTo.set(n, await replanFor(ctx, error.detected));
             // The person stopped the run: what it did not reach is not started again behind their back.
             if (isSpeechCancelled(error)) settle(n, { error });
             else missed.push(n);

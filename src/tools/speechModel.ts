@@ -144,16 +144,21 @@ export function modelRules(
   };
 
   // By file name: either path separator, any letter case. The whole name is compared, never its end, and a name two
-  // entries share (in another case) is no one's.
-  const keyOfName = new Map<string, string | null>();
-  for (const [key, e] of entries) {
-    const name = e.file.toLowerCase();
-    keyOfName.set(name, keyOfName.has(name) ? null : key);
-  }
+  // entries share (in another case) is no one's. The table is read at each call, so an entry added to it is known at
+  // once (a test adds one; a release adds one in the manifest itself).
+  const keyOfFile = (lowerName: string): string | null => {
+    let found: string | null = null;
+    for (const [key, e] of Object.entries(manifest)) {
+      if (e.file.toLowerCase() !== lowerName) continue;
+      if (found !== null) return null;
+      found = key;
+    }
+    return found;
+  };
   const modelKeyOfPath = (path: string): string | null => {
     if (typeof path !== "string") return null;
     const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
-    return keyOfName.get(name.toLowerCase()) ?? null;
+    return keyOfFile(name.toLowerCase());
   };
 
   /** The model file the arguments name and whether they turn the graphics chip off, read as whisper-cli reads

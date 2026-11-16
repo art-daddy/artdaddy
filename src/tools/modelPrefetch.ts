@@ -15,7 +15,7 @@ import {
   declineModel,
   modelDeclined,
 } from "./modelDecline";
-import { ensureWhisperModel } from "./transcribe";
+import { ensureLaunchModel } from "./transcribe";
 
 export interface PrefetchEnv {
   /** A context whose store lies under the app's data root, or null where there is no desktop. */
@@ -131,6 +131,8 @@ const productionEnv: PrefetchEnv = {
     const dir = joinPath(await projectsRoot(), "_app");
     return { store: new ProjectStoreAccess(dir, new TauriFs()), runner: NO_COMMANDS };
   },
-  ensure: (ctx) => ensureWhisperModel(ctx),
+  // The file this PC's plan names (speechModel.ts): the smaller one on a PC that transcribes on its processor and
+  // holds neither file, the full-size one everywhere else, and nothing at all where a file the plan accepts is here.
+  ensure: (ctx) => ensureLaunchModel(ctx),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };

@@ -1,0 +1,521 @@
+// Which model file a run is made with, through the REAL transcription path (runWhisper, ensureTranscripts, the
+// model check, the launch boundary, the commit point, the app cache) with a fake engine whose answers I script.
+// What is checked is what the engine is launched with and what ends up kept, never how speechModel.ts decides:
+//
+//   * the smaller file (q8_0) is only ever launched on the processor, the launch with `-ng`, whatever the PC's
+//     chip did before the plan or between the plan and the launch;
+//   * a language the gate did not clear on the processor (Arabic, and every language it has no row for) is never
+//     transcribed with the smaller file, and a transcript made with a file its language does not allow is never kept;
+//   * a PC that transcribes on a chip, and every PC that already holds the full-size file, is run as it always was.
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { reportAppError, reportTranscription } = vi.hoisted(() => ({
+  reportAppError: vi.fn(),
+  reportTranscription: vi.fn(),
+}));
+vi.mock("../api/appEvents", async (orig) => ({
+  ...(await orig<object>()),
+  reportAppError,
+  reportTranscription,
+}));
+vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
+
+import type { ClientToolContext } from "./context";
+import { __resetHostInfo } from "../platform/host";
+import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
+import { cpuOnlyNow, holdCpuOnly, releaseCpuOnly, SPEECH_CPU_ONLY_KEY } from "./speechBackend";
+import { beamFor, DEFAULT_BEAM } from "./speechDecoding";
+import { TranscriptionFailure } from "./speechFailure";
+import { processorBeam } from "./speechModel";
+import { recordSpeechRun } from "./speechPace";
+import {
+  __setDownloadPolicy,
+  ensureLaunchModel,
+  ensureTranscripts,
+  PATIENT_DOWNLOAD,
+  peekTranscript,
+  runWhisper,
+  SINGLE_ATTEMPT,
+  WHISPER_MODELS,
+  whisperModelPath,
+} from "./transcribe";
+import { WHISPER_LANGUAGES } from "./whisperLanguages";
+import { __resetWorkGate } from "./workGate";
+
+const DIR = "C:/data/projects/p1";
+const WORK = "C:/Users/u/AppData/Local/com.artdaddy.app/work/launch-1-1";
+/** The manifest keys of the two files. */
+const FULL = "small";
+const SMALL = "small_q8_0";
+const pathOf = (key: string): string => whisperModelPath(DIR, key);
+const CODES = Object.keys(WHISPER_LANGUAGES);
+const ENGINE_CRASH = -1073740791; // 0xC0000409, the crash the graphics chip is known for
+const VULKAN_LOG =
+  "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: 0 = Radeon (AMD proprietary driver)";
+
+const json = (language: string, text: string): string =>
+  JSON.stringify({
+    result: { language },
+    transcription: [
+      {
+        offsets: { from: 0, to: 1000 },
+        text: ` ${text}`,
+        tokens: [{ text: ` ${text}`, offsets: { from: 0, to: 1000 }, p: 0.9 }],
+      },
+    ],
+  });
+
+interface Say {
+  language: string;
+  text?: string;
+}
+interface RigOptions {
+  /** The manifest keys whose file is on disk. Absent: both. */
+  installed?: readonly string[];
+  /** What the engine says it heard, per launch and clip. Absent: English. */
+  say?: (launch: number, args: string[], clip: string) => Say;
+  engine?: (launch: number, args: string[]) => { code: number; stderr?: string };
+  /** Runs when the audio is extracted: after the plan, before the launch. */
+  onExtract?: () => void;
+  background?: boolean;
+}
+
+const flagValues = (args: readonly string[], flag: string): string[] =>
+  args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
+const modelOf = (args: readonly string[]): string => flagValues(args, "-m")[0];
+const beamOf = (args: readonly string[]): number =>
+  args.includes("-bs") ? Number(flagValues(args, "-bs")[0]) : DEFAULT_BEAM;
+const onProcessor = (args: readonly string[]): boolean => args.includes("-ng");
+
+function rig(options: RigOptions = {}) {
+  const files = new Set<string>();
+  const texts = new Map<string, string>();
+  const kept = new Map<string, unknown>();
+  const wavSource = new Map<string, string>();
+  const launches: string[][] = [];
+  const specs = new Map(Object.entries(WHISPER_MODELS).map(([key, spec]) => [pathOf(key), spec]));
+  for (const key of options.installed ?? [FULL, SMALL]) files.add(pathOf(key));
+  const store = {
+    projectDir: DIR,
+    fileIdentity: async (src: string) => `file:${src}`,
+    appCache: async () => ({
+      get: async (ns: string, key: string) => kept.get(`${ns}|${key}`) ?? null,
+      put: async (ns: string, key: string, value: unknown) => (
+        kept.set(`${ns}|${key}`, value),
+        true
+      ),
+    }),
+    prepareWork: async (rel: string) => `${WORK}/${rel}`,
+    exists: async (p: string) => files.has(p),
+    readText: async (p: string) => texts.get(p) ?? "",
+    writeText: async (p: string, s: string) => (files.add(p), void texts.set(p, s)),
+    canRename: true,
+    rename: async (from: string, to: string) => {
+      files.delete(from);
+      files.add(to);
+      const src = wavSource.get(from);
+      if (src) wavSource.set(to, src);
+    },
+    remove: async (p: string) => void files.delete(p),
+    byteSize: async (p: string) => specs.get(p)?.bytes ?? 0,
+    probeMedia: async (p: string) => {
+      const spec = specs.get(p);
+      return {
+        id12: (spec?.sha256 ?? "").slice(0, 12),
+        sha256: spec?.sha256 ?? "",
+        size: spec?.bytes ?? 0,
+        head: new Uint8Array(),
+      };
+    },
+    canStreamDownload: true,
+    appendBytes: async () => true,
+    resolveRef: async (r: string) => r,
+    offlineMedia: async () => null,
+  };
+  const runner = {
+    run: async (program: string, args: string[]) => {
+      if (program === "ffmpeg") {
+        const out = args[args.length - 1];
+        files.add(out);
+        wavSource.set(out, args[args.indexOf("-i") + 1]);
+        options.onExtract?.();
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      const launch = launches.length;
+      launches.push(args);
+      const answer = options.engine?.(launch, args) ?? { code: 0 };
+      if (answer.code === 0) {
+        const outs = flagValues(args, "-of");
+        flagValues(args, "-f").forEach((wav, place) => {
+          const source = wavSource.get(wav);
+          if (!source) return;
+          const said = options.say?.(launch, args, source) ?? { language: "en" };
+          const out = `${outs[place]}.json`;
+          files.add(out);
+          texts.set(out, json(said.language, said.text ?? `launch ${launch}`));
+        });
+      }
+      return { code: answer.code, stdout: "", stderr: answer.stderr ?? "" };
+    },
+  };
+  const ctx = { store, runner, background: options.background } as unknown as ClientToolContext;
+  return {
+    ctx,
+    launches,
+    files,
+    kept,
+    words: async (src: string, language: string): Promise<string> =>
+      ((await peekTranscript(ctx, src, "small", language)) ?? { words: [] }).words
+        .map((w) => w.word)
+        .join(" "),
+  };
+}
+
+let seq = 0;
+/** A clip nobody has asked about: a run still joinable from another test is never joined. */
+const fresh = (): string => `/media/model-${++seq}.mp4`;
+
+/** A PC with no usable chip: the engine's own log said so on its latest run, and no hold is kept. */
+const noChip = (): void => recordSpeechRun(60, 120, "cpu");
+/** A PC whose chip crashed: the app keeps it off for a while. */
+const chipHeldOff = (): void => holdCpuOnly(ENGINE_CRASH);
+/** A PC whose latest run used its chip. */
+const chipWorks = (): void => recordSpeechRun(60, 6, "gpu");
+
+const WINDOWS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+const LINUX_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+/** The app's idea of the PC's operating system, which is what a PC with no history is assumed to be. */
+const hostIs = (userAgent: string): void => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
+  __resetHostInfo();
+};
+
+const fetchedUrls: string[] = [];
+beforeEach(() => {
+  localStorage.clear();
+  __resetWorkGate();
+  __setDownloadPolicy(SINGLE_ATTEMPT);
+  hostIs(WINDOWS_UA);
+  fetchedUrls.length = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: unknown) => {
+      fetchedUrls.push(String(url));
+      throw new Error("offline");
+    }),
+  );
+  reportAppError.mockClear();
+  reportTranscription.mockClear();
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  __resetHostInfo();
+  __setDownloadPolicy(PATIENT_DOWNLOAD);
+});
+
+describe("a PC that transcribes on its processor, with both files on disk", () => {
+  for (const [how, setUp] of [
+    ["has no usable chip", noChip],
+    ["has its chip held off after a crash", chipHeldOff],
+  ] as const) {
+    it(`runs the smaller file for a language the gate cleared, at the beam it cleared, on the processor (${how})`, async () => {
+      setUp();
+      const english = rig();
+      await runWhisper(english.ctx, fresh(), "small", "en");
+      expect(english.launches).toHaveLength(1);
+      expect(modelOf(english.launches[0])).toBe(pathOf(SMALL));
+      expect(onProcessor(english.launches[0])).toBe(true);
+      expect(beamOf(english.launches[0])).toBe(1);
+
+      const dutch = rig();
+      await runWhisper(dutch.ctx, fresh(), "small", "nl");
+      expect(modelOf(dutch.launches[0])).toBe(pathOf(SMALL));
+      expect(onProcessor(dutch.launches[0])).toBe(true);
+      expect(beamOf(dutch.launches[0])).toBe(DEFAULT_BEAM);
+    });
+
+    it(`runs the full-size file for Arabic and for a language the gate has no row for (${how})`, async () => {
+      setUp();
+      for (const language of ["ar", "th", "he"]) {
+        const r = rig();
+        await runWhisper(r.ctx, fresh(), "small", language);
+        expect(r.launches).toHaveLength(1);
+        expect(modelOf(r.launches[0])).toBe(pathOf(FULL));
+        expect(beamOf(r.launches[0])).toBe(beamFor("f16", language));
+      }
+    });
+  }
+
+  it("never launches the smaller file for a language the gate did not clear, and never without -ng, for ANY language the engine knows", async () => {
+    noChip();
+    for (const code of CODES) {
+      const r = rig();
+      await runWhisper(r.ctx, fresh(), "small", code);
+      expect(r.launches, code).toHaveLength(1);
+      const [launch] = r.launches;
+      const needed = processorBeam(code);
+      if (modelOf(launch) === pathOf(SMALL)) {
+        expect(onProcessor(launch), `${code} on the smaller file`).toBe(true);
+        expect(needed, `${code} was not cleared for the smaller file`).not.toBeNull();
+        expect(beamOf(launch), `${code} narrower than it was cleared at`).toBeGreaterThanOrEqual(
+          needed ?? DEFAULT_BEAM,
+        );
+      } else {
+        expect(modelOf(launch)).toBe(pathOf(FULL));
+        // The file's own decoding is what it always was.
+        expect(beamOf(launch), code).toBe(beamFor("f16", code));
+      }
+      // And the other way: a cleared language does get the smaller file when both are here.
+      expect(modelOf(launch) === pathOf(SMALL), `${code} cleared: ${needed}`).toBe(needed !== null);
+    }
+  });
+
+  it("keeps the file even when the chip comes back between the plan and the launch", async () => {
+    // The plan is made while the chip is held off; the hold ends while the audio is being extracted.
+    chipHeldOff();
+    const r = rig({ onExtract: () => releaseCpuOnly() });
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    expect(cpuOnlyNow()).toBe(false);
+    expect(r.launches).toHaveLength(1);
+    expect(modelOf(r.launches[0])).toBe(pathOf(SMALL));
+    expect(onProcessor(r.launches[0])).toBe(true);
+  });
+
+  it("does not take a crash of the smaller file's launch for the chip's, and keeps no hold for it", async () => {
+    noChip();
+    const r = rig({
+      engine: () => ({ code: ENGINE_CRASH, stderr: VULKAN_LOG }),
+    });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(TranscriptionFailure);
+    // One launch: no retry "with the chip off" of a launch that never had the chip on.
+    expect(r.launches).toHaveLength(1);
+    expect(onProcessor(r.launches[0])).toBe(true);
+    expect(cpuOnlyNow()).toBe(false);
+    expect(localStorage.getItem(SPEECH_CPU_ONLY_KEY)).toBeNull();
+    expect(r.kept.size).toBe(0);
+  });
+});
+
+describe("a PC that transcribes on its graphics chip", () => {
+  for (const [how, setUp] of [
+    ["has never run anything (Windows)", () => undefined],
+    ["ran on its chip last time", chipWorks],
+  ] as const) {
+    it(`runs the full-size file with today's decoding for every language, even with the smaller file on disk (${how})`, async () => {
+      setUp();
+      for (const code of CODES) {
+        const r = rig();
+        await runWhisper(r.ctx, fresh(), "small", code);
+        expect(r.launches, code).toHaveLength(1);
+        const [launch] = r.launches;
+        expect(modelOf(launch), code).toBe(pathOf(FULL));
+        expect(onProcessor(launch), code).toBe(false);
+        expect(beamOf(launch), code).toBe(beamFor("f16", code));
+      }
+    });
+  }
+
+  it("still goes to the processor, with the same file, when the chip is held off between the plan and the launch", async () => {
+    const r = rig({ onExtract: () => chipHeldOff() });
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    expect(modelOf(r.launches[0])).toBe(pathOf(FULL));
+    expect(onProcessor(r.launches[0])).toBe(true);
+  });
+
+  it("falls back to the processor after a chip crash with the full-size file, as it always did", async () => {
+    const r = rig({
+      engine: (launch) => (launch === 0 ? { code: ENGINE_CRASH, stderr: VULKAN_LOG } : { code: 0 }),
+    });
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    expect(r.launches).toHaveLength(2);
+    expect(r.launches.map(modelOf)).toEqual([pathOf(FULL), pathOf(FULL)]);
+    expect(r.launches.map(onProcessor)).toEqual([false, true]);
+    expect(cpuOnlyNow()).toBe(true);
+  });
+});
+
+describe("a PC that already holds the full-size file", () => {
+  it("keeps it, downloads nothing, and decodes as it always did, on the processor too", async () => {
+    // Today's launch: the chip is off only where a crash held it off; a PC with no chip is not given `-ng`.
+    noChip();
+    const r = rig({ installed: [FULL] });
+    await runWhisper(r.ctx, fresh(), "small", "en");
+    expect(modelOf(r.launches[0])).toBe(pathOf(FULL));
+    expect(onProcessor(r.launches[0])).toBe(false);
+    expect(beamOf(r.launches[0])).toBe(beamFor("f16", "en"));
+    expect(fetchedUrls).toEqual([]);
+
+    chipHeldOff();
+    const held = rig({ installed: [FULL] });
+    await runWhisper(held.ctx, fresh(), "small", "en");
+    expect(modelOf(held.launches[0])).toBe(pathOf(FULL));
+    expect(onProcessor(held.launches[0])).toBe(true);
+    expect(beamOf(held.launches[0])).toBe(beamFor("f16", "en"));
+    expect(fetchedUrls).toEqual([]);
+  });
+});
+
+describe("a language that is not what the plan predicted", () => {
+  it("refuses a transcript the smaller file made of a language it was not cleared for, and keeps the full-size file's", async () => {
+    // The last language this PC heard was English, so the plan is the smaller file; the clip turns out to be Arabic.
+    noChip();
+    localStorage.setItem("artdaddy.speech_language", "en");
+    const r = rig({
+      say: (launch) =>
+        launch === 0
+          ? { language: "ar", text: "words of the smaller file" }
+          : { language: "ar", text: "words of the full-size file" },
+    });
+    const src = fresh();
+    const kept = await runWhisper(r.ctx, src, "small", "auto");
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL)]);
+    // The smaller file's launch is a processor launch whatever the PC's history; the full-size file's is as it always was.
+    expect(onProcessor(r.launches[0])).toBe(true);
+    expect(kept.words.map((w) => w.word).join(" ")).toBe("words of the full-size file");
+    expect(await r.words(src, "auto")).toBe("words of the full-size file");
+  });
+
+  it("re-runs a language cleared only at 5 beams with the smaller file at 5 beams", async () => {
+    noChip();
+    localStorage.setItem("artdaddy.speech_language", "en");
+    const r = rig({ say: () => ({ language: "nl" }) });
+    await runWhisper(r.ctx, fresh(), "small", "auto");
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(SMALL)]);
+    expect(r.launches.map(beamOf)).toEqual([1, DEFAULT_BEAM]);
+  });
+
+  it("never keeps a transcript of Arabic made with the smaller file when the full-size file cannot be fetched", async () => {
+    noChip();
+    localStorage.setItem("artdaddy.speech_language", "en");
+    const r = rig({ installed: [SMALL], say: () => ({ language: "ar" }) });
+    const src = fresh();
+    const failure = await runWhisper(r.ctx, src, "small", "auto").catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(TranscriptionFailure);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    // One launch (the smaller file), refused at the commit point; the full-size file was asked for and was not there.
+    expect(r.launches).toHaveLength(1);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+    expect(r.kept.size).toBe(0);
+    expect(await r.words(src, "auto")).toBe("");
+  });
+
+  it("asks for the full-size file when Arabic is named and only the smaller one is here, and launches nothing without it", async () => {
+    noChip();
+    const r = rig({ installed: [SMALL] });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "ar").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    expect(r.launches).toEqual([]);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+  });
+});
+
+describe("a run over several files", () => {
+  it("is one launch of the smaller file on the processor, and a file the language of which it was not cleared for is run alone with the full-size file", async () => {
+    noChip();
+    const files = [fresh(), fresh()];
+    const r = rig({
+      background: true,
+      say: (launch, _args, clip) =>
+        clip === files[1]
+          ? {
+              language: "ar",
+              text: launch === 0 ? "second, smaller file" : "second, full-size file",
+            }
+          : { language: "en", text: "first" },
+    });
+    const out = await ensureTranscripts(r.ctx, files, "small", "en");
+    expect(out.every((o) => o.ok)).toBe(true);
+    expect(r.launches).toHaveLength(2);
+    expect(modelOf(r.launches[0])).toBe(pathOf(SMALL));
+    expect(onProcessor(r.launches[0])).toBe(true);
+    expect(flagValues(r.launches[0], "-f")).toHaveLength(2);
+    expect(modelOf(r.launches[1])).toBe(pathOf(FULL));
+    expect(flagValues(r.launches[1], "-f")).toHaveLength(1);
+    expect(await r.words(files[0], "en")).toBe("first");
+    expect(await r.words(files[1], "en")).toBe("second, full-size file");
+  });
+});
+
+describe("the file the app fetches when it starts", () => {
+  it("is the smaller one on a PC known to have no usable chip and holding neither file, from the first place", async () => {
+    noChip();
+    const r = rig({ installed: [] });
+    await ensureLaunchModel(r.ctx).catch(() => undefined);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[SMALL]));
+  });
+
+  it("is the full-size one on a PC that has a chip, and on a Windows PC that has never run anything", async () => {
+    chipWorks();
+    const chip = rig({ installed: [] });
+    await ensureLaunchModel(chip.ctx).catch(() => undefined);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+
+    localStorage.clear();
+    fetchedUrls.length = 0;
+    const fresh = rig({ installed: [] });
+    await ensureLaunchModel(fresh.ctx).catch(() => undefined);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+  });
+
+  it("is the smaller one on a Linux PC that has never run anything, whose engine has no chip", async () => {
+    hostIs(LINUX_UA);
+    const r = rig({ installed: [] });
+    await ensureLaunchModel(r.ctx).catch(() => undefined);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[SMALL]));
+  });
+
+  it("is nothing at all where the full-size file is already here, even on the processor", async () => {
+    noChip();
+    const r = rig({ installed: [FULL] });
+    expect(await ensureLaunchModel(r.ctx)).toEqual({ path: pathOf(FULL), downloaded: false });
+    expect(fetchedUrls).toEqual([]);
+  });
+
+  it("is the full-size one for a PC whose last language was Arabic, even on the processor", async () => {
+    noChip();
+    localStorage.setItem("artdaddy.speech_language", "ar");
+    const r = rig({ installed: [] });
+    await ensureLaunchModel(r.ctx).catch(() => undefined);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+  });
+});
+
+describe("where the engine is started", () => {
+  /** Every non-test source file of the app. */
+  const sources = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory())
+        return name === "__fixtures__" || name === "node_modules" ? [] : sources(full);
+      return /\.(ts|tsx)$/.test(name) && !/\.(test|e2e|smoke\.e2e)\.tsx?$/.test(name) ? [full] : [];
+    });
+
+  it("is one place, and that place checks the model file's path before it spawns anything", () => {
+    const root = path.join(__dirname, "..");
+    const spawners = sources(root).filter((file) => {
+      const text = readFileSync(file, "utf8");
+      return /program:\s*"whisper-cli"|\.run\(\s*"whisper-cli"/.test(text);
+    });
+    expect(spawners.map((f) => path.relative(root, f).replace(/\\/g, "/"))).toEqual([
+      "tools/transcribe.ts",
+    ]);
+    const text = readFileSync(spawners[0], "utf8");
+    const start = text.indexOf("const launch = async (cpuOnly: boolean");
+    expect(start).toBeGreaterThan(0);
+    const body = text.slice(start, text.indexOf("const engine = async", start));
+    const spawn = body.indexOf("runAsJob(");
+    // The plan, the added `-ng` and the last check all come before the process is started.
+    expect(body.indexOf("enginePath(args, cpuOnly)")).toBeGreaterThan(-1);
+    expect(body.indexOf("enginePath(args, cpuOnly)")).toBeLessThan(spawn);
+    expect(body.indexOf("checkLaunch(run)")).toBeGreaterThan(-1);
+    expect(body.indexOf("checkLaunch(run)")).toBeLessThan(spawn);
+    expect(body.match(/"whisper-cli"/g)).toHaveLength(2);
+  });
+});

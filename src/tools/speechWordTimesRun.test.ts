@@ -23,6 +23,7 @@ import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { FakeJobs } from "../test/fakeJobs";
 import { DIR, flagValues, freshSource, speechRig, type SpeechRigOptions } from "../test/speechRig";
 import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
+import { MODEL_MANIFEST } from "./modelManifest";
 import { __resetSpeechSession } from "./speechAdmission";
 import { cpuOnlyNow, holdCpuOnly } from "./speechBackend";
 import { __resetWordTimesShipped, __setWordTimesShipped, DTW_ARGS } from "./speechWordTimes";
@@ -164,8 +165,11 @@ describe("which launches of the engine carry word times", () => {
 
   it("gives a model other than the one measured none of them, on the processor with both on", async () => {
     const models = WHISPER_MODELS as Record<string, unknown>;
-    // The manifest names a model's file, so a `tiny` that borrows `small`'s spec must say which file it is.
+    const manifest = MODEL_MANIFEST as Record<string, unknown>;
+    // The manifest names a model's file, so a `tiny` that borrows `small`'s spec must say which file it is, and (as a
+    // later release adds one) be an entry of the manifest, which is what says which files may be launched at all.
     models.tiny = { ...WHISPER_MODELS.small, file: "ggml-tiny.bin" };
+    manifest.tiny = { ...MODEL_MANIFEST.small, file: "ggml-tiny.bin" };
     try {
       const got = await transcribed(
         { gate: true, flag: true, processor: true },
@@ -179,6 +183,7 @@ describe("which launches of the engine carry word times", () => {
       expect(got.launches[0]).not.toContain("-nfa");
     } finally {
       delete models.tiny;
+      delete manifest.tiny;
     }
   });
 
