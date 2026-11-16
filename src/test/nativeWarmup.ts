@@ -124,7 +124,8 @@ export async function warmupForRun(
   const crate = path.resolve(deps.root, "src-tauri");
   let runFiles: readonly string[] | undefined;
   try {
-    runFiles = deps.runFiles();
+    const listed = deps.runFiles();
+    runFiles = Array.isArray(listed) ? listed : undefined;
   } catch {
     runFiles = undefined;
   }
@@ -132,7 +133,13 @@ export async function warmupForRun(
     env: deps.env,
     hasCrate: deps.exists(path.join(crate, "Cargo.toml")),
     runFiles,
-    readText: deps.readText,
+    readText: (file) => {
+      try {
+        return deps.readText(file);
+      } catch {
+        return undefined;
+      }
+    },
   });
   if (!decision.warm) {
     deps.log(`${TAG} skipped: ${decision.reason}`);

@@ -12,7 +12,9 @@ import {
   warmupDecision,
   warmupForRun,
   type WarmChild,
+  type WarmupRunDeps,
 } from "./nativeWarmup";
+import { setupWith } from "./smokeGlobalSetup";
 
 // The smoke lane builds the native test program once before any case starts, so that no case pays
 // for a rebuild inside its own deadline. These tests judge what a run ends up doing: whether the
@@ -266,6 +268,78 @@ describe("warming for a vitest run", () => {
   it("lets the run go on after a failed build", async () => {
     const { result } = run({}, 101);
     await expect(result).resolves.toMatchObject({ warmed: true, outcome: { state: "failed" } });
+  });
+
+  it("builds when the file list is not a list, or when reading a file of it throws", async () => {
+    const notAList = run({ runFiles: (() => 42) as unknown as () => string[] });
+    expect((await notAList.result).warmed).toBe(true);
+    const unreadable = run({
+      readText: () => {
+        throw new Error("EBUSY");
+      },
+    });
+    expect((await unreadable.result).warmed).toBe(true);
+  });
+});
+
+// The entry vitest calls. Its one promise: whatever goes wrong inside the warm-up, the run goes on.
+describe("the global setup", () => {
+  const project = (paths: () => string[]) => ({ vitest: { state: { getPaths: paths } } });
+  function fakes(extra: Partial<WarmupRunDeps> = {}) {
+    const built = rig((child) => child.emit("close", 0));
+    const { cwd, ...deps } = built.deps;
+    void cwd;
+    const overrides = {
+      ...deps,
+      env: {},
+      root: "C:/app",
+      exists: () => true,
+      readText: () => NATIVE_FILE,
+      ...extra,
+    };
+    return { built, overrides };
+  }
+
+  it("builds once for a run that holds a native case", async () => {
+    const { built, overrides } = fakes();
+    await setupWith(
+      project(() => ["C:/app/src/native.e2e.ts"]),
+      overrides,
+    );
+    expect(built.spawned).toHaveLength(1);
+    expect(built.spawned[0].args).toEqual(nativeRenderCargoArgs("build"));
+  });
+
+  it("does not let an unexpected error out: the run goes on, and the log says so", async () => {
+    const { built, overrides } = fakes({
+      now: () => {
+        throw new Error("clock broke");
+      },
+    });
+    await expect(
+      setupWith(
+        project(() => ["C:/app/src/native.e2e.ts"]),
+        overrides,
+      ),
+    ).resolves.toBeUndefined();
+    expect(built.logs.join("\n")).toMatch(/unexpected error, the run goes on \(clock broke\)/);
+  });
+
+  it("does not let an error out even when it cannot be reported", async () => {
+    const { overrides } = fakes({
+      now: () => {
+        throw "not an Error";
+      },
+      log: () => {
+        throw new Error("stdout closed");
+      },
+    });
+    await expect(
+      setupWith(
+        project(() => ["f"]),
+        overrides,
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 
