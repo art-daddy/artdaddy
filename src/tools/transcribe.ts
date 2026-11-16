@@ -622,13 +622,36 @@ export async function ensureWhisperModel(
   if (existing) return joinDownload(existing, ctx.signal);
 
   const policy = downloadPolicy;
+  // Two files never download at once: the one progress line, its Cancel and its failure card belong to the download
+  // under way, so a request for another file waits for the installs already in flight (one Cancel ends them all).
+  const ahead = [...modelDownloads.values()];
   const install = new ModelInstall(
     spec.bytes,
-    (self) => downloadModel(ctx, path, size, spec, fetchImpl, self, policy),
+    (self) => {
+      const start = (): Promise<InstalledModel> =>
+        downloadModel(ctx, path, size, spec, fetchImpl, self, policy);
+      return ahead.length === 0 ? start() : afterTheOthers(ahead, self).then(start);
+    },
     () => modelDownloads.delete(key),
   );
   modelDownloads.set(key, install);
   return joinDownload(install, ctx.signal);
+}
+
+/** Wait until every install in `ahead` has ended, however it ended, or until `self` is cancelled first: then at once,
+ *  in the download's own words for a Cancel. Nothing is shown and nobody is asked for anything meanwhile. */
+function afterTheOthers(ahead: readonly ModelInstall[], self: ModelInstall): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const signal = self.ac.signal;
+    const cancelled = (): void =>
+      reject(new Error(modelCancelledMessage(self.received, self.total)));
+    if (signal.aborted) return cancelled();
+    signal.addEventListener("abort", cancelled, { once: true });
+    void Promise.allSettled(ahead.map((other) => other.promise)).then(() => {
+      signal.removeEventListener("abort", cancelled);
+      resolve();
+    });
+  });
 }
 
 /** Stop the speech model's download now, whoever is waiting for it: the person pressed Cancel.
@@ -638,6 +661,12 @@ export function cancelModelDownload(): void {
   // Remembered, so that the launch prefetch does not start it again behind his back (modelDecline.ts).
   declineModel();
   for (const install of modelDownloads.values()) install.ac.abort();
+}
+
+/** Tests only: no download is under way, whatever a test left running (a waiting one is cancelled with it). */
+export function __resetModelDownloads(): void {
+  for (const install of modelDownloads.values()) install.ac.abort();
+  modelDownloads.clear();
 }
 
 /** What a download left on this PC for later, in closed words: never a path, a name or an address. */

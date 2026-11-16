@@ -34,6 +34,7 @@ import type { ClientToolContext } from "./context";
 import { MODEL_MANIFEST, primaryUrl, secondPlaces, type ModelEntry } from "./modelManifest";
 import { ProjectStoreAccess } from "./store";
 import {
+  __resetModelDownloads,
   __setDownloadPolicy,
   ensureWhisperModel,
   PATIENT_DOWNLOAD,
@@ -164,6 +165,8 @@ beforeEach(() => {
   __setDownloadPolicy(SINGLE_ATTEMPT);
 });
 afterEach(async () => {
+  // A download a test left running (a gated one) must not make the next test wait for it.
+  __resetModelDownloads();
   __setDownloadPolicy(PATIENT_DOWNLOAD);
   clearModelDownload();
   setModelDownloadFailure(null);
@@ -524,4 +527,135 @@ describe("every file of the manifest, installed side by side", () => {
       expect(fs.parts()).toEqual([]);
     },
   );
+});
+
+// Two different files never download at once: there is one progress line, one Cancel and one failure card, and they
+// belong to the download under way. A request for the other file waits its turn (a prefetch of the smaller file and a
+// request that needs the full-size one, as on a fresh Linux install).
+describe("two different files asked for together", () => {
+  const SMALLER = "small_q8_0";
+  const FULLSIZE = "small";
+
+  /** A fetch that holds its answer back until the test lets it go, and counts the times it was asked. */
+  function gated(rig: Rig): { fetchImpl: typeof fetch; open: () => void; asked: () => number } {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    let asked = 0;
+    const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
+      asked++;
+      return gate.then(() => rig.fetchImpl(input, init));
+    }) as typeof fetch;
+    return { fetchImpl, open, asked: () => asked };
+  }
+
+  /** The two installs of one disk, the second asked for while the first is on its way. */
+  async function both() {
+    const fs = new MemoryModelFs();
+    const smaller = await rigFor(SMALLER, { fs });
+    const full = await rigFor(FULLSIZE, { fs });
+    const first = gated(smaller);
+    const second = gated(full);
+    __setDownloadPolicy(SINGLE_ATTEMPT);
+    const a = ensureWhisperModel(smaller.ctx, SMALLER, first.fetchImpl, smaller.spec);
+    const b = ensureWhisperModel(full.ctx, FULLSIZE, second.fetchImpl, full.spec);
+    // A test that fails before it awaits them must not leave a rejection nobody watches.
+    void a.catch(() => undefined);
+    void b.catch(() => undefined);
+    // Let the first reach its first request, and let the second go as far as it can.
+    await vi.waitFor(() => expect(first.asked()).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { fs, smaller, full, first, second, a, b };
+  }
+
+  it("starts the second download only when the first is over, with one progress line and one Cancel for the one under way", async () => {
+    const { fs, smaller, full, second, first, a, b } = await both();
+    // The first file is on the screen with its Cancel; the second has asked nobody for anything: it waits.
+    expect(useModelDownload.getState()).toMatchObject({ total: smaller.spec.bytes });
+    expect(useModelDownload.getState().cancel).not.toBeNull();
+    expect(second.asked()).toBe(0);
+    expect(full.places.seen).toEqual([]);
+
+    first.open();
+    await a;
+    // The second begins when the first is over: its own progress line, with a Cancel again.
+    await vi.waitFor(() => expect(second.asked()).toBe(1));
+    expect(useModelDownload.getState()).toMatchObject({ total: full.spec.bytes });
+    expect(useModelDownload.getState().cancel).not.toBeNull();
+    second.open();
+    await b;
+
+    // One after the other, in the order they were asked for, each whole.
+    expect(fs.moved.map((m) => m.to)).toEqual([smaller.path, full.path]);
+    for (const rig of [smaller, full]) {
+      expect(fs.bytes.get(rig.path)?.equals(rig.content), rig.entry.file).toBe(true);
+      expect(JSON.parse(fs.texts.get(rig.marker) ?? "null")).toEqual({
+        bytes: rig.spec.bytes,
+        sha256: rig.spec.sha256,
+      });
+    }
+    expect(fs.parts()).toEqual([]);
+    expect(useModelDownload.getState()).toMatchObject({ total: 0, cancel: null });
+  });
+
+  it("ends the waiting download too when the person presses Cancel: nobody is asked for anything for it", async () => {
+    const { fs, full, second, a, b } = await both();
+    useModelDownload.getState().cancel?.();
+    await expect(a).rejects.toThrow(/speech model download cancelled/);
+    await expect(b).rejects.toThrow(/speech model download cancelled/);
+    expect(second.asked()).toBe(0);
+    expect(full.places.seen).toEqual([]);
+    expect(fs.bytes.has(full.path)).toBe(false);
+    expect(useModelDownload.getState()).toMatchObject({ total: 0, cancel: null });
+  });
+
+  it("goes on with the second file when the first one fails: the first one's card is replaced by the second one's progress", async () => {
+    const fs = new MemoryModelFs();
+    const smaller = await rigFor(SMALLER, { fs, mirrors: false });
+    const full = await rigFor(FULLSIZE, { fs });
+    smaller.places.script("first", { status: 500 });
+    const second = gated(full);
+    __setDownloadPolicy(SINGLE_ATTEMPT);
+    const a = ensureWhisperModel(smaller.ctx, SMALLER, smaller.fetchImpl, smaller.spec);
+    const b = ensureWhisperModel(full.ctx, FULLSIZE, second.fetchImpl, full.spec);
+    void b.catch(() => undefined);
+    await expect(a).rejects.toThrow(/HTTP 500/);
+    await vi.waitFor(() => expect(second.asked()).toBe(1));
+    expect(useModelDownload.getState()).toMatchObject({
+      failure: null,
+      failureKey: null,
+      total: full.spec.bytes,
+    });
+    second.open();
+    expect(await b).toEqual({ path: full.path, downloaded: true });
+    expect(fs.bytes.has(smaller.path)).toBe(false);
+    expect(fs.moved.map((m) => m.to)).toEqual([full.path]);
+  });
+
+  it("never starts a waiting download whose last waiter has left", async () => {
+    const fs = new MemoryModelFs();
+    const smaller = await rigFor(SMALLER, { fs });
+    const full = await rigFor(FULLSIZE, { fs });
+    const first = gated(smaller);
+    const second = gated(full);
+    __setDownloadPolicy(SINGLE_ATTEMPT);
+    const a = ensureWhisperModel(smaller.ctx, SMALLER, first.fetchImpl, smaller.spec);
+    const leaving = new AbortController();
+    const b = ensureWhisperModel(
+      { ...full.ctx, signal: leaving.signal },
+      FULLSIZE,
+      second.fetchImpl,
+      full.spec,
+    );
+    void a.catch(() => undefined);
+    void b.catch(() => undefined);
+    await vi.waitFor(() => expect(first.asked()).toBe(1));
+    leaving.abort();
+    await expect(b).rejects.toThrow(/speech model download cancelled/);
+    first.open();
+    await a;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(second.asked()).toBe(0);
+    expect(fs.bytes.has(full.path)).toBe(false);
+    expect(fs.moved.map((m) => m.to)).toEqual([smaller.path]);
+  });
 });
