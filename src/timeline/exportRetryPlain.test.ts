@@ -29,11 +29,13 @@ import { __resetJobSupervisor, __setJobSupervisor, type JobSpec } from "../tools
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
 import { ctxApplyOp, ensureTimeline, loadTimeline } from "./engine";
+import { attempts } from "./exportAttempts";
 import {
   __resetExportQueue,
   listExportRecords,
   localDeliveryPort,
   offerExportRetry,
+  restartDecisions,
   retryExport,
   submitExport as submitWithDependencies,
   whenExportEnds,
@@ -112,6 +114,18 @@ const FLOOR =
 const GRAPH_REFUSED = "native render failed: ffmpeg: Error initializing filters\n";
 const DRIVER =
   "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder\n";
+/** The PC runs short of memory a moment into the run: what the app process says the export had reached, then why it stopped. */
+const MEMORY_STOP = `native render resident: ${JSON.stringify({ limit: 3.5 * 1024 ** 3, sampled_peak: 1.2 * 1024 ** 3, workers_at_peak: [] })}\n${FLOOR}`;
+/** An AMD chip that has proven itself on this PC: what lets the app choose it for a Fast export. */
+const PROVEN_AMD: ChipVerdict = {
+  maker: "amd",
+  adapter: { maker: "amd", device: "15bf", driver: "32.0.1" },
+  sizeClass: "hd",
+  ok: true,
+  result: "passed",
+  ssimMilli: 870,
+  ms: 1800,
+};
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 async function flush(turns = 20): Promise<void> {
@@ -457,6 +471,142 @@ describe("the queue: Try again is plain exactly when the failed export ran a lea
   });
 });
 
+// The app's own restart after a graphics chip failure is the person's Try again, pressed by the app: after the same failure of the same export it asks for what the click asks for. Both are put to ONE
+// failed export here (the way to start again is a fake that writes every call down and refuses it, so the failure stands and the click can follow the restart), so the two cannot drift apart for any failure
+// the chip row accepts: not for the rung, not for the processor and not for 0.27.0's recipe (`plain`).
+describe("the queue: the app's own restart on the processor asks for what Try again asks for after the same failure", () => {
+  const GIB = 1024 ** 3;
+  /** What a call to start again asks for, without what only one of the two callers has (the restart's link and its signal, the click's store). */
+  const asked = (call: Call) => ({
+    rung: call.rung,
+    failedRung: call.failedRung,
+    processor: call.options.processor,
+    plain: call.options.plain,
+  });
+
+  /** Submit an export that fails with `failure.error` while the app may start it again by itself (the switches as shipped), then press Try again on what is left. The first call the fake is asked
+   *  for is the app's own restart, when the failure is one it restarts; the click is the last. */
+  async function startedAgainAfter(
+    failure: Failure,
+  ): Promise<{ record: ExportRecord; byApp: Call | null; byPerson: Call }> {
+    __setExportConfirmationForTests(async () => "continue");
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16 * GIB,
+      available_memory_bytes: 6 * GIB + 1,
+      scratch_free_bytes: 100e9,
+      destination_free_bytes: 100e9,
+      local_fast_candidate: false,
+      budgets: { memoryBytes: 3.5 * GIB, temporaryBytes: 18e9, executionSeconds: 28800 },
+    });
+    useExportJob.setState({ calibrations: [] });
+    const calls: Call[] = [];
+    let fail!: () => void;
+    const failing = new Promise<void>((resolve) => (fail = resolve));
+    const submitted = await submitWithDependencies({
+      store: new ProjectStoreAccess(DIR, new Fs()),
+      dependencies: [],
+      destPath: "C:/out/final.mp4",
+      stagePath: "C:/out/final.mp4.part-x",
+      filename: "final.mp4",
+      meta: {
+        ...META,
+        ...(failure.plan
+          ? { plan: { ...failure.plan, ...(failure.lean ? { lean: failure.lean } : {}) } }
+          : {}),
+        ...(failure.chip
+          ? { choice: { encoder: "amd" as const, reason: "over_minute" as const, tests: [] } }
+          : {}),
+      },
+      run: async () => {
+        await failing;
+        throw new Error(failure.error);
+      },
+    });
+    // The way to start again is there before the failure, as it is for an export the tool started: the app decides on it when the export fails.
+    offerExportRetry(submitted.job_id, async (rung, failedRung, options) => {
+      calls.push({ rung, failedRung, options });
+      return { ok: false, error: "not started in this test" };
+    });
+    fail();
+    await whenExportsSettle();
+    const record = listExportRecords().find((r) => r.job_id === submitted.job_id)!;
+    expect(record.state).toBe("failed");
+    const byApp = calls.length > 0 ? calls[0] : null;
+    await retryExport(submitted.job_id);
+    expect(calls).toHaveLength(byApp ? 2 : 1);
+    return { record, byApp, byPerson: calls.at(-1)! };
+  }
+
+  const RAN: LeanRecord = { ran: ["zoom", "stills"], kept: [] };
+  // The chip's three triggers are a failed encoder, a failed check of the file and a stop for standing still while idle; the last needs the watch's clock and is driven in exportChipRestart.test.ts.
+  const CHIP_FAILURES: Array<[string, string]> = [
+    ["the driver fails in the middle of the render", DRIVER],
+    ["the finished file fails its check", "artifact verification failed: frame count 59 of 60"],
+  ];
+
+  describe.each(CHIP_FAILURES)("when %s", (_what, error) => {
+    it("after a lean export the restart is on the processor and plain, as the click is", async () => {
+      const { record, byApp, byPerson } = await startedAgainAfter({
+        error,
+        plan: { rung: 0 },
+        lean: RAN,
+        chip: true,
+      });
+      expect(record.lean).toBe(true);
+      expect(byApp, "the app started it again by itself").not.toBeNull();
+      expect(byApp!.options).toMatchObject({
+        processor: true,
+        plain: true,
+        restart: { kind: "auto" },
+      });
+      expect(byPerson.options).toMatchObject({ processor: true, plain: true });
+      expect(asked(byApp!)).toEqual(asked(byPerson));
+    });
+
+    it.each([
+      ["a plan that ran no lean path at all", undefined],
+      ["a record that only kept 0.27.0's recipe", { ran: [], kept: ["flag_off"] }],
+    ] as [string, LeanRecord | undefined][])(
+      "after %s the restart is on the processor and as it always was: no plain, not even an empty key",
+      async (_name, lean) => {
+        const { byApp, byPerson } = await startedAgainAfter({
+          error,
+          plan: { rung: 0 },
+          ...(lean ? { lean } : {}),
+          chip: true,
+        });
+        expect(byApp, "the app started it again by itself").not.toBeNull();
+        expect(byApp!.options.processor).toBe(true);
+        expect(byApp!.options).not.toHaveProperty("plain");
+        expect(asked(byApp!)).toEqual(asked(byPerson));
+      },
+    );
+  });
+
+  // A failure no recipe can cause is not the chip's either: the app does not start it again at all, and the click keeps the recipe it had (0.27.0's would only be slower).
+  it.each([
+    ["storage_full", DISK],
+    ["storage_unavailable", "EACCES: permission denied, open 'E:/out/final.mp4.part'"],
+    ["source_unavailable", "ENOENT: no such file or directory, open 'C:/media/a.mov'"],
+  ])(
+    "a lean export on a chip that failed for %s is not started again by the app, and the click is not plain",
+    async (code, error) => {
+      const { record, byApp, byPerson } = await startedAgainAfter({
+        error,
+        plan: { rung: 0 },
+        lean: RAN,
+        chip: true,
+      });
+      expect(failureOf(error).code).toBe(code);
+      expect(record.lean).toBe(true);
+      expect(byApp).toBeNull();
+      expect(restartDecisions()).toEqual([]);
+      expect(byPerson.options).not.toHaveProperty("plain");
+      expect(byPerson.options).not.toHaveProperty("processor");
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Part 2: the real tool. A project with one zooming clip, the real export tool, plan and queue, a fake supervisor, and a runner that answers the lean probe.
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -694,16 +844,7 @@ describe("the export tool: the retry builds 0.27.0's command", () => {
     leanSwitches(true);
     // The person's click on the failure: the app's own restart on the processor (chip_restart) is off, as 0.27.0 ran. It has its own suites.
     __setExportFlag("chip_restart", false);
-    const chip: ChipVerdict = {
-      maker: "amd",
-      adapter: { maker: "amd", device: "15bf", driver: "32.0.1" },
-      sizeClass: "hd",
-      ok: true,
-      result: "passed",
-      ssimMilli: 870,
-      ms: 1800,
-    };
-    vi.mocked(findChip).mockResolvedValue({ chip, events: [] });
+    vi.mocked(findChip).mockResolvedValue({ chip: PROVEN_AMD, events: [] });
     const first = await t.exportNow("a", { exportMode: "fast" });
     expect(first.ok, JSON.stringify(first)).toBe(true);
     await flush();
@@ -729,6 +870,80 @@ describe("the export tool: the retry builds 0.27.0's command", () => {
     expect(retried.graph).toBe(old.graph);
     expect(retried.command).toEqual(old.command);
     expect(retried.graph).toBe(await t.todaysGraph());
+  });
+
+  it("(e) after a graphics chip failure the app's own restart is built as that click is: on the processor and plain, with 0.27.0's command, and it is the only restart", async () => {
+    const t = await world();
+    leanSwitches(true);
+    // The switches as shipped (chip_restart is on): nobody presses anything, the app starts the export again by itself. The PC has room, so a later memory stop is one it would restart too.
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16 * 1024 ** 3,
+      available_memory_bytes: 8 * 1024 ** 3,
+      scratch_free_bytes: 100e9,
+      destination_free_bytes: 100e9,
+      local_fast_candidate: false,
+      budgets: { memoryBytes: 3.5 * 1024 ** 3, temporaryBytes: 18e9, executionSeconds: 28800 },
+    });
+    vi.mocked(findChip).mockResolvedValue({ chip: PROVEN_AMD, events: [] });
+    const first = await t.exportNow("a", { exportMode: "fast" });
+    expect(first.ok, JSON.stringify(first)).toBe(true);
+    await flush();
+    const tried = await t.look(t.jobs.submitted[0]);
+    expect(tried.codec).toBe("h264_amf");
+    expect(tried.lean?.ran).toContain("zoom");
+    expect(tried.graph).toContain("alphamerge");
+
+    t.jobs.exit(first.job_id, -1, DRIVER);
+    await vi.waitFor(() => expect(t.jobs.submitted).toHaveLength(2), {
+      timeout: 5_000,
+      interval: 20,
+    });
+    await flush(40);
+    expect(t.jobs.submitted, "one successor, not two").toHaveLength(2);
+    const restarted = await t.look(t.jobs.submitted[1]);
+    expect(restarted.id).not.toBe(first.job_id);
+    expect(restartDecisions().map((d) => d.record)).toEqual(["eligible"]);
+    expect(listExportRecords()).toHaveLength(1);
+    expect(listExportRecords()[0]).toMatchObject({
+      job_id: restarted.id,
+      state: "running",
+      attempt: 2,
+      restarted: "processor",
+      restartReason: "chip_failed",
+    });
+    // What the click would have built: the processor from its normal setting, with 0.27.0's recipe and not the lean one that was running when the chip stopped.
+    expect(restarted.codec).toBe("libx264");
+    expect(restarted.rung).toBe(0);
+    expect(restarted.lean).toEqual({ ran: [], kept: [] });
+    expect(restarted.graph).not.toContain("alphamerge");
+    expect(restarted.graph).toBe(await t.todaysGraph());
+
+    // A second failure of that successor is final even though it is one the app would restart (the PC has room): exactly one restart.
+    expect(await t.failWith(restarted.id, MEMORY_STOP)).toMatchObject({
+      job_id: restarted.id,
+      state: "failed",
+      canRetry: true,
+      attempt: 2,
+    });
+    await flush(40);
+    expect(t.jobs.submitted, "no third attempt by itself").toHaveLength(2);
+    expect(restartDecisions().map((d) => d.record)).toEqual(["eligible", "second"]);
+    expect(attempts.chainOf(first.job_id)).toHaveLength(2);
+
+    // The click after that stays plain (the export that ran plain has no lean path on its record: the way to start it again carries that), one rung gentler for the memory.
+    await retryExport(first.job_id);
+    await flush();
+    expect(t.jobs.submitted).toHaveLength(3);
+    const third = await t.look(t.jobs.submitted[2]);
+    expect(third.rung).toBe(1);
+    expect(third.lean).toEqual({ ran: [], kept: [] });
+    expect(third.graph).not.toContain("alphamerge");
+
+    // 0.27.0's own command for the processor, from the same tool with the lean switches off: the restart is that, byte for byte.
+    const old = await oldRecipe(t);
+    expect(old.codec).toBe("libx264");
+    expect(restarted.graph).toBe(old.graph);
+    expect(restarted.command).toEqual(old.command);
   });
 
   it("an export that ran no lean path is retried exactly as before: the lean paths are built afresh, nothing is made plain", async () => {
