@@ -23,8 +23,11 @@ vi.mock("../api/appEvents", async (orig) => ({
 }));
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
-// A plan that names the graphics chip for any file, to see what the last check does when the plan is wrong.
+// A plan that names the graphics chip for any file, to see what the last check does when the plan is wrong. The last
+// check is also recorded as it passes: whatever the scenarios below start the engine with must be arguments it passed
+// (a second way to start the engine is seen by what it does, not by what it is spelled like).
 const wrongPlan = vi.hoisted(() => ({ on: false }));
+const lastCheck = vi.hoisted(() => ({ passed: [] as string[][], unchecked: [] as string[][] }));
 vi.mock("./speechModel", async (orig) => {
   const real = await orig<typeof import("./speechModel")>();
   return {
@@ -33,8 +36,14 @@ vi.mock("./speechModel", async (orig) => {
       wrongPlan.on
         ? { cpuOnly: false, key: real.modelKeyOfPath(args[args.indexOf("-m") + 1]) ?? "small" }
         : real.launchPlan(args, cpuOnly),
+    assertLaunchArgv: (argv: readonly string[]) => {
+      real.assertLaunchArgv(argv); // a launch the manifest does not allow throws: it is never recorded as passed
+      lastCheck.passed.push([...argv]);
+    },
   };
 });
+const wasChecked = (argv: readonly string[]): boolean =>
+  lastCheck.passed.some((seen) => JSON.stringify(seen) === JSON.stringify(argv));
 
 // The app's start-up code reads the data folder and the file system through the desktop shell: here, a folder in memory.
 vi.mock("./tauri", async (orig) => ({
@@ -170,6 +179,7 @@ function rig(options: RigOptions = {}) {
       }
       const launch = launches.length;
       launches.push(args);
+      if (!wasChecked(args)) lastCheck.unchecked.push(args);
       const outs = flagValues(args, "-of");
       flagValues(args, "-f").forEach((wav, place) => {
         const source = wavSource.get(wav);
@@ -211,6 +221,8 @@ const WINDOWS_UA =
 const fetchedUrls: string[] = [];
 beforeEach(() => {
   localStorage.clear();
+  lastCheck.passed.length = 0;
+  lastCheck.unchecked.length = 0;
   __resetWorkGate();
   __resetPrefetch();
   clearModelDownload();
@@ -230,6 +242,10 @@ beforeEach(() => {
   reportTranscription.mockClear();
 });
 afterEach(() => {
+  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
+  expect(lastCheck.unchecked, "the engine was started with arguments the last check never saw").toEqual(
+    [],
+  );
   wrongPlan.on = false;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();

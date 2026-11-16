@@ -23,6 +23,24 @@ vi.mock("../api/appEvents", async (orig) => ({
 }));
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
+// The last check on the arguments about to be spawned, recorded as it passes. Whatever the engine is started with in
+// the scenarios below must be arguments that check passed: a process started any other way (a second spawner that
+// names the program through a constant, say, which no search of the source for the program's name would find) is
+// seen here by what it did, not by what it is spelled like.
+const lastCheck = vi.hoisted(() => ({ passed: [] as string[][], unchecked: [] as string[][] }));
+vi.mock("./speechModel", async (orig) => {
+  const real = await orig<typeof import("./speechModel")>();
+  return {
+    ...real,
+    assertLaunchArgv: (argv: readonly string[]) => {
+      real.assertLaunchArgv(argv); // a launch the manifest does not allow throws: it is never recorded as passed
+      lastCheck.passed.push([...argv]);
+    },
+  };
+});
+const wasChecked = (argv: readonly string[]): boolean =>
+  lastCheck.passed.some((seen) => JSON.stringify(seen) === JSON.stringify(argv));
+
 import type { ClientToolContext } from "./context";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { __resetHostInfo } from "../platform/host";
@@ -30,7 +48,7 @@ import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
 import { cpuOnlyNow, holdCpuOnly, releaseCpuOnly, SPEECH_CPU_ONLY_KEY } from "./speechBackend";
 import { beamFor, DEFAULT_BEAM } from "./speechDecoding";
 import { TranscriptionFailure } from "./speechFailure";
-import { processorBeam } from "./speechModel";
+import { assertLaunchArgv, processorBeam } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
 import { __resetWordTimesShipped, __setWordTimesShipped, DTW_ARGS } from "./speechWordTimes";
 import {
@@ -148,6 +166,7 @@ function rig(options: RigOptions = {}) {
       }
       const launch = launches.length;
       launches.push(args);
+      if (!wasChecked(args)) lastCheck.unchecked.push(args);
       const answer = options.engine?.(launch, args) ?? { code: 0 };
       if (answer.code === 0) {
         const outs = flagValues(args, "-of");
@@ -200,6 +219,8 @@ const hostIs = (userAgent: string): void => {
 const fetchedUrls: string[] = [];
 beforeEach(() => {
   localStorage.clear();
+  lastCheck.passed.length = 0;
+  lastCheck.unchecked.length = 0;
   __resetWorkGate();
   __setDownloadPolicy(SINGLE_ATTEMPT);
   hostIs(WINDOWS_UA);
@@ -215,6 +236,10 @@ beforeEach(() => {
   reportTranscription.mockClear();
 });
 afterEach(() => {
+  // Whatever scenario ran, the engine was only ever started with arguments the last check had passed.
+  expect(lastCheck.unchecked, "the engine was started with arguments the last check never saw").toEqual(
+    [],
+  );
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   __resetHostInfo();
@@ -549,5 +574,17 @@ describe("where the engine is started", () => {
     expect(body.indexOf("checkLaunch(run)")).toBeGreaterThan(-1);
     expect(body.indexOf("checkLaunch(run)")).toBeLessThan(spawn);
     expect(body.match(/"whisper-cli"/g)).toHaveLength(2);
+  });
+
+  it("is also watched by what it does: every scenario above fails if the engine is started with arguments the last check never saw", () => {
+    const stray = ["-m", pathOf(SMALL), "-f", "x.wav"];
+    expect(wasChecked(stray)).toBe(false);
+    // The same arguments through the last check, as the app's single start passes them, are seen; the stray ones are not.
+    assertLaunchArgv([...stray, "-ng"]);
+    expect(wasChecked([...stray, "-ng"])).toBe(true);
+    expect(wasChecked(stray)).toBe(false);
+    // A launch the manifest does not allow is refused and is never recorded as passed.
+    expect(() => assertLaunchArgv(stray)).toThrow();
+    expect(wasChecked(stray)).toBe(false);
   });
 });
