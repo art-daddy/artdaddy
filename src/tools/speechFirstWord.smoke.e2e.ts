@@ -33,7 +33,10 @@
 //   L13_ALLOW=1      pretend the owner measured this model file on this path: the harness adds it to the app's measured lists (and turns
 //                    the chip constant on for L13_PATH=chip) so the rule CAN fire there. Off: the rule must not fire on an unmeasured pair.
 //   L13_SET          synthetic | real | all (default all);  L13_ONLY  ids, comma separated, or re:<regex>;  L13_LIMIT  the first N
-//   L13_MODES        default today,rule;  L13_PART  runs | gettranscript | all (default);  L13_LANG  named (default) | auto
+//   L13_KIND         today | fix: only the clips the corpus expects to stay today's / to get the alignment
+//   L13_MODES        default today,rule;  L13_PART  runs | gettranscript | argv | all (default);  L13_LANG  named (default) | auto
+//                    argv: runs nothing; writes the app's own argv for the processor and the chip, without and with the alignment, to
+//                    L13_ARGV_OUT (the input of helpers\c-rig\work\chip_probe.mjs)
 //   L13_OUT          the JSON lines file (default reports/l13/<engine>-<model>-<path>-<time>.jsonl);  L13_SCRATCH  scratch parent folder
 //   L13_CORES        what the app is told the PC has (default: all of them: the engine's -t is cores - 2, at most 8)
 //   fake engine only: L13_FAKE_FAULT=dtw-exit|dtw-garbage|dtw-missing|always-exit (L13_FAKE_FAULT_ONLY=<regex of clip ids>) makes the
@@ -116,6 +119,9 @@ const MODEL_KEY = process.env.L13_MODEL ?? "small";
 const PC = process.env.L13_PATH === "chip" ? "chip" : "processor";
 const ALLOW = process.env.L13_ALLOW === "1";
 const PART = process.env.L13_PART ?? "all";
+const PART_RUNS = PART === "all" || PART === "runs";
+const PART_GT = PART === "all" || PART === "gettranscript";
+const PART_ARGV = PART === "argv";
 const NAMED_LANGUAGE = process.env.L13_LANG !== "auto";
 const MODES = (process.env.L13_MODES ?? "today,rule")
   .split(",")
@@ -191,6 +197,8 @@ function loadCorpus(): CorpusClip[] {
         .map((s) => s.trim())
         .includes(c.id),
     );
+  const kind = process.env.L13_KIND ?? "";
+  if (kind === "today" || kind === "fix") clips = clips.filter((c) => c.expected_kind === kind);
   const limit = Number(process.env.L13_LIMIT) || 0;
   return limit > 0 ? clips.slice(0, limit) : clips;
 }
@@ -440,17 +448,17 @@ const ctxFor = (label: string, runner: CommandRunner, dir = PROJ): ClientToolCon
   ({ store: new ProjectStoreAccess(dir, fsFor(label)), runner }) as unknown as ClientToolContext;
 
 /** The app's state for one case: the processor held (or not), and which side of the rule the constants are on. */
-function configure(mode: Mode): void {
+function configure(mode: Mode, pc: "processor" | "chip" = PC, allow = ALLOW): void {
   __resetSpeechJobs();
   __resetSpeechSession();
   __resetWorkGate();
   __resetExportFlags();
   __resetWordTimesShipped();
   localStorage.clear();
-  if (PC === "processor") holdCpuOnly(null);
+  if (pc === "processor") holdCpuOnly(null);
   const rule = mode === "rule";
   __setWordTimesShipped(rule);
-  __setWordTimesChipShipped(rule && PC === "chip" && ALLOW);
+  __setWordTimesChipShipped(rule && pc === "chip" && allow);
   __setExportFlag("speech_word_times", true);
 }
 /** Can the rule fire for this model file on this path at all (the app's lists, plus what L13_ALLOW added)? */
@@ -606,7 +614,7 @@ beforeAll(async () => {
   __setDownloadPolicy(SINGLE_ATTEMPT);
   await installModel();
   if (ALLOW) allowModel();
-  if (!FAKE && process.env.L13_WARMUP !== "0") {
+  if (!FAKE && PART !== "argv" && process.env.L13_WARMUP !== "0") {
     const warm = await runCase(CLIPS[0], "today");
     await appendRecord({
       schema: "l13-first-word-run/1",
@@ -633,7 +641,7 @@ afterAll(async () => {
   await fsp.rm(SCRATCH, { recursive: true, force: true }).catch(() => undefined);
 });
 
-describe.skipIf(missing.length > 0 || PART === "gettranscript")(
+describe.skipIf(missing.length > 0 || !PART_RUNS)(
   `the first-word rule through the app's own code (${ENGINE} engine, ${MODEL_KEY}, ${PC})`,
   () => {
     for (const clip of CLIPS) {
@@ -731,8 +739,11 @@ function check(
     const last = run.launches[run.launches.length - 1];
     expect(normalized(last.argv), `${label}: the retry is the gate-off launch`).toEqual(base);
   } else {
-    // The study's own bound: with the alignment no first word is early by more than half a second.
-    const early = run.words?.[0] ? clip.voice_s - run.words[0][1] : 0;
+    // The study's own bound: with the alignment no first word is early by more than half a second. The fake engine puts the first
+    // word on the voice the detector hears, so against a clip whose first sound is a click (the "blip" clips) it can only be judged
+    // by that reading; the real engine is judged against the known voice start.
+    const voice = FAKE ? (clip.detector_ms ?? clip.voice_s * 1000) / 1000 : clip.voice_s;
+    const early = run.words?.[0] ? voice - run.words[0][1] : 0;
     expect
       .soft(early, `${label}: the first word is at most half a second before the voice`)
       .toBeLessThanOrEqual(0.5);
@@ -820,7 +831,7 @@ const words = (s: string): string[] =>
     .split(/\s+/)
     .filter(Boolean);
 
-describe.skipIf(missing.length > 0 || PART === "runs")(
+describe.skipIf(missing.length > 0 || !PART_GT)(
   `get_transcript on clips with quiet in front (${ENGINE} engine, ${MODEL_KEY}, ${PC})`,
   () => {
     beforeAll(() => installE2EDocuments());
@@ -920,3 +931,89 @@ function loadCorpusClip(id: string): CorpusClip | null {
     ) ?? null
   );
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The input of the chip probe (helpers\c-rig\work\chip_probe.mjs): the argv the app's own builder makes for each clip on the
+// processor and on the chip, without and with the alignment, written down with the engine NOT run (a runner that spawns nothing).
+// The probe then runs those very argv, changing only the audio, scratch and model paths: it holds no flag list of its own.
+describe.skipIf(missing.length > 0 || !PART_ARGV)(
+  "the launches the chip probe replays (nothing is run)",
+  () => {
+    it("records the app's argv for the processor and the chip, without and with the alignment", async () => {
+      const outFile =
+        process.env.L13_ARGV_OUT ?? path.join(process.cwd(), "reports", "l13", "argv.json");
+      const clips: Rec = {};
+      for (const clip of CLIPS) {
+        const variants: Record<string, string[]> = {};
+        const record = async (
+          name: string,
+          mode: Mode,
+          pc: "processor" | "chip",
+          allow: boolean,
+        ): Promise<void> => {
+          configure(mode, pc, allow);
+          const list = (pc === "chip" ? WORD_TIMES_CHIP_MODELS : WORD_TIMES_MODELS) as string[];
+          const added = allow && !list.includes(MODEL_KEY);
+          if (added) list.push(MODEL_KEY);
+          try {
+            const launches: Launch[] = [];
+            const ctx = ctxFor(
+              `argv-${clip.id}-${name}`,
+              engineRunner(launches, "", clip.id, false),
+            );
+            await runWhisper(
+              ctx,
+              wavOf(clip),
+              MODEL_KEY,
+              NAMED_LANGUAGE ? clip.language : undefined,
+            );
+            variants[name] = launches[0].argv;
+          } finally {
+            if (added) list.splice(list.indexOf(MODEL_KEY), 1);
+          }
+        };
+        await record("processor-plain", "today", "processor", false);
+        await record("processor-dtw", "rule", "processor", false);
+        await record("chip-plain", "today", "chip", false);
+        await record("chip-dtw", "rule", "chip", true);
+        clips[clip.id] = {
+          wav: wavOf(clip),
+          language: clip.language,
+          text: clip.text,
+          known_voice_s: clip.voice_s,
+          variants,
+        };
+        // What the builder made says what the owner's rule says: the plain launches never carry the alignment, the processor's has -ng
+        // and the chip's has not, and a late voice adds the app's own arguments to the plain launch and changes nothing else.
+        expect(
+          variants["processor-plain"],
+          `${clip.id}: the processor launch holds the chip off`,
+        ).toContain("-ng");
+        expect(variants["chip-plain"], `${clip.id}: the chip launch does not`).not.toContain("-ng");
+        expect(carries(variants["processor-plain"]) || carries(variants["chip-plain"])).toBe(false);
+        if (clip.voice_s * 1000 > OWNER_QUIET_MS) {
+          for (const pc of ["processor", "chip"])
+            expect(
+              withoutAlignment(normalized(variants[`${pc}-dtw`])),
+              `${clip.id}: the ${pc} launch with the alignment is the plain one plus the app's arguments`,
+            ).toEqual(normalized(variants[`${pc}-plain`]));
+          expect(carries(variants["processor-dtw"]) && carries(variants["chip-dtw"])).toBe(true);
+        }
+      }
+      await fsp.mkdir(path.dirname(outFile), { recursive: true });
+      await fsp.writeFile(
+        outFile,
+        JSON.stringify(
+          {
+            schema: "l13-first-word-argv/1",
+            model_file: modelEntry.file,
+            dtw_args: [...DTW_ARGS],
+            clips,
+          },
+          null,
+          2,
+        ),
+      );
+    });
+  },
+);
