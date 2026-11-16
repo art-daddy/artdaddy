@@ -47,6 +47,7 @@ import {
   __setWordTimesShipped,
   DTW_ARGS,
   WORD_TIMES_CHIP_MODELS,
+  WORD_TIMES_MODELS,
 } from "./speechWordTimes";
 import {
   ensureTranscripts,
@@ -277,21 +278,23 @@ describe("which launches can carry it: engine path x model file x switches x whe
         smaller ? /ggml-small-q8_0\.bin$/ : /ggml-small\.bin$/,
       );
       expect(spec.args.includes("-ng"), name).toBe(row.path === "processor");
-      // The alignment was measured for the full-size file on the processor only, and is carried when the voice is late.
-      const carries =
-        row.gate && row.flag && row.path === "processor" && !smaller && row.quiet > 1000;
+      // The rule: the file launched is one the alignment was measured on for the processor path (the list is the data a
+      // release changes: one line), and the arguments are carried when the voice is late.
+      const listed =
+        row.path === "processor" && WORD_TIMES_MODELS.includes(smaller ? SMALLER : FULL);
+      const carries = row.gate && row.flag && listed && row.quiet > 1000;
       expect(spec.args.includes("-dtw"), name).toBe(carries);
       expect(spec.args.includes("-nfa"), name).toBe(carries);
       expect(spec.meta, name).toSatisfy((m: object) => "wordTimes" in m === carries);
       // Nothing is read from the audio while the rule cannot apply: the build, the server, the file or the path say no.
-      const mayRead = row.gate && row.flag && row.path === "processor" && !smaller;
+      const mayRead = row.gate && row.flag && listed;
       expect(reads, name).toBe(mayRead ? 1 : 0);
       if (carries) carried++;
     }
     expect(carried, "the walk reaches the launches that carry it").toBeGreaterThan(0);
   });
 
-  it("reads nothing for a run over several files that the rule cannot apply to (the smaller file, the chip), and each late file's audio twice where it can: once to route it, once at its own launch", async () => {
+  it("reads nothing for a run over several files that the rule cannot apply to (an unlisted file, the chip), and each late file's audio twice where it can: once to route it, once at its own launch", async () => {
     const run = async (
       path: "processor" | "chip",
       installed: readonly string[],
@@ -311,7 +314,11 @@ describe("which launches can carry it: engine path x model file x switches x whe
       await ensureTranscripts(t.rig.ctx(), files, FULL, "en");
       return { reads, launches: t.whisper().length };
     };
-    expect(await run("processor", [FULL, SMALLER])).toEqual({ reads: 0, launches: 1 });
+    const smallerListed = WORD_TIMES_MODELS.includes(SMALLER);
+    // The smaller file is what a processor PC that holds it is planned: it carries nothing until it is listed.
+    expect(await run("processor", [FULL, SMALLER])).toEqual(
+      smallerListed ? { reads: 4, launches: 2 } : { reads: 0, launches: 1 },
+    );
     expect(await run("chip", [FULL])).toEqual({ reads: 0, launches: 1 });
     expect(await run("processor", [FULL])).toEqual({ reads: 4, launches: 2 });
   });
