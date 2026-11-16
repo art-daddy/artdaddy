@@ -13,7 +13,7 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { useAuth } from "./store/auth";
 import { setClerkTokenProvider } from "./api/auth";
-import { __resetExportFlags } from "./api/exportFlags";
+import { EXPORT_FLAG_NAMES, __resetExportFlags, exportFlag } from "./api/exportFlags";
 import { useCompatibility } from "./update/compatibility";
 import { catalogIdentity } from "./contract";
 import {
@@ -35,6 +35,12 @@ vi.mock("./tools/modelPrefetch", () => ({ startSpeechModelPrefetch: async () => 
 vi.mock("./lib/osDrop", () => ({
   webOwnsFileDrops: () => false,
   startOsDropRouter: async () => () => undefined,
+}));
+// Whether a live session token is held (api/desktopAuth.ts): the test says, since nothing here signs in for real.
+const session = vi.hoisted(() => ({ fresh: true }));
+vi.mock("./api/desktopAuth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/desktopAuth")>()),
+  hasFreshAccessToken: () => session.fresh,
 }));
 
 const closeProject = vi.fn();
@@ -525,5 +531,131 @@ describe("opening the app", () => {
       vi.useRealTimers();
       __resetExportFlags();
     }
+  });
+});
+
+// The opening ask is not the only one (api/exportFlags.ts, keepExportFlagsFresh): an app that stays open keeps hearing
+// the server's switches, and an opening ask that the server was too asleep to answer is not lost.
+describe("leaving the app open", () => {
+  const FLAGS = "/client/export-flags";
+  const served = (off: string[]): Response =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        v: 1,
+        flags: Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, !off.includes(name)])),
+      }),
+    }) as unknown as Response;
+  const hangs = (_nth: number, signal: AbortSignal) =>
+    new Promise<Response>((_resolve, reject) =>
+      signal.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+      ),
+    );
+  /** What the flags route does with its nth request; every other route is answered as the rest of this file does. */
+  const serve = (behave: (nth: number, signal: AbortSignal) => Promise<Response>) => {
+    const others = vi.mocked(fetch).getMockImplementation()!;
+    let nth = 0;
+    vi.mocked(fetch).mockImplementation(async (url, init) =>
+      String(url).endsWith(FLAGS) ? behave(++nth, init!.signal as AbortSignal) : others(url, init),
+    );
+    return () => nth;
+  };
+  const open = () => {
+    useCompatibility.setState({ status: "allowed" });
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    return render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App />
+      </MemoryRouter>,
+    );
+  };
+
+  beforeEach(() => {
+    __resetExportFlags();
+    session.fresh = true;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    __resetExportFlags();
+  });
+
+  it("hears a switch the server turns off within about ten minutes, with no export and no restart", async () => {
+    let off: string[] = [];
+    serve(async () => served(off));
+    open();
+    await vi.advanceTimersByTimeAsync(10_000); // the opening ask, 4 seconds in, has been answered
+    expect(exportFlag("speech_wake")).toBe(true);
+    off = ["speech_wake"];
+    await vi.advanceTimersByTimeAsync(11 * 60_000);
+    expect(exportFlag("speech_wake")).toBe(false);
+  });
+
+  it("still hears the opening answer from a server that needs 26 seconds to wake", async () => {
+    serve(
+      (_nth, signal) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(served(["speech_wake"])), 26_000);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          });
+        }),
+    );
+    open();
+    await vi.advanceTimersByTimeAsync(4_000 + 26_000 + 5_000);
+    expect(exportFlag("speech_wake")).toBe(false);
+  });
+
+  it("asks again within a few minutes when the opening ask got no answer, not after ten", async () => {
+    const asked = serve((nth, signal) =>
+      nth === 1 ? hangs(nth, signal) : Promise.resolve(served(["speech_wake"])),
+    );
+    open();
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 5_000);
+    expect(asked()).toBe(2);
+    expect(exportFlag("speech_wake")).toBe(false);
+  });
+
+  it("stops asking when the app is gone", async () => {
+    const asked = serve(async () => served([]));
+    const { unmount } = open();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(asked()).toBe(1);
+    unmount();
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(asked()).toBe(1);
+  });
+
+  it("does not look at the session while none is held, and asks within a look of one being held", async () => {
+    let signedIn = false;
+    const look = vi.fn(async () => (signedIn ? "a-session-token" : null));
+    setClerkTokenProvider(look);
+    session.fresh = false; // nobody signed in, or a token that has run out
+    const asked = serve(async () => served(["speech_wake"]));
+    open();
+    await vi.advanceTimersByTimeAsync(10_000); // the opening ask, 4 seconds in, finds nobody: the one look the app always makes
+    const opening = look.mock.calls.length;
+    expect(opening).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(look.mock.calls.length).toBe(opening); // no more, for half an hour: a look may have to renew the session
+    expect(asked()).toBe(0);
+    signedIn = true;
+    session.fresh = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(asked()).toBe(1);
+    expect(exportFlag("speech_wake")).toBe(false);
+  });
+
+  it("holds nothing up while an ask waits for a server that never answers: the window is up and the gate stays open", async () => {
+    const asked = serve(hangs);
+    const { getByText } = open();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(asked()).toBe(1); // out, and unanswered
+    expect(getByText("shell")).toBeInTheDocument();
+    expect(useCompatibility.getState().status).toBe("allowed");
   });
 });

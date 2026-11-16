@@ -854,6 +854,25 @@ describe("ensureFreshAccessToken", () => {
     expect(token).toBe(minted());
   });
 
+  // What a look that must not itself cause a renewal asks (api/exportFlags.ts, keepExportFlagsFresh): the very condition
+  // under which ensureFreshAccessToken hands the token over as it is, so the two cannot disagree.
+  it("says a token is fresh exactly while it needs no renewal, and asking never renews", async () => {
+    const bare = await importFresh();
+    expect(bare.hasFreshAccessToken()).toBe(false); // nobody signed in
+
+    const mod = await withToken(minted());
+    expect(mod.hasFreshAccessToken()).toBe(true);
+    pass(10 * MIN);
+    expect(mod.hasFreshAccessToken()).toBe(true);
+    pass(19.5 * MIN); // its last minute: ensureFreshAccessToken would renew it now
+    expect(mod.hasFreshAccessToken()).toBe(false);
+    expect(fetchMock, "asking whether a token is fresh must never renew it").not.toHaveBeenCalled();
+
+    await mod.ensureFreshAccessToken();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mod.hasFreshAccessToken()).toBe(true); // the renewed token
+  });
+
   // UJ-010, the Tunisian PC: two hours slow. Read against its wall clock, `exp` was 2.5 h away when
   // the token had seconds left, so nothing renewed it and the turn ended "session expired".
   it("a PC two hours SLOW still renews before the token dies", async () => {
