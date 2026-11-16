@@ -261,6 +261,16 @@ function discard(files: SpeedProbeDeps["files"], path: string): void {
   }
 }
 
+/** Removes the part file an earlier check left behind, if there is one: after a stop the delete in `finally` is not waited for, and on
+ *  Windows it can meet the stopped ffmpeg still holding the file. A file that cannot be found or removed is never a reason not to measure. */
+async function removeStalePart(files: SpeedProbeDeps["files"], path: string): Promise<void> {
+  try {
+    if ((await files.size(path)) !== null) await files.remove(path);
+  } catch {
+    /* it is made over, or removed, by the next check */
+  }
+}
+
 /** Measures this PC: makes the reference clip if it is not there, runs B (the reference export's work: read, mix and encode at
  *  Medium), C (with the faster setting) and A (read and mix only), then B again and keeps the faster of its two runs (a disturbance
  *  can only slow a run). The whole of it is inside 20 s; null means the time ran out, a command failed, the run was refused or it was
@@ -268,7 +278,8 @@ function discard(files: SpeedProbeDeps["files"], path: string): void {
  *  and a margin, so none of them is cut off by the box. `onRefused` is told when the job supervisor answers busy to the clip's making
  *  or to a run before B has been read: that is a refusal (an export it lists that the queue does not know yet, no supervisor to ask),
  *  not a PC that could not finish.
- *  Never throws. A run that is stopped leaves nothing behind but the finished reference clip, which is kept on purpose. */
+ *  Never throws. A run that is stopped leaves nothing behind but the finished reference clip, which is kept on purpose; a part file that an
+ *  earlier stop could not remove is removed when the next check begins. */
 export async function measureSpeed(
   deps: SpeedProbeDeps,
   signal: AbortSignal,
@@ -294,6 +305,8 @@ export async function measureSpeed(
 
     const dir = await guard(deps.files.dir());
     if (dir === STOPPED) return null;
+    const partPath = `${dir}/${REFERENCE_PART}`;
+    if ((await guard(removeStalePart(deps.files, partPath))) === STOPPED) return null;
     const reference = `${dir}/${REFERENCE_NAME}`;
     const kept = await guard(deps.files.size(reference));
     if (kept === STOPPED) return null;
@@ -305,7 +318,7 @@ export async function measureSpeed(
       if (kept !== null && (await guard(deps.files.remove(reference))) === STOPPED) return null;
       if ((await guard(deps.files.mkdir(dir))) === STOPPED) return null;
       if (timeLeft() < SPEED_PROBE.minRunMs) return null;
-      part = `${dir}/${REFERENCE_PART}`;
+      part = partPath;
       const made = await guard(
         deps.probe(referenceClipArgs(part), {
           timeoutMs: Math.floor(timeLeft() - SPEED_PROBE.marginMs),

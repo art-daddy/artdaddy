@@ -884,6 +884,89 @@ describe("measureSpeed", () => {
     });
   });
 
+  describe("a part file an earlier check left behind (its delete after a stop was swallowed)", () => {
+    const part = "C:/cache/pc-check/reference-v1.part.mp4";
+    /** The rig with the stale file there, and a note of whether it was still there when each command began. */
+    const withStale = (script: Script = {}) => {
+      const pc = rig(script);
+      pc.files.set(part, 3_000_000);
+      const stillThere: boolean[] = [];
+      const inner = pc.deps.probe;
+      pc.deps.probe = async (args, options) => {
+        stillThere.push(pc.files.has(part));
+        return inner(args, options);
+      };
+      return { pc, stillThere };
+    };
+
+    it("is gone when the next check begins, whether the clip is there or has to be made: no command runs beside it", async () => {
+      for (const existing of [4_000_000, null]) {
+        const { pc, stillThere } = withStale({ existing });
+        const got = await measureSpeed(pc.deps, new AbortController().signal);
+        expect(got, String(existing)).toMatchObject({ outcome: "done" });
+        expect(stillThere.length, String(existing)).toBeGreaterThan(0);
+        expect(stillThere, String(existing)).not.toContain(true);
+        expect(pc.removed, String(existing)).toContain(part);
+        expect(pc.files.has(part), String(existing)).toBe(false);
+      }
+    });
+
+    it("is not looked for twice, and nothing is removed when there is none", async () => {
+      const clean = rig();
+      await measureSpeed(clean.deps, new AbortController().signal);
+      expect(clean.removed).toEqual([]);
+      const { pc } = withStale();
+      await measureSpeed(pc.deps, new AbortController().signal);
+      expect(pc.removed).toEqual([part]);
+    });
+
+    it("does not stop the check when it cannot be removed: a sharing violation, a failing size, a throw before any promise", async () => {
+      const failures: [string, (pc: ReturnType<typeof rig>) => void][] = [
+        [
+          "the delete is refused",
+          (pc) => void (pc.deps.files.remove = async () => Promise.reject(new Error("EBUSY"))),
+        ],
+        [
+          "the delete throws at once",
+          (pc) =>
+            void (pc.deps.files.remove = () => {
+              throw new Error("EBUSY");
+            }),
+        ],
+        [
+          "its size cannot be read",
+          (pc) => {
+            const size = pc.deps.files.size;
+            pc.deps.files.size = async (path) =>
+              path === part ? Promise.reject(new Error("EACCES")) : size(path);
+          },
+        ],
+      ];
+      for (const [name, damage] of failures) {
+        const { pc } = withStale();
+        damage(pc);
+        const got = await measureSpeed(pc.deps, new AbortController().signal);
+        expect(got, name).toMatchObject({ outcome: "done" });
+        expect(
+          pc.calls.map((c) => c.kind),
+          name,
+        ).toEqual(["pc-check-b", "pc-check-c", "pc-check-a", "pc-check-b"]);
+      }
+    });
+
+    it("does not hold the check when the delete never answers: a stop ends it at once", async () => {
+      const { pc } = withStale();
+      pc.deps.files.remove = () => new Promise<void>(() => undefined);
+      const controller = new AbortController();
+      const pending = measureSpeed(pc.deps, controller.signal);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(pc.calls).toEqual([]);
+      controller.abort();
+      await expect(pending).resolves.toBeNull();
+      expect(pc.calls).toEqual([]);
+    });
+  });
+
   describe("a stop", () => {
     it("before it starts: nothing is run, nothing is touched", async () => {
       const pc = rig({ existing: null });
