@@ -256,6 +256,99 @@ describe("what the correction is", () => {
     expect(learned(onlyChip, { ...KEY, family: "processor" })).toBeNull();
   });
 
+  /** A run stopped early: `made` of its project in 95 s, against a prediction of 600 s for all of it. */
+  const stoppedEarly = (store: StorageLike, made: number, over: Partial<PaceInput> = {}) =>
+    recordPace(
+      store,
+      run({
+        outcome: "cancelled",
+        runSeconds: 95,
+        producedFraction: made,
+        predictedTotalSeconds: 600,
+        ...over,
+      }),
+    );
+
+  it("gives nothing from a lone run that was stopped early: it is mostly start-up, and a median of one is that one", () => {
+    for (const made of [0.03, 0.05, 0.06, 0.11]) {
+      const store = memoryStore();
+      stoppedEarly(store, made);
+      expect(stored(store), String(made)).toHaveLength(1); // it is kept ...
+      expect(learned(store), String(made)).toBeNull(); // ... and does not correct the estimate on its own
+    }
+    // a lone run that was finished, or that made an eighth of its project, is enough
+    const finished = memoryStore();
+    teach(finished, 2.5);
+    expect(learned(finished)).toBe(2.5);
+    const eighth = memoryStore();
+    stoppedEarly(eighth, 0.125);
+    expect(learned(eighth)).toBeCloseTo(95 / 0.125 / 600, 12);
+    const almost = memoryStore();
+    stoppedEarly(almost, 0.12);
+    expect(learned(almost)).toBeNull();
+  });
+
+  it("gives a correction once the lessons together weigh half a finished run, and not before", () => {
+    // 6 percent of a project weighs 0.24, 3 percent weighs 0.12
+    const two = memoryStore();
+    stoppedEarly(two, 0.06);
+    stoppedEarly(two, 0.06);
+    expect(learned(two)).toBeNull();
+    const three = memoryStore();
+    for (let index = 0; index < 3; index++) stoppedEarly(three, 0.06);
+    expect(learned(three)).toBeCloseTo(95 / 0.06 / 600, 12);
+    const mixed = memoryStore();
+    stoppedEarly(mixed, 0.06);
+    stoppedEarly(mixed, 0.06);
+    stoppedEarly(mixed, 0.03);
+    expect(learned(mixed)).not.toBeNull();
+    // lessons older than 30 days weigh nothing: three old small ones do not add up with a newer one
+    const crowded = memoryStore();
+    stoppedEarly(crowded, 0.06, { atMs: NOW - 31 * DAY });
+    stoppedEarly(crowded, 0.06, { atMs: NOW - 31 * DAY });
+    stoppedEarly(crowded, 0.06, { atMs: NOW - 31 * DAY });
+    stoppedEarly(crowded, 0.06);
+    expect(learned(crowded)).toBeNull();
+  });
+
+  it("is silent until the window weighs half a finished run, and then speaks inside its bounds (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            made: fc.double({ min: 0.03, max: 1, noNaN: true }),
+            ratio: fc.double({ min: 0.25, max: 8, noNaN: true }),
+          }),
+          { minLength: 0, maxLength: 12 },
+        ),
+        (lessons) => {
+          const store = memoryStore();
+          for (const { made, ratio } of lessons)
+            recordPace(
+              store,
+              run({
+                outcome: "cancelled",
+                runSeconds: 600,
+                producedFraction: made,
+                predictedTotalSeconds: 600 / made / ratio,
+              }),
+            );
+          const weight = lessons
+            .slice(-PACE_LOG_LIMITS.window)
+            .reduce((sum, { made }) => sum + Math.min(1, made / PACE_LOG_LIMITS.fullWeightAt), 0);
+          const result = learned(store);
+          // the clamp can move a ratio to a bound but never past it
+          if (weight < PACE_LOG_LIMITS.minTotalWeight - 1e-6) expect(result).toBeNull();
+          else if (weight > PACE_LOG_LIMITS.minTotalWeight + 1e-6) {
+            expect(result).not.toBeNull();
+            expect(result!).toBeGreaterThanOrEqual(0.25);
+            expect(result!).toBeLessThanOrEqual(8);
+          }
+        },
+      ),
+    );
+  });
+
   it("is for one speed revision and one build, and a newer export does not lend to an older key", () => {
     const store = memoryStore();
     teach(store, 2, { speedRevision: 1 });
@@ -481,6 +574,27 @@ describe("a poisoned log and the estimate it corrects", () => {
     expect(store.writes).toBe(0);
     expect(learned(store)).toBeNull();
     expect(corrected(store)).toEqual(clean);
+  });
+
+  it("a lone run stopped early, 95 s in with 3 to 6 percent made, leaves the next estimate exactly as the model's own: it was mostly start-up", () => {
+    // the same run, if it had been taken at its word, gives a ratio near 2.6 and moves the central figure to the top of the range
+    const moved = memoryStore();
+    teach(moved, 2.6);
+    expect(corrected(moved).seconds).toBeGreaterThan(clean.seconds);
+    for (const made of [0.03, 0.045, 0.06, 0.11]) {
+      const store = memoryStore();
+      recordPace(
+        store,
+        run({
+          outcome: "cancelled",
+          runSeconds: 95,
+          producedFraction: made,
+          predictedTotalSeconds: 600,
+        }),
+      );
+      expect(store.writes, String(made)).toBe(1);
+      expect(corrected(store), String(made)).toEqual(clean);
+    }
   });
 
   it("eight that get through at the clamp's edges can only move the estimate inside the range it reports, and never move the range", () => {

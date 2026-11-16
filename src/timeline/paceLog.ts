@@ -21,6 +21,10 @@ export const PACE_LOG_LIMITS = {
   minProduced: 0.03,
   /** A sample that got this far through its project counts in full; one that got less counts in proportion. */
   fullWeightAt: 0.25,
+  /** The correction is given only when the lessons it is the median of weigh this much together. A median of one lesson is that lesson, whatever its
+   *  weight, so a lone run stopped early (3 to 6 percent of its project, mostly start-up) would set the correction to a band edge: it needs a finished
+   *  run, or one that made an eighth of its project, or several that together are as much. */
+  minTotalWeight: 0.5,
   ratio: { min: 0.25, max: 8 },
 } as const;
 
@@ -157,7 +161,8 @@ function weightedMedian(entries: readonly Entry[]): number | null {
 }
 
 /** The learned correction for this encoder family under this speed revision and build: the weighted median of the last eight lessons at most 30
- *  days old. Null = no usable lesson (the estimate is then the model's own). Never throws. */
+ *  days old, once those lessons weigh at least half a finished run between them. Null = no usable lesson, or too little of one (the estimate is
+ *  then the model's own). Never throws. */
 export function paceCorrection(
   store: StorageLike | null,
   key: PaceKey,
@@ -175,7 +180,10 @@ export function paceCorrection(
         age >= -PACE_LOG_LIMITS.futureSlackMs
       );
     });
-    return weightedMedian(usable.slice(-PACE_LOG_LIMITS.window));
+    const window = usable.slice(-PACE_LOG_LIMITS.window);
+    const weight = window.reduce((sum, entry) => sum + entry.weight, 0);
+    if (weight < PACE_LOG_LIMITS.minTotalWeight - 1e-9) return null;
+    return weightedMedian(window);
   } catch {
     return null;
   }
