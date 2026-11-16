@@ -26,6 +26,7 @@ import { useModelDownload } from "../store/modelDownload";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { isExpected } from "../lib/errors";
 import { lastSpeechLanguage, rememberSpeechLanguage } from "./speechDecoding";
+import { recordSpeechRun } from "./speechPace";
 import {
   __setDownloadPolicy,
   cancelModelDownload,
@@ -2009,6 +2010,57 @@ describe("whisper as a job of the app process (4i)", () => {
     await until(() => jobs.forgotten.includes(id) && jobs.forgotten.length === 2);
     expect(under(fs, WORK)).toEqual([]);
     // Only the run that was kept is reported, as the re-run it was.
+    expect(reportTranscription.mock.calls).toHaveLength(1);
+    expect(reportTranscription.mock.calls[0][2]).toMatchObject({ beam: 5, rerun: true });
+  });
+
+  it("refuses a run of the smaller model that turned out to be Arabic when the page that adopts it finishes it, and runs it again with the full-size model", async () => {
+    const fs = disk();
+    // The smaller model is on disk too, and this PC's latest run found no usable graphics chip.
+    const small = WHISPER_MODELS.small_q8_0;
+    const smallPath = joinPath(whisperModelPath(DIR, "small_q8_0"));
+    fs.bytes.set(smallPath, new Uint8Array([1]));
+    fs.modelMetadata.set(smallPath, { size: small.bytes, sha256: small.sha256 });
+    recordSpeechRun(60, 120, "cpu");
+    rememberSpeechLanguage("en");
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    // It was started on the smaller model, on the processor, greedy: what the plan says of English here.
+    const first = jobs.submitted[0].args;
+    expect(first[first.indexOf("-m") + 1]).toBe(smallPath);
+    expect(first).toContain("-ng");
+    expect(first).toContain("-bs");
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    const joined = next.transcribe.runWhisper(next.ctx, SRC);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(jobs.submitted).toHaveLength(1);
+    const arabic = JSON.stringify({
+      result: { language: "ar" },
+      transcription: [
+        {
+          offsets: { from: 0, to: 1000 },
+          text: " marhaba",
+          tokens: [{ text: " marhaba", offsets: { from: 0, to: 1000 }, p: 0.9 }],
+        },
+      ],
+    });
+    const writeAndExit = async (spec: (typeof jobs.submitted)[number]): Promise<void> => {
+      await fs.writeTextFile(`${spec.args[spec.args.indexOf("-of") + 1]}.json`, arabic);
+      jobs.exit(spec.id, 0, VULKAN_STDERR);
+    };
+    // The process finished it, and what it heard was Arabic, which the smaller model was not cleared for: refused...
+    await writeAndExit(jobs.submitted[0]);
+    // ...nothing of it is kept, and the request that was waiting on it makes a second run with the full-size model.
+    await until(() => jobs.submitted.length === 2);
+    const second = jobs.submitted[1].args;
+    expect(second[second.indexOf("-m") + 1]).toBe(joinPath(MODEL));
+    expect(second).not.toContain("-bs");
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).toBeNull();
+    await writeAndExit(jobs.submitted[1]);
+    expect(words(await joined)).toEqual(["marhaba"]);
     expect(reportTranscription.mock.calls).toHaveLength(1);
     expect(reportTranscription.mock.calls[0][2]).toMatchObject({ beam: 5, rerun: true });
   });
