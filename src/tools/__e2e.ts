@@ -23,6 +23,7 @@ import { renderTimelineTool } from "../timeline/render";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
+import { NATIVE_RENDER_PROGRAM, nativeRenderCargoArgs } from "../test/nativeRenderCommand";
 import { shippedFontsDir, shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import { SIDECAR_BINS } from "./sidecar";
 
@@ -288,27 +289,15 @@ export async function runNativeRenderSequence(
   const file = path.join(spec.cwd, "native-spec.json");
   await fsp.writeFile(file, JSON.stringify(spec));
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "cargo",
-      [
-        "test",
-        "--lib",
-        "jobs::tests::render_sequence_real_artifact",
-        "--",
-        "--ignored",
-        "--exact",
-        "--nocapture",
-      ],
-      {
-        cwd: path.resolve(process.cwd(), "src-tauri"),
-        env: {
-          ...process.env,
-          ARTDADDY_QA_RENDER_SPEC: file,
-          ARTDADDY_QA_FFMPEG: shippedSidecar("ffmpeg") ?? shippedSidecarPath("ffmpeg"),
-        },
-        windowsHide: true,
+    const child = spawn(NATIVE_RENDER_PROGRAM, nativeRenderCargoArgs("run"), {
+      cwd: path.resolve(process.cwd(), "src-tauri"),
+      env: {
+        ...process.env,
+        ARTDADDY_QA_RENDER_SPEC: file,
+        ARTDADDY_QA_FFMPEG: shippedSidecar("ffmpeg") ?? shippedSidecarPath("ffmpeg"),
       },
-    );
+      windowsHide: true,
+    });
     let stderr = "";
     child.stdout.on("data", (chunk) => {
       stderr += String(chunk);

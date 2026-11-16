@@ -423,6 +423,9 @@ structural render goldens (`render.test.ts`), the preview↔render parity tests,
 contract conformance + tool-dispatch harness, the **agent-loop integration test**
 (`loop.integration.test.ts` — scripted multi-round build/undo/approval flows), and the
 measured render/audio **e2e goldens** (gated on pre-push when ffmpeg is present). The
+smoke lane compiles the native test program once before any case starts
+(`src/test/smokeGlobalSetup.ts`, only for a run that holds native render cases;
+`ARTDADDY_SMOKE_NO_WARMUP=1` skips it), so no case rebuilds it inside its own 180 s limit. The
 full testing strategy is in the **backend repo's `docs/ARCHITECTURE.md` §14**.
 
 **Mutation testing** (Stryker, `stryker.config.mjs`) mutates `src/timeline/**` +
