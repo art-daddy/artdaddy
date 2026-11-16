@@ -2602,16 +2602,16 @@ async function runTogether(
   const widenTo = new Map<number, ModelPlan>();
   /** How the person's Cancel ended a run of this request, once it did: what had not been read is not started behind their
    *  back, and that includes a file that left the shared run for its own launch (speechWordTimes.ts). */
-  let stoppedByPerson: unknown = null;
+  let cancelledByPerson: unknown = null;
   /** A file the run did not make a transcript of, run alone as it always was. */
   const alone = async (n: number, leftTheRun = false): Promise<void> => {
-    if (leftTheRun && stoppedByPerson !== null) return settle(n, { error: stoppedByPerson });
+    if (leftTheRun && cancelledByPerson !== null) return settle(n, { error: cancelledByPerson });
     try {
       settle(n, {
         parsed: await runWhisper(ctx, ours[n].src, size, language, null, true, widenTo.get(n)),
       });
     } catch (error) {
-      if (isSpeechCancelled(error)) stoppedByPerson ??= error;
+      if (isSpeechCancelled(error)) cancelledByPerson ??= error;
       settle(n, { error });
     }
   };
@@ -2711,7 +2711,7 @@ async function runTogether(
               widenTo.set(n, await replanFor(ctx, error.detected));
             // The person stopped the run: what it did not reach is not started again behind their back.
             if (isSpeechCancelled(error)) {
-              stoppedByPerson ??= error;
+              cancelledByPerson ??= error;
               settle(n, { error });
             } else missed.push(n);
           }
