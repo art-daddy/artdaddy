@@ -469,6 +469,72 @@ describe("a run over several files never carries the arguments: a file whose voi
         src,
       ).toBe(late[i] ? SOUND : STORED);
   });
+  it("answers a file that left the shared run as cancelled, and never starts it, when the person cancels the shared run", async () => {
+    processor();
+    configure(true, true);
+    const [early1, early2, late] = [freshSource(), freshSource(), freshSource()];
+    const t = setup({
+      audio: (source) => wavWithVoiceAt(source === late ? 2000 : 400),
+      script: () => null,
+    });
+    const done = ensureTranscripts(
+      t.rig.ctx({ background: true }),
+      [early1, early2, late],
+      FULL,
+      "en",
+    );
+    await until(() => t.whisper().length === 1);
+    const [shared] = t.whisper();
+    expect(flagValues(shared.args, "-f")).toHaveLength(2);
+    cancelSpeechJob(shared.id);
+    const outcomes = await done;
+    expect(
+      outcomes.map((o) => !o.ok && isSpeechCancelled((o as { error: unknown }).error)),
+    ).toEqual([true, true, true]);
+    // The late file was never started behind the person's back, and the cancel reached nothing else.
+    expect(t.whisper()).toHaveLength(1);
+    expect(t.jobs.killed).toEqual([shared.id]);
+    expect(reportAppError).not.toHaveBeenCalled();
+  });
+
+  it("does not start the files still to come when the person cancels the run of the first of several late files", async () => {
+    processor();
+    configure(true, true);
+    const [first, second, third] = [freshSource(), freshSource(), freshSource()];
+    const t = setup({ audio: () => wavWithVoiceAt(2000), script: () => null });
+    const done = ensureTranscripts(
+      t.rig.ctx({ background: true }),
+      [first, second, third],
+      FULL,
+      "en",
+    );
+    await until(() => t.whisper().length === 1);
+    const [one] = t.whisper();
+    expect(flagValues(one.args, "-f")).toHaveLength(1);
+    expect(one.args).toContain("-dtw");
+    cancelSpeechJob(one.id);
+    const outcomes = await done;
+    expect(
+      outcomes.map((o) => !o.ok && isSpeechCancelled((o as { error: unknown }).error)),
+    ).toEqual([true, true, true]);
+    expect(t.whisper()).toHaveLength(1);
+    expect(t.jobs.killed).toEqual([one.id]);
+  });
+
+  it("still starts the next late file when the first one's run simply fails: only the person's Cancel stops the rest", async () => {
+    processor();
+    configure(true, true);
+    const files = [freshSource(), freshSource()];
+    // The first file's launches (alignment, then its retry) fail; the second file's launch works.
+    const t = setup({
+      audio: () => wavWithVoiceAt(2000),
+      script: (n) => (n < 2 ? { code: 1, output: "none" } : {}),
+    });
+    const outcomes = await ensureTranscripts(t.rig.ctx(), files, FULL, "en");
+    expect(outcomes.map((o) => o.ok)).toEqual([false, true]);
+    expect(t.whisper()).toHaveLength(3);
+  });
+
   it("never gives a launch over several files the arguments, even for a file whose audio reads later than it did when the run was planned", async () => {
     processor();
     configure(true, true);

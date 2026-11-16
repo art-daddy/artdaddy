@@ -2600,13 +2600,18 @@ async function runTogether(
   };
   /** What each file the run refused (for not being what its language needs) is run with alone, by place in `ours`. */
   const widenTo = new Map<number, ModelPlan>();
+  /** How the person's Cancel ended a run of this request, once it did: what had not been read is not started behind their
+   *  back, and that includes a file that left the shared run for its own launch (speechWordTimes.ts). */
+  let stoppedByPerson: unknown = null;
   /** A file the run did not make a transcript of, run alone as it always was. */
-  const alone = async (n: number): Promise<void> => {
+  const alone = async (n: number, leftTheRun = false): Promise<void> => {
+    if (leftTheRun && stoppedByPerson !== null) return settle(n, { error: stoppedByPerson });
     try {
       settle(n, {
         parsed: await runWhisper(ctx, ours[n].src, size, language, null, true, widenTo.get(n)),
       });
     } catch (error) {
+      if (isSpeechCancelled(error)) stoppedByPerson ??= error;
       settle(n, { error });
     }
   };
@@ -2638,7 +2643,8 @@ async function runTogether(
       const late = ready.filter((_, i) => lateOnes[i]);
       for (const n of late) ready.splice(ready.indexOf(n), 1);
       if (ready.length < 2) {
-        for (const n of [...ready, ...late]) await alone(n);
+        for (const n of ready) await alone(n);
+        for (const n of late) await alone(n, true);
         return;
       }
       const metas: TranscriptJobMeta[] = ready.map((n) => ({
@@ -2689,7 +2695,7 @@ async function runTogether(
         },
         plan.key,
       );
-      const missed: number[] = [...late];
+      const missed: number[] = [];
       try {
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
@@ -2704,8 +2710,10 @@ async function runTogether(
             if (error instanceof WeakDecodeError)
               widenTo.set(n, await replanFor(ctx, error.detected));
             // The person stopped the run: what it did not reach is not started again behind their back.
-            if (isSpeechCancelled(error)) settle(n, { error });
-            else missed.push(n);
+            if (isSpeechCancelled(error)) {
+              stoppedByPerson ??= error;
+              settle(n, { error });
+            } else missed.push(n);
           }
         }
         // The run is reported once, for all the files it read.
@@ -2720,6 +2728,7 @@ async function runTogether(
         await release();
       }
       for (const n of missed) await alone(n);
+      for (const n of late) await alone(n, true);
     });
   } catch (error) {
     ours.forEach((_, n) => settle(n, { error }));
