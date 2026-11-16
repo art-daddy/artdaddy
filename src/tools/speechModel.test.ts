@@ -518,7 +518,13 @@ describe("planModel after the engine failed on the smaller file on this PC", () 
   it("also holds for a language that is only a guess, and is a flag only when exactly true", () => {
     for (const language of CODES)
       expect(
-        planModel({ backend: "cpu", language, installed: [SMALLER], predicted: true, smallerFailed: true }),
+        planModel({
+          backend: "cpu",
+          language,
+          installed: [SMALLER],
+          predicted: true,
+          smallerFailed: true,
+        }),
         language,
       ).toEqual(plan("gpu", language, [SMALLER]));
     for (const smallerFailed of [false, undefined, null, 0, 1, "true", "yes", {}, []])

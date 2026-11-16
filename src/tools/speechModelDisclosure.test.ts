@@ -73,7 +73,7 @@ describe("the privacy text about the second, full-size download", () => {
     const said = sentences(readFileSync(PRIVACY, "utf8")).filter((s) => /full-size/i.test(s));
     expect(said.length, "the policy speaks of the full-size download").toBeGreaterThan(0);
     for (const sentence of said)
-      expect(sentence, "the app goes on with the full-size file when the smaller one fails").toMatch(
+      expect(sentence, "the app goes on with the full-size file then").toMatch(
         /smaller model (does not|cannot|can't|fails to) (run|work|start|load)/i,
       );
   });

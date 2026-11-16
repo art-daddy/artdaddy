@@ -94,15 +94,19 @@ interface Say {
   language: string;
   text?: string;
 }
+/** What a launch of the stand-in engine ends with. */
+interface EngineAnswer {
+  code: number;
+  stderr?: string;
+  /** Leaves no output file, whatever the exit code says: with code 0, a clean exit with no transcript. */
+  noOutput?: boolean;
+}
 interface RigOptions {
   /** The manifest keys whose file is on disk. Absent: both. */
   installed?: readonly string[];
   /** What the engine says it heard, per launch and clip. Absent: English. */
   say?: (launch: number, args: string[], clip: string) => Say;
-  engine?: (
-    launch: number,
-    args: string[],
-  ) => { code: number; stderr?: string; noOutput?: boolean };
+  engine?: (launch: number, args: string[]) => EngineAnswer;
   /** Runs when the audio is extracted: after the plan, before the launch. */
   onExtract?: () => void;
   background?: boolean;
@@ -346,12 +350,11 @@ describe("a PC that transcribes on its processor, with both files on disk", () =
 // full-size file, which every language accepts; nothing else changes: the smaller file is still only ever started with
 // -ng, nothing wrong is kept, and the runs never loop.
 describe("when the engine fails on the smaller file", () => {
-  const FAILURES: Array<[how: string, answer: { code: number; stderr?: string; noOutput?: boolean }]> =
-    [
-      ["it cannot load the file", { code: 1, stderr: "whisper_init_from_file: failed to load model" }],
-      ["it crashes", { code: ENGINE_CRASH, stderr: VULKAN_LOG }],
-      ["it exits cleanly and leaves no transcript", { code: 0, noOutput: true }],
-    ];
+  const FAILURES: Array<[how: string, answer: EngineAnswer]> = [
+    ["it cannot load the file", { code: 1, stderr: "failed to load model" }],
+    ["it crashes", { code: ENGINE_CRASH, stderr: VULKAN_LOG }],
+    ["it exits cleanly and leaves no transcript", { code: 0, noOutput: true }],
+  ];
 
   it.each(FAILURES)(
     "the request goes on with the full-size file, once, when %s",
@@ -382,7 +385,10 @@ describe("when the engine fails on the smaller file", () => {
 
   it("asks for the full-size file when only the smaller one is here, and says why plainly when it cannot be fetched", async () => {
     noChip();
-    const r = rig({ installed: [SMALL], engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    const r = rig({
+      installed: [SMALL],
+      engine: () => ({ code: 1, stderr: "failed to load model" }),
+    });
     const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
     expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
     expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL)]);
@@ -426,7 +432,10 @@ describe("when the engine fails on the smaller file", () => {
   it("does not touch a PC that runs the full-size file: its failure is its own, with one launch", async () => {
     // A chip PC, and a processor PC that already holds the full-size file with the owner's switch off, plan it.
     noChip();
-    const held = rig({ installed: [FULL], engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    const held = rig({
+      installed: [FULL],
+      engine: () => ({ code: 1, stderr: "failed to load model" }),
+    });
     const failure = await runWhisper(held.ctx, fresh(), "small", "en").catch((e: unknown) => e);
     expect((failure as TranscriptionFailure).reason).toBe("engine_failed");
     expect(held.launches.map(modelOf)).toEqual([pathOf(FULL)]);
