@@ -279,12 +279,19 @@ describe("waitForRun", () => {
       expect(second.note).toBe(first.note);
       __resetWaiting();
       try {
-        // As the app's own call reads it, from the store the cards read (no `progress` given).
+        // As the app's own call reads it, from the store the cards read: the helper's default `progress` (none under
+        // way) is left out, so `waitForRun` takes its own.
+        const fromStore = { progress: undefined };
         reportModelDownload(10, 100, true);
-        expect(await answers()).toMatchObject({ stage: "downloading_speech_model", again: true });
+        expect(await answers(fromStore)).toMatchObject({
+          stage: "downloading_speech_model",
+          again: true,
+        });
         __resetWaiting();
         reportModelDownload(10, 100, false);
-        expect(await answers()).not.toHaveProperty("again");
+        const alone = await answers(fromStore);
+        expect(alone).toMatchObject({ stage: "downloading_speech_model" });
+        expect(alone).not.toHaveProperty("again");
       } finally {
         clearModelDownload();
       }
