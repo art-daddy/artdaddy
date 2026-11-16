@@ -5,6 +5,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { MODEL_MANIFEST } from "./modelManifest";
 import {
   __resetWordTimesShipped,
   __setWordTimesShipped,
@@ -13,6 +14,7 @@ import {
   settleWords,
   tokenOnSound,
   WINDOW_MS,
+  WORD_TIMES_MODELS,
   WORD_TIMES_SHIPPED,
   wordTimesArgs,
   wordTimesOn,
@@ -54,6 +56,18 @@ describe("which launches carry word times", () => {
     const carrying = rows.filter((r) => arguments_(r.gate, r.flag, r.size, r.cpuOnly).length > 0);
     expect(carrying).toEqual([{ gate: true, flag: true, size: "small", cpuOnly: true }]);
     expect(arguments_(true, true, "small", true)).toEqual(["-dtw", "small", "-nfa"]);
+  });
+
+  it("never gives the smaller model file (the processor-only one) word times, with everything on: nobody measured the alignment with it", () => {
+    for (const cpuOnly of [true, false])
+      expect(arguments_(true, true, "small_q8_0", cpuOnly), `cpuOnly ${cpuOnly}`).toEqual([]);
+    // The rule is ONE list of manifest keys (the line a release that measures the smaller file changes), and every
+    // key in it is a file of the manifest.
+    expect(WORD_TIMES_MODELS).not.toContain("small_q8_0");
+    for (const key of WORD_TIMES_MODELS) expect(MODEL_MANIFEST[key], key).toBeDefined();
+    expect(
+      Object.keys(MODEL_MANIFEST).filter((k) => arguments_(true, true, k, true).length > 0),
+    ).toEqual([...WORD_TIMES_MODELS]);
   });
 
   it("is 0.27.0 for the opposite ordering: the gate on and the flag off (the operator's way back) carries nothing, on any model and backend", () => {

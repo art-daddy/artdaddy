@@ -24,6 +24,7 @@ vi.mock("../api/appEvents", async (orig) => ({
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
 import type { ClientToolContext } from "./context";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { __resetHostInfo } from "../platform/host";
 import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
 import { cpuOnlyNow, holdCpuOnly, releaseCpuOnly, SPEECH_CPU_ONLY_KEY } from "./speechBackend";
@@ -31,6 +32,7 @@ import { beamFor, DEFAULT_BEAM } from "./speechDecoding";
 import { TranscriptionFailure } from "./speechFailure";
 import { processorBeam } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
+import { __resetWordTimesShipped, __setWordTimesShipped, DTW_ARGS } from "./speechWordTimes";
 import {
   __setDownloadPolicy,
   ensureLaunchModel,
@@ -216,6 +218,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   __resetHostInfo();
+  __resetWordTimesShipped();
+  __resetExportFlags();
   __setDownloadPolicy(PATIENT_DOWNLOAD);
 });
 
@@ -484,6 +488,26 @@ describe("the file the app fetches when it starts", () => {
     const r = rig({ installed: [] });
     await ensureLaunchModel(r.ctx).catch(() => undefined);
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+  });
+});
+
+describe("the first-word fix's arguments, with it switched on", () => {
+  it("are carried by the full-size file's processor launch and never by the smaller file's", async () => {
+    __setWordTimesShipped(true);
+    __setExportFlag("speech_word_times", true);
+    chipHeldOff();
+    // English on a processor PC with both files: the smaller file, on the processor, WITHOUT the arguments.
+    const english = rig();
+    await runWhisper(english.ctx, fresh(), "small", "en");
+    expect(modelOf(english.launches[0])).toBe(pathOf(SMALL));
+    expect(onProcessor(english.launches[0])).toBe(true);
+    expect(english.launches[0]).not.toContain("-dtw");
+    expect(english.launches[0]).not.toContain("-nfa");
+    // Arabic: the full-size file, on the processor, with them (the file whose alignment was measured).
+    const arabic = rig();
+    await runWhisper(arabic.ctx, fresh(), "small", "ar");
+    expect(modelOf(arabic.launches[0])).toBe(pathOf(FULL));
+    expect(arabic.launches[0].join(" ")).toContain(DTW_ARGS.join(" "));
   });
 });
 

@@ -40,8 +40,11 @@ export function __resetWordTimesShipped(): void {
   shipped = WORD_TIMES_SHIPPED;
 }
 
-/** The one model whose alignment was measured; the app's own default model is the same. */
-export const WORD_TIMES_MODEL = "small";
+/** The manifest keys (modelManifest.ts) of the model files whose alignment was measured: the ONE place that says which model
+ *  files may carry the arguments below, and the app's own default model is the only one in it. The smaller file
+ *  (`small_q8_0`, the processor-only model) is NOT in it: nobody has measured `-dtw` with it. A release that measures it
+ *  adds its key here and changes nothing else (`transcribe.ts` hands the engine the key of the file it launches). */
+export const WORD_TIMES_MODELS: readonly string[] = ["small"];
 
 /** What the engine is given: `-dtw small` aligns each token with the audio (the alignment heads of the "small"
  *  model), and `-nfa` turns flash attention off, which that alignment needs. */
@@ -53,9 +56,12 @@ export function wordTimesOn(): boolean {
 }
 
 /** What a launch of the engine adds to its arguments. Only a launch with the chip off (`cpuOnly`, the `-ng` one: the
- *  retry after the chip crashed is one too) and only the measured model; every other launch is what 0.27.0 made. */
+ *  retry after the chip crashed is one too) and only a measured model (`size` is the manifest key of the file the
+ *  launch names); every other launch is what 0.27.0 made. */
 export function wordTimesArgs(input: { size: string; cpuOnly: boolean }): string[] {
-  return wordTimesOn() && input.size === WORD_TIMES_MODEL && input.cpuOnly ? [...DTW_ARGS] : [];
+  return wordTimesOn() && WORD_TIMES_MODELS.includes(input.size) && input.cpuOnly
+    ? [...DTW_ARGS]
+    : [];
 }
 
 /** One whisper window is 30 s. A time further than that from where the token was stored is the alignment of
