@@ -16,6 +16,8 @@ import {
 export const SLOW_AFTER_SECONDS = 90;
 /** ... and at least this much of the project produced. */
 export const SLOW_MIN_PRODUCED = 0.02;
+/** Where the watch saw the first picture arrive, the pace is read from it, and only once it is this old: a render's first seconds are not its pace. */
+export const SLOW_MIN_SINCE_FIRST_PICTURE_SECONDS = 30;
 /** The projection must be over this many times the estimate that was shown ... */
 export const SLOW_OVER_ESTIMATE = 3;
 /** ... or, where no measured estimate was shown, over this long. */
@@ -30,6 +32,14 @@ export const QUICK_MIN_SAVING_OF_LEFT = 0.4;
 /** What the processor is doing while an export makes no progress, as the stall rule reads it. */
 export type ActivityVerdict = "busy" | "idle" | "unknown";
 
+/** The look at which the watch first found a picture, after a look that found none. */
+export interface FirstPicture {
+  /** Seconds since the export's start. */
+  atSeconds: number;
+  /** The share of the project produced then, over 0 and up to 1. */
+  produced: number;
+}
+
 export interface HelpInput {
   elapsedSeconds: number;
   /** The share of the project produced so far, 0 to 1. It is 1 once the render is over (checking and saving), which shows no banner. */
@@ -37,6 +47,10 @@ export interface HelpInput {
   /** The render's own time left. Null where it has none to give (a streamed or a sequence export, whose own figure is not a time left, or
    *  a render that has stopped moving): the projection then comes from the produced fraction. */
   renderEtaSeconds: number | null;
+  /** Where the watch saw the first picture arrive, when it was watching for it. The render's own time left and the share produced both count the time before the first picture
+   *  as time at the render's pace, so a big project that spends minutes starting up looks several times slower than it is. Given this, the slow banner reads the pace from
+   *  the first picture on, and never projects a longer run than the reading from the start does. Absent, or not readable: the projection is counted from the start. */
+  firstPicture?: FirstPicture | null;
   /** The estimate that was shown before the start, and where it came from. */
   expectedSeconds: number | null;
   expectedBasis: EstimateBasis | null;
@@ -87,11 +101,35 @@ const atLeastZero = (value: unknown): number => (finite(value) && value > 0 ? va
 const positive = (value: unknown): number | null => (finite(value) && value > 0 ? value : null);
 const unit = (value: unknown): number => (finite(value) ? Math.min(1, Math.max(0, value)) : 0);
 
-/** The projected length of the whole export: the run so far plus the render's own time left, or, without that, the run so far over
+/** The projected length of the whole export, counted from the start: the run so far plus the render's own time left, or, without that, the run so far over
  *  the share produced. Null when neither can be said. */
 function projectionOf(elapsed: number, produced: number, eta: unknown): number | null {
   if (finite(eta) && eta >= 0) return elapsed + eta;
   return produced >= SLOW_MIN_PRODUCED ? elapsed / produced : null;
+}
+
+/** The first picture as the rule can use it, or null when it was not given or cannot be read. */
+function readFirstPicture(value: unknown): FirstPicture | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { atSeconds, produced } = value as Partial<FirstPicture>;
+  return finite(atSeconds) && atSeconds >= 0 && finite(produced) && produced > 0 && produced <= 1
+    ? { atSeconds, produced }
+    : null;
+}
+
+/** The projected length of the whole export from the pace since the first picture: what is left of the project, at the share made per second since then. Never longer than
+ *  `fromStart`, the projection counted from the start. Null while that picture is too new, or the share has not moved since, for a pace to be read. */
+function projectionSincePicture(
+  elapsed: number,
+  produced: number,
+  first: FirstPicture,
+  fromStart: number | null,
+): number | null {
+  const since = elapsed - first.atSeconds;
+  const made = produced - first.produced;
+  if (!(since >= SLOW_MIN_SINCE_FIRST_PICTURE_SECONDS) || !(made > 0)) return null;
+  const paced = elapsed + ((1 - produced) * since) / made;
+  return fromStart !== null ? Math.min(fromStart, paced) : paced;
 }
 
 function viewOf(
@@ -149,18 +187,20 @@ function help(input: HelpInput): HelpView {
     );
   }
 
-  if (projected === null || elapsed < SLOW_AFTER_SECONDS || produced < SLOW_MIN_PRODUCED)
-    return none();
+  // The slow banner judges the pace since the first picture where the watch saw it arrive; the stopped-moving banner above is a different rule and reads the projection from the start.
+  const first = readFirstPicture(input.firstPicture);
+  const paced = first ? projectionSincePicture(elapsed, produced, first, projected) : projected;
+  if (paced === null || elapsed < SLOW_AFTER_SECONDS || produced < SLOW_MIN_PRODUCED) return none();
   const slow =
     expected !== null && measured
-      ? projected > SLOW_OVER_ESTIMATE * expected
-      : projected > SLOW_OVER_SECONDS_UNMEASURED;
+      ? paced > SLOW_OVER_ESTIMATE * expected
+      : paced > SLOW_OVER_SECONDS_UNMEASURED;
   if (!slow) return none();
   if (Math.floor(atLeastZero(input.shown?.slowShown)) >= MAX_SLOW_BANNERS) return none();
   const silenced = positive(input.shown?.silencedAtProjection);
-  if (silenced !== null && projected < SLOW_REARM_FACTOR * silenced) return none();
+  if (silenced !== null && paced < SLOW_REARM_FACTOR * silenced) return none();
 
-  const left = Math.max(0, projected - elapsed);
+  const left = Math.max(0, paced - elapsed);
   const offer = helps(left);
   const advice: QuickHelp = offer ? "helps" : switchable ? "no_help" : "none";
   return viewOf(
@@ -173,7 +213,7 @@ function help(input: HelpInput): HelpView {
     }),
     offer,
     quick,
-    projected,
+    paced,
   );
 }
 

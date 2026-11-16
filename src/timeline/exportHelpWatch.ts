@@ -7,7 +7,7 @@ import { exportFlag } from "../api/exportFlags";
 import type { ExportReasonCode } from "../api/exportReason";
 import { quietVerdict } from "./exportActivity";
 import { noteFact3c } from "./exportFacts3c";
-import { exportHelp, type HelpInput, type HelpView } from "./exportHelp";
+import { exportHelp, type FirstPicture, type HelpInput, type HelpView } from "./exportHelp";
 import { producedFraction } from "./exportRestart";
 import type { EstimateBasis } from "./exportTypes3c";
 import { timeLeftSeconds, type LiveFacts } from "./exportWords";
@@ -66,6 +66,59 @@ interface Entry {
   noted: { slow: boolean; quiet: boolean };
   signature: string;
   cache: { flag: boolean; state: HelpState } | null;
+  picture: PictureWatch;
+}
+
+/** What the watch has seen of the run's first picture. It counts only where it saw the picture ARRIVE, a look that found none and a later one that found one, so the time it
+ *  keeps is the picture's and not the watch's own late start. Where a look already finds a picture (the watch came late, or the picture was quick) it keeps nothing, and the
+ *  banner counts from the export's start, as it did before this record. */
+interface PictureWatch {
+  /** The export's start (ms) this record belongs to: another start is another run. */
+  startedAt: number;
+  /** A look has found no picture yet. */
+  waiting: boolean;
+  /** The first look that found a picture after that: when (ms), and the share of the project produced. */
+  first: { atMs: number; produced: number } | null;
+}
+
+const newPictureWatch = (): PictureWatch => ({
+  startedAt: Number.NaN,
+  waiting: false,
+  first: null,
+});
+
+/** Takes one look at the run into the record. A look at a run that is not preparing or rendering is not a look at the picture, and a share that cannot be read is none. A first look that
+ *  already finds a picture records nothing; a run that starts again under the same job, or a share that falls back, is looked at afresh, from this look on. */
+function notePicture(
+  watch: PictureWatch,
+  startedAt: number,
+  counting: boolean,
+  produced: number,
+  nowMs: number,
+): void {
+  if (!counting || !Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return;
+  if (watch.startedAt !== startedAt) {
+    const looked = !Number.isNaN(watch.startedAt);
+    watch.startedAt = startedAt;
+    watch.first = null;
+    watch.waiting = looked;
+  } else if (watch.first !== null && produced < watch.first.produced) {
+    watch.first = null;
+    watch.waiting = true;
+  }
+  if (!(produced > 0)) {
+    watch.first = null;
+    watch.waiting = true;
+  } else if (watch.first === null && watch.waiting) {
+    watch.first = { atMs: nowMs, produced };
+    watch.waiting = false;
+  }
+}
+
+function firstPictureOf(watch: PictureWatch, startedAt: number): FirstPicture | null {
+  return watch.first
+    ? { atSeconds: (watch.first.atMs - startedAt) / 1000, produced: watch.first.produced }
+    : null;
 }
 
 /** Exports watched at once are one or two; the bound only keeps a watch that never ended from growing the map. */
@@ -183,8 +236,9 @@ export function noteHelpTick3c(
 ): void {
   try {
     if (typeof jobId !== "string" || jobId === "") return;
+    const feed = facts.feed;
     const input = inputOf(facts, nowMs);
-    if (!input) return;
+    if (!input || !feed) return;
     const entry: Entry = entries.get(jobId) ?? {
       input,
       shown: NOTHING_SHOWN,
@@ -192,8 +246,16 @@ export function noteHelpTick3c(
       noted: { slow: false, quiet: false },
       signature: NOTHING_ON_SCREEN,
       cache: null,
+      picture: newPictureWatch(),
     };
-    entry.input = input;
+    notePicture(
+      entry.picture,
+      feed.startedAt,
+      feed.stage === "preparing" || feed.stage === "rendering",
+      input.producedFraction,
+      nowMs,
+    );
+    entry.input = { ...input, firstPicture: firstPictureOf(entry.picture, feed.startedAt) };
     entry.cache = null;
     entries.set(jobId, entry);
     while (entries.size > MAX_ENTRIES) entries.delete(entries.keys().next().value as string);
