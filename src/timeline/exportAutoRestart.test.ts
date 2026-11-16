@@ -691,7 +691,38 @@ describe("the app starts an export again by itself when the PC ran short of memo
       await whenExportsSettle();
     });
 
-    it("still refuses when the check has a heads-up the person was never shown", async () => {
+    it("is not refused for a heads-up about time the person was never shown: the restart goes ahead, and nobody is asked", async () => {
+      const t = await setup();
+      const told: string[] = [];
+      __setExportConfirmationForTests(async (message) => {
+        told.push(message);
+        return "continue";
+      });
+      pc.executionSeconds = 28800;
+      const first = await t.exportFromAssistant(); // nothing is known yet about how long this takes: no heads-up
+      await flush();
+      expect(told).toEqual([]);
+      const descriptor = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
+      // What this PC measured since: more than twice the video's length, which the pre-start check would warn a request from an assistant about ("slow").
+      useExportJob.getState().rememberCalibration({
+        ...descriptor,
+        elapsedSeconds: 60,
+        finalBytes: 100,
+        memoryBytes: 100,
+        temporaryBytes: 10,
+      });
+      t.jobs.exit(first.job_id, -1, SHORT);
+      await flush(40);
+      expect(told).toEqual([]); // the restart did not ask either
+      expect(t.jobs.submitted).toHaveLength(2);
+      expect(rungOf(t.jobs.submitted[1])).toBe(1);
+      expect(restartDecisions().map((d) => d.record)).toEqual(["eligible"]);
+      t.jobs.exit(t.jobs.submitted[1].id, 0);
+      expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "done" });
+      await whenExportsSettle();
+    });
+
+    it("still refuses when the check has a heads-up that is not about time and the person was never shown it", async () => {
       const t = await setup();
       const told: string[] = [];
       __setExportConfirmationForTests(async (message) => {
@@ -710,6 +741,8 @@ describe("the app starts an export again by itself when the PC ran short of memo
         memoryBytes: 100,
         temporaryBytes: 10,
       });
+      // The longest an export may run is now shorter than what this PC measured: the export would be stopped before it finishes.
+      pc.executionSeconds = 30;
       t.jobs.exit(first.job_id, -1, SHORT);
       await flush(40);
       expect(told).toEqual([]); // the restart did not ask either

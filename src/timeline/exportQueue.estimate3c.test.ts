@@ -40,6 +40,7 @@ import {
 } from "./exportOptions";
 import { __resetFacts3c, factsForReport, factsOf3c } from "./exportFacts3c";
 import { formatActivityMark } from "./exportActivity";
+import { CONFIRM_REASON_BITS } from "./exportTrace";
 import { PACE_LOG_KEY } from "./paceLog";
 import { setPcCheckService } from "./pcCheckHandle";
 import { writePcCheck, type PcCheckRecord, type StorageLike } from "./pcClass";
@@ -633,6 +634,330 @@ describe("an export the app starts again by itself is never asked about its time
         expect(asked.mock.calls[0][0]).toMatch(/long time/);
       },
     );
+  });
+
+  // The first attempt is judged on the honest figure and the restart on 0.27.0's. A fast PC that prices half an hour of 1080p at under 20 minutes (the honest figure) is over the line in 0.27.0's guess, so a restart judged on that
+  // figure raised "long" for an export whose first attempt raised nothing, and a question refuses an automatic restart: the export that stopped for memory or by the chip ended as a failure it could have finished. The time of
+  // a restart raises no heads-up of its own, whatever figure it is judged on; a person's own request is asked as it always was.
+  describe("a restart is not refused for a time the person was never told", () => {
+    const HALF_HOUR: RenderWorkload = { ...WORKLOAD, durationSeconds: 1800 };
+    const longInput = (encoder: "x264-crf" | "chip-amd", rung: 0 | 1 = 0): AdmissionInput => ({
+      workload: HALF_HOUR,
+      output: OUTPUT,
+      quality: "medium",
+      engine: "file-sequence-v1",
+      encoder,
+      ...(rung ? { rung } : {}),
+    });
+    const honestAt = (input: AdmissionInput, rHat: number): number =>
+      admissionEstimateHere(input, { speedCheck: () => checkRecord({ rHat }), cores: () => 8 })!
+        .estimate.seconds;
+    /** The speed of a PC (its `rHat`) at which the honest time of `input` is `target` seconds. */
+    function rHatAt(input: AdmissionInput, target: number): number {
+      let low = 0.05;
+      let high = 900;
+      for (let step = 0; step < 60; step++) {
+        const middle = (low + high) / 2;
+        if (honestAt(input, middle) < target) low = middle;
+        else high = middle;
+      }
+      return high;
+    }
+    const SCENARIOS = {
+      // the PC ran short of memory: a rung gentler, the same encoder
+      memory: { first: longInput("x264-crf"), restart: longInput("x264-crf", 1) },
+      // the chip failed: the processor, from the same rung, the encoder 0.27.0 priced without a gain
+      chip: { first: longInput("chip-amd"), restart: longInput("x264-crf") },
+    } as const;
+
+    describe.each(Object.keys(SCENARIOS) as (keyof typeof SCENARIOS)[])(
+      "after a %s failure",
+      (kind) => {
+        it.each(VIAS)(
+          "via %s: the first attempt raised no notice, and the restart, whose 0.27.0 figure is a long export, goes ahead and finishes",
+          async (via) => {
+            const { fs, store } = await fresh();
+            const { first, restart } = SCENARIOS[kind];
+            const rHat = rHatAt(first, 0.8 * LONG_EXPORT_SECONDS);
+            checked(checkRecord({ rHat }));
+            const legacy = estimateExport(
+              HALF_HOUR,
+              OUTPUT,
+              "medium",
+              "file-sequence-v1",
+              [],
+              restart.encoder,
+            ).seconds!;
+            expect(honestAt(first, rHat), "the first attempt is not a long export").toBeLessThan(
+              LONG_EXPORT_SECONDS,
+            );
+            expect(legacy, "0.27.0 prices the restart as one").toBeGreaterThanOrEqual(
+              LONG_EXPORT_SECONDS,
+            );
+            const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+            __setExportConfirmationForTests(asked);
+
+            // The first attempt starts without a question and fails the way that is started again.
+            const tried = await submitWithDependencies(
+              described(store, {
+                ...(via === "other" ? {} : { via }),
+                workload: HALF_HOUR,
+                meta: metaOf({
+                  duration_s: 1800,
+                  calibration: descriptorOf({
+                    workload: HALF_HOUR,
+                    ...(first.encoder === "chip-amd" ? { encoder: "chip-amd" as const } : {}),
+                  }),
+                }),
+                run: async () => {
+                  throw new Error("Cannot allocate memory");
+                },
+              }),
+            );
+            await whenExportsSettle();
+            expect(asked, "the first attempt asked nobody").not.toHaveBeenCalled();
+            expect(listExportRecords().find((r) => r.job_id === tried.job_id)).toMatchObject({
+              state: "failed",
+            });
+
+            const submitted = submitWithDependencies(
+              restarting(store, kind, via, {
+                workload: HALF_HOUR,
+                meta: metaOf({
+                  duration_s: 1800,
+                  calibration: descriptorOf({
+                    workload: HALF_HOUR,
+                    ...(restart.rung ? { rung: restart.rung } : {}),
+                  }),
+                }),
+                run: quickRun(fs),
+              }),
+            );
+            await expect(
+              submitted,
+              "an export the app starts again is not refused for a time nobody was told",
+            ).resolves.toMatchObject({ job_id: expect.any(String) });
+            const sub = await submitted;
+            await whenExportsSettle();
+            expect(asked, "nobody was asked about the restart either").not.toHaveBeenCalled();
+            expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+              state: "done",
+              attempt: 2,
+              restarted: RESTARTS[kind].meta.restarted,
+            });
+          },
+        );
+      },
+    );
+
+    // A heads-up about time is a question for whoever asked: the first attempt, a person's Try again and a person's Switch are asked, as they always were, and the app's restart is not.
+    // The PC has measured the project (the honest figure and 0.27.0's are then one), so no part of this depends on how the figures differ.
+    describe.each([
+      ["long", 1500, /long time/],
+      ["slow", 600, /take a while/],
+    ] as const)("an export this PC has measured as %s", (_name, elapsedSeconds, says) => {
+      type Who = {
+        asked: boolean;
+        spec: (store: ProjectStoreAccess, fs: Fs) => ExportSpec;
+      };
+      const WHO: Record<string, Who> = {
+        "a first attempt": {
+          asked: true,
+          spec: (store, fs) => described(store, { via: "mcp", run: quickRun(fs) }),
+        },
+        "a person's Try again": {
+          asked: true,
+          spec: (store, fs) =>
+            described(store, {
+              via: "mcp",
+              retry: { from: 0, to: 1 },
+              meta: metaOf({ calibration: descriptorOf({ rung: 1 }) }),
+              run: quickRun(fs),
+            }),
+        },
+        "a person's Switch": {
+          asked: true,
+          spec: (store, fs) => {
+            attempts.begin("first-attempt");
+            return described(store, {
+              via: "mcp",
+              restart: { kind: "switch", from: "first-attempt", meta: { restarted: "quick" } },
+              run: quickRun(fs),
+            });
+          },
+        },
+        "the app's restart after a memory failure": {
+          asked: false,
+          spec: (store, fs) => restarting(store, "memory", "mcp", { run: quickRun(fs) }),
+        },
+        "the app's restart after a chip failure": {
+          asked: false,
+          spec: (store, fs) => restarting(store, "chip", "mcp", { run: quickRun(fs) }),
+        },
+      };
+      it.each(Object.keys(WHO))("%s", async (who) => {
+        const { fs, store } = await fresh();
+        useExportJob.setState({ calibrations: [earlier({ elapsedSeconds })] });
+        const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
+        __setExportConfirmationForTests(asked);
+        const sub = await submitWithDependencies(WHO[who].spec(store, fs));
+        await whenExportsSettle();
+        if (WHO[who].asked) {
+          expect(asked).toHaveBeenCalledTimes(1);
+          expect(asked.mock.calls[0][0]).toMatch(says);
+        } else expect(asked, "nobody is asked about a restart").not.toHaveBeenCalled();
+        expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+          state: "done",
+        });
+      });
+    });
+  });
+
+  // What stays as it was: the hard warning that an export cannot finish inside the PC's execution limit is judged on 0.27.0's figure for a restart (the first attempt and a click are judged on the honest low end), so a restart
+  // of an export the app believes cannot finish is not made better or worse by dropping its time heads-ups. A limit only 0.27.0's figure is over stops a restart whose person never saw the warning, and not one whose person
+  // continued past exactly that.
+  describe("the hard warning on time is judged on a restart as it always was", () => {
+    const legacySeconds = () =>
+      estimateExport(WORKLOAD, OUTPUT, "medium", "file-sequence-v1", [], "x264-crf").seconds!;
+    async function pcWhereOnlyLegacyIsOverTheLimit() {
+      const world = await fresh();
+      const rHat = 0.6;
+      checked(checkRecord({ rHat }));
+      const limit = legacySeconds() - 1;
+      const low = admissionEstimateHere(inputAt(0), {
+        speedCheck: () => checkRecord({ rHat }),
+        cores: () => 8,
+      })!.estimate.low;
+      expect(low, "the honest low end, which a first attempt is judged on, is under it").toBeLessThan(
+        limit,
+      );
+      executionSeconds = limit;
+      resources();
+      return world;
+    }
+
+    it("a first attempt at that limit starts without a question", async () => {
+      const { fs, store } = await pcWhereOnlyLegacyIsOverTheLimit();
+      const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+      __setExportConfirmationForTests(asked);
+      const sub = await submitWithDependencies(described(store, { via: "mcp", run: quickRun(fs) }));
+      await whenExportsSettle();
+      expect(asked).not.toHaveBeenCalled();
+      expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+        state: "done",
+      });
+    });
+
+    it.each(Object.keys(RESTARTS) as (keyof typeof RESTARTS)[])(
+      "the restart after a %s failure whose person never saw it is refused, and nobody is asked",
+      async (kind) => {
+        const { fs, store } = await pcWhereOnlyLegacyIsOverTheLimit();
+        const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
+        __setExportConfirmationForTests(asked);
+        await expect(
+          submitWithDependencies(restarting(store, kind, "mcp", { run: quickRun(fs) })),
+        ).rejects.toThrow(/cancelled before submission/);
+        expect(asked).not.toHaveBeenCalled();
+        expect(listExportRecords()).toHaveLength(0);
+      },
+    );
+
+    it.each(Object.keys(RESTARTS) as (keyof typeof RESTARTS)[])(
+      "the restart after a %s failure whose person continued past that warning goes ahead, as before",
+      async (kind) => {
+        const { fs, store } = await pcWhereOnlyLegacyIsOverTheLimit();
+        const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+        __setExportConfirmationForTests(asked);
+        const sub = await submitWithDependencies(
+          restarting(store, kind, "mcp", {
+            run: quickRun(fs),
+            restart: {
+              kind: "auto",
+              from: "first-attempt",
+              noticesAnswered: CONFIRM_REASON_BITS.execution_limit,
+              meta: RESTARTS[kind].meta,
+            },
+          }),
+        );
+        await whenExportsSettle();
+        expect(asked).not.toHaveBeenCalled();
+        expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+          state: "done",
+          attempt: 2,
+        });
+      },
+    );
+  });
+
+  // What the person answered on the first attempt still carries for every heads-up a restart can raise: the ones that are not about time (a project outside what ArtDaddy was tested with). One answered notice never covers another.
+  describe("what the person already answered still carries, for the heads-ups a restart can raise", () => {
+    const OUTSIDE: RenderWorkload = { ...WORKLOAD, fps: 120 };
+    const restartOf = (store: ProjectStoreAccess, fs: Fs, noticesAnswered?: number) =>
+      restarting(store, "memory", "mcp", {
+        workload: OUTSIDE,
+        meta: metaOf({ calibration: descriptorOf({ workload: OUTSIDE, rung: 1 }) }),
+        run: quickRun(fs),
+        restart: {
+          kind: "auto",
+          from: "first-attempt",
+          ...(noticesAnswered ? { noticesAnswered } : {}),
+          meta: RESTARTS.memory.meta,
+        },
+      });
+
+    it("a project outside what ArtDaddy was tested with, answered on the first attempt, is not asked again", async () => {
+      const { fs, store } = await fresh();
+      const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+      __setExportConfirmationForTests(asked);
+      const sub = await submitWithDependencies(
+        restartOf(store, fs, CONFIRM_REASON_BITS.outside_promise),
+      );
+      await whenExportsSettle();
+      expect(asked).not.toHaveBeenCalled();
+      expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+        state: "done",
+        attempt: 2,
+      });
+    });
+
+    it.each([
+      ["nothing was answered", undefined],
+      ["only a time notice was", CONFIRM_REASON_BITS.slow],
+    ])("is refused, and nobody is asked, when %s", async (_what, answered) => {
+      const { fs, store } = await fresh();
+      const asked = vi.fn(async (_message: string, _warning: boolean) => "continue" as const);
+      __setExportConfirmationForTests(asked);
+      await expect(submitWithDependencies(restartOf(store, fs, answered))).rejects.toThrow(
+        /cancelled before submission/,
+      );
+      expect(asked).not.toHaveBeenCalled();
+      expect(listExportRecords()).toHaveLength(0);
+    });
+
+    it("a time notice answered on the first attempt does not make the restart refuse for the other one", async () => {
+      const { fs, store } = await fresh();
+      // measured as long, where the first attempt had only been told "slow" and went on
+      useExportJob.setState({ calibrations: [earlier({ elapsedSeconds: 1500 })] });
+      const asked = vi.fn(async (_message: string, _warning: boolean) => "cancel" as const);
+      __setExportConfirmationForTests(asked);
+      const sub = await submitWithDependencies(
+        restarting(store, "memory", "mcp", {
+          run: quickRun(fs),
+          restart: {
+            kind: "auto",
+            from: "first-attempt",
+            noticesAnswered: CONFIRM_REASON_BITS.slow,
+            meta: RESTARTS.memory.meta,
+          },
+        }),
+      );
+      await whenExportsSettle();
+      expect(asked).not.toHaveBeenCalled();
+      expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toMatchObject({
+        state: "done",
+        attempt: 2,
+      });
+    });
   });
 });
 
