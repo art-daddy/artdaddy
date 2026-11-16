@@ -264,8 +264,10 @@ function discard(files: SpeedProbeDeps["files"], path: string): void {
 /** Measures this PC: makes the reference clip if it is not there, runs B (the reference export's work: read, mix and encode at
  *  Medium), C (with the faster setting) and A (read and mix only), then B again and keeps the faster of its two runs (a disturbance
  *  can only slow a run). The whole of it is inside 20 s; null means the time ran out, a command failed, the run was refused or it was
- *  stopped. `onRefused` is told when the job supervisor answers busy to the clip's making or to a run before B has been read: that is a
- *  refusal (an export it lists that the queue does not know yet, no supervisor to ask), not a PC that could not finish.
+ *  stopped. C, A and the repeat are optional once B has been read: each is started only when what is left of the box is what B took
+ *  and a margin, so none of them is cut off by the box. `onRefused` is told when the job supervisor answers busy to the clip's making
+ *  or to a run before B has been read: that is a refusal (an export it lists that the queue does not know yet, no supervisor to ask),
+ *  not a PC that could not finish.
  *  Never throws. A run that is stopped leaves nothing behind but the finished reference clip, which is kept on purpose. */
 export async function measureSpeed(
   deps: SpeedProbeDeps,
@@ -320,13 +322,19 @@ export async function measureSpeed(
     }
 
     type Read =
-      | { ok: true; fps: number }
+      | { ok: true; fps: number; wallMs: number }
       | { ok: false; why: "stopped" | "failed" | "no_time" | "too_short" | "unreadable" };
     let bRead = false;
+    /** What C, A and the repeat of B need left of the box once B has been read (0 before): what B took, which none of them is expected to
+     *  need more of, and the margin. The runner answers only after it has cleaned up after the run, so a run started with less than
+     *  that left is cut off by the box, and the box ending the check stores a check that had read B as not finished. */
+    let optionalNeedMs = 0;
     const timed = async (kind: ProbeKind, frames: number): Promise<Read> => {
       if (signal.aborted) return { ok: false, why: "stopped" };
       const left = timeLeft();
-      if (left < SPEED_PROBE.minRunMs) return { ok: false, why: "no_time" };
+      if (left < Math.max(SPEED_PROBE.minRunMs, optionalNeedMs))
+        return { ok: false, why: "no_time" };
+      const began = clock();
       const outcome = await guard(
         deps.probe(probeRunArgs(kind, reference, { frames }), {
           timeoutMs: Math.floor(left - SPEED_PROBE.marginMs),
@@ -339,7 +347,8 @@ export async function measureSpeed(
       if (outcome.kind === "busy" && !bRead) onRefused?.();
       if (outcome.kind !== "ran" || outcome.code !== 0) return { ok: false, why: "failed" };
       const seen = speedFromProgress(outcome.stdout);
-      if (seen.fps !== null) return { ok: true, fps: seen.fps };
+      if (seen.fps !== null)
+        return { ok: true, fps: seen.fps, wallMs: Math.max(0, clock() - began) };
       // The run reached everything it was asked for and still could not be read: it was over too soon (a fast PC). Anything
       // else (it stopped early, or said nothing readable) a longer run would not mend.
       return { ok: false, why: seen.frames >= frames ? "too_short" : "unreadable" };
@@ -348,10 +357,10 @@ export async function measureSpeed(
     const measure = async (
       kind: ProbeKind,
       first: number,
-    ): Promise<{ fps: number; step: number } | null> => {
+    ): Promise<{ fps: number; step: number; wallMs: number } | null> => {
       for (let step = first; step < SPEED_PROBE.frameSteps.length; step++) {
         const read = await timed(kind, SPEED_PROBE.frameSteps[step]);
-        if (read.ok) return { fps: read.fps, step };
+        if (read.ok) return { fps: read.fps, step, wallMs: read.wallMs };
         if (read.why !== "too_short") return null;
       }
       return null;
@@ -360,6 +369,7 @@ export async function measureSpeed(
     const b = await measure("b", 0);
     if (!b) return null;
     bRead = true;
+    optionalNeedMs = b.wallMs + SPEED_PROBE.marginMs;
     const c = await measure("c", b.step);
     const a = await measure("a", b.step);
     const again = await measure("b", b.step);

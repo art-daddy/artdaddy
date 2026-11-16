@@ -683,7 +683,8 @@ describe("measureSpeed", () => {
       [30, 30],
     ] as const)
       it(`runs of ${first} and ${second} frames a second: ${Math.max(first, second)}`, async () => {
-        const pc = rig({ speed: (kind, nth) => (kind === "b" ? [first, second][nth] : 70) });
+        // C and A at 40: a PC whose other runs are so short that they have to be made longer would leave no time for the repeat
+        const pc = rig({ speed: (kind, nth) => (kind === "b" ? [first, second][nth] : 40) });
         const got = await measureSpeed(pc.deps, new AbortController().signal);
         expect(got!.bFps).toBeCloseTo(Math.max(first, second), 0);
       });
@@ -790,6 +791,64 @@ describe("measureSpeed", () => {
     it("has no answer when B itself cannot end inside the box", async () => {
       const pc = rig({ speed: (kind) => (kind === "b" ? 1 : 70) });
       expect(await measureSpeed(pc.deps, new AbortController().signal)).toBeNull();
+    });
+
+    it("does not start a run that cannot end in what is left: with B taking half of the box nothing else is started, and the answer is B's", async () => {
+      // B takes 10 s of the 20. C, A and the repeat take about as long or less, and the repeat would only be cut off by the box.
+      const pc = rig({ speed: (kind) => (kind === "b" ? 6.2 : 40) });
+      const start = pc.now();
+      const got = await measureSpeed(pc.deps, new AbortController().signal);
+      expect(pc.calls.map((c) => c.kind)).toEqual(["pc-check-b"]);
+      expect(pc.now() - start).toBeLessThan(11_000);
+      expect(got).toMatchObject({ outcome: "done", aFps: null, cFps: null });
+      expect(got!.bFps).toBeCloseTo(6.2, 0);
+      expect(got!.rHat).toBe(rHatOf(got!.bFps));
+      expect(got!.cls).toBe(classOf(got!.rHat));
+    });
+
+    it("never starts C, A or the repeat with less left than B itself took, whatever the PC's speed (rule)", async () => {
+      for (const bFps of [4, 5, 6, 7, 8, 10, 12, 16, 20, 30, 60, 120, 400]) {
+        const pc = rig({
+          speed: (kind) => (kind === "b" ? bFps : kind === "c" ? bFps * 1.2 : bFps * 1.5),
+        });
+        const start = pc.now();
+        const got = await measureSpeed(pc.deps, new AbortController().signal);
+        expect(got, `B at ${bFps}`).not.toBeNull();
+        // the run that read B is the last of the first B runs (the first can be over too soon on a fast PC)
+        let readB = 0;
+        while (pc.calls[readB + 1]?.kind === "pc-check-b") readB++;
+        const spent = (i: number) => (pc.calls[i + 1]?.at ?? pc.now()) - pc.calls[i].at;
+        for (let i = readB + 1; i < pc.calls.length; i++)
+          expect(
+            BOX - (pc.calls[i].at - start),
+            `B at ${bFps}: ${pc.calls[i].kind} was started with less left than B took`,
+          ).toBeGreaterThanOrEqual(spent(readB));
+        expect(pc.now() - start, `B at ${bFps}`).toBeLessThanOrEqual(BOX);
+      }
+    });
+
+    it("changes nothing on a PC where every run fits: all four runs happen, and the numbers are the protocol's own", async () => {
+      const script: Script = { speed: (kind) => ({ a: 40, b: 30, c: 35 })[kind] };
+      const fits = rig(script);
+      const got = await measureSpeed(fits.deps, new AbortController().signal);
+      expect(fits.calls.map((c) => c.kind)).toEqual([
+        "pc-check-b",
+        "pc-check-c",
+        "pc-check-a",
+        "pc-check-b",
+      ]);
+      // the numbers as they were measured before the time was looked at
+      expect(got!.aFps).toBeCloseTo(39.993965907376676, 9);
+      expect(got!.bFps).toBeCloseTo(29.604593420235886, 9);
+      expect(got!.cFps).toBeCloseTo(35, 9);
+      expect(got!.rHat).toBeCloseTo(1.0133562577317423, 9);
+      expect(got!.cls).toBe("ok");
+      // the same PC with a clock that stands still, so that the box can never run short: what the protocol gives when time is no question
+      const unlimited = rig(script, { now: () => 1_700_000_000_000 });
+      const free = await measureSpeed(unlimited.deps, new AbortController().signal);
+      expect(unlimited.calls.map((c) => c.kind)).toEqual(fits.calls.map((c) => c.kind));
+      expect({ ...got, atMs: 0 }).toEqual({ ...free, atMs: 0 });
+      expect(got).toMatchObject({ outcome: "done" });
     });
   });
 
@@ -959,12 +1018,30 @@ describe("the export speed test as a probe of the service", () => {
     expect(EXPORT_SPEED_PROBE_ID).toBe("export-speed");
   });
 
-  /** The service over a fake clock and the scripted PC. */
-  function inService(script: Script) {
+  /** The service over a fake clock and the scripted PC. With `tailMs` the PC's runs take their time on the SAME clock, and each is answered
+   *  that long after it has ended (the capability runner cleans up before it answers), so the service's 20 second box can end a check first, as it does for real. */
+  function inService(script: Script, options: { tailMs?: number } = {}) {
     const pc = rig(script);
     let now = 1_700_000_000_000;
     let seq = 0;
     const timers = new Map<number, { at: number; fn: () => void }>();
+    const timedProbe: PcCheckDeps["probe"] = (args, probeOptions) =>
+      new Promise((resolve) => {
+        const before = pc.now();
+        const answer = pc.deps.probe(args, probeOptions); // the scripted PC spends its time on its own clock
+        const spent = pc.now() - before;
+        const onStop = () => resolve({ kind: "stopped" });
+        probeOptions.signal?.addEventListener("abort", onStop, { once: true });
+        void answer.then((outcome) => {
+          timers.set(++seq, {
+            at: now + spent + (options.tailMs ?? 0),
+            fn: () => {
+              probeOptions.signal?.removeEventListener("abort", onStop);
+              resolve(outcome);
+            },
+          });
+        });
+      });
     const deps: PcCheckDeps = {
       ...pc.deps,
       now: () => now,
@@ -974,6 +1051,7 @@ describe("the export speed test as a probe of the service", () => {
         return id;
       },
       clearTimer: (id) => void timers.delete(id as number),
+      ...(options.tailMs === undefined ? {} : { probe: timedProbe }),
     };
     const advance = async (ms: number) => {
       const settle = async () => {
@@ -1063,6 +1141,41 @@ describe("the export speed test as a probe of the service", () => {
     expect(JSON.stringify(deps.storage!.getItem("artdaddy.pcCheck.v1"))).toBe(before);
     expect(service.pcClass()).toBe("unknown");
     expect(service.status().lastOutcome).toEqual({ "export-speed": "aborted" });
+  });
+
+  it("stores a check that read B as done, though the runs after it and the runner's clean-up would have run past the 20 second box", async () => {
+    // B takes 10 s, every run is answered 1.5 s after it ends, and the box is 20 s: a repeat of B started at 18 s is cut off, its answer
+    // comes after the box has ended the check, and the check that had read B is stored as not finished.
+    const { pc, service, advance, quiet } = inService(
+      { speed: (kind) => (kind === "b" ? 6.2 : 40) },
+      { tailMs: 1_500 },
+    );
+    service.setSignals(quiet());
+    await advance(20_000); // quiet for 20 s: the check starts
+    await advance(20_000); // the whole of its box
+    expect(service.status()).toEqual({ running: null, lastOutcome: { "export-speed": "done" } });
+    const record = service.result("export-speed");
+    expect(record).toMatchObject({ outcome: "done", aFps: null, cFps: null });
+    expect(record!.bFps).toBeCloseTo(6.2, 0);
+    expect(service.pcClass()).toBe(record!.cls);
+    expect(service.pcClass()).not.toBe("unfinished");
+    expect(pc.calls.map((c) => c.kind)).toEqual(["pc-check-b"]);
+  });
+
+  it("still ends a check by the box when B itself is cut off: stored as not finished, as before", async () => {
+    // B needs 26 s and is answered 1.5 s after the box has ended it
+    const { service, advance, quiet } = inService(
+      { speed: (kind) => (kind === "b" ? 2.4 : 40) },
+      { tailMs: 1_500 },
+    );
+    service.setSignals(quiet());
+    await advance(20_000);
+    await advance(20_000);
+    expect(service.status()).toEqual({
+      running: null,
+      lastOutcome: { "export-speed": "unfinished" },
+    });
+    expect(service.pcClass()).toBe("unfinished");
   });
 
   describe("a refusal by the job supervisor is not a PC that could not finish", () => {
