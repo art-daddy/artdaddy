@@ -66,4 +66,15 @@ describe("the privacy text about the second, full-size download", () => {
           /\b(another|other|every|any|all|many)\b[^.;]{0,40}\blanguages?\b/i,
         );
   });
+
+  // The other way a PC comes to download the full-size file: the engine failed on the smaller one and the app went on
+  // with the full-size one (speechModelRun.test.ts, "when the engine fails on the smaller file").
+  it("says, wherever it speaks of the full-size download, that it also follows when the smaller model does not run", () => {
+    const said = sentences(readFileSync(PRIVACY, "utf8")).filter((s) => /full-size/i.test(s));
+    expect(said.length, "the policy speaks of the full-size download").toBeGreaterThan(0);
+    for (const sentence of said)
+      expect(sentence, "the app goes on with the full-size file when the smaller one fails").toMatch(
+        /smaller model (does not|cannot|can't|fails to) (run|work|start|load)/i,
+      );
+  });
 });
