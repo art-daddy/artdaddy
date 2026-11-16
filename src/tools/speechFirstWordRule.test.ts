@@ -462,6 +462,26 @@ describe("a run over several files never carries the arguments: a file whose voi
         src,
       ).toBe(late[i] ? SOUND : STORED);
   });
+  it("never gives a launch over several files the arguments, even for a file whose audio reads later than it did when the run was planned", async () => {
+    processor();
+    configure(true, true);
+    const files = [freshSource(), freshSource()];
+    const reads = new Map<string, number>();
+    const t = setup({
+      audio: (source) => {
+        const n = (reads.get(source) ?? 0) + 1;
+        reads.set(source, n);
+        return wavWithVoiceAt(n === 1 ? 400 : 3000);
+      },
+    });
+    const outcomes = await ensureTranscripts(t.rig.ctx(), files, FULL, "en");
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
+    // Both read as early when the run was planned, so both stayed in the shared run, which can carry nothing.
+    expect(t.whisper()).toHaveLength(1);
+    expect(flagValues(t.whisper()[0].args, "-f")).toHaveLength(2);
+    expect(t.whisper()[0].args).not.toContain("-dtw");
+    expect(t.whisper()[0].meta).not.toHaveProperty("items.0.wordTimes");
+  });
 });
 
 describe("a launch that carried the arguments and failed is made once more without them", () => {
