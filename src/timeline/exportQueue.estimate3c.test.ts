@@ -828,9 +828,10 @@ describe("an export the app starts again by itself is never asked about its time
         speedCheck: () => checkRecord({ rHat }),
         cores: () => 8,
       })!.estimate.low;
-      expect(low, "the honest low end, which a first attempt is judged on, is under it").toBeLessThan(
-        limit,
-      );
+      expect(
+        low,
+        "the honest low end, which a first attempt is judged on, is under it",
+      ).toBeLessThan(limit);
       executionSeconds = limit;
       resources();
       return world;

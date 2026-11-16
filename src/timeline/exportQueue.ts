@@ -1561,9 +1561,7 @@ async function measurePreflight(
   }
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
     return refuse("cancelled");
-  const reasons = new Set(
-    checks.flatMap((check, index) => raisedFor(specs[index], check.reasons)),
-  );
+  const reasons = new Set(checks.flatMap((check, index) => raisedFor(specs[index], check.reasons)));
   let spaceNeeded: number | null = null;
   let destinationShort = false;
   let scratchShort = false;
