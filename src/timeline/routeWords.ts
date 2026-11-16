@@ -338,7 +338,9 @@ function routeQuestionBody(input: RouteQuestionInput): Pick<RouteQuestion, "line
     : time
       ? `This export is expected to take ${time}.`
       : "";
-  const fullWords = FULL_FILE_WORDS[input.full.route] ?? FULL_FILE_WORDS.processor;
+  const fullWords = Object.hasOwn(FULL_FILE_WORDS, input.full.route)
+    ? FULL_FILE_WORDS[input.full.route]
+    : FULL_FILE_WORDS.processor;
   const full = joined(
     [
       `Full quality${time ? ` ${time}` : ""}`,

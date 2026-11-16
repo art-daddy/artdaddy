@@ -345,6 +345,32 @@ describe("the chat card's two questions: the owner's copy", () => {
     );
   });
 
+  it("falls back to the processor's file words for a route that is not one of the three, and for every name that objects inherit", () => {
+    const fallback = "Full quality about 15 min, the smallest file";
+    const wayOf = (route: unknown) =>
+      describeRouteQuestion({
+        ...question,
+        full: { seconds: 900, bytes: null, route: route as never },
+      }).ways.full;
+    // a lookup that reads the prototype chain answers these with a function or an object, which is not a fallback
+    for (const inherited of [
+      "constructor",
+      "toString",
+      "__proto__",
+      "hasOwnProperty",
+      "valueOf",
+      "isPrototypeOf",
+      "propertyIsEnumerable",
+      "toLocaleString",
+    ])
+      expect(wayOf(inherited), inherited).toBe(fallback);
+    for (const odd of [undefined, null, 7, "", "Processor", "processor ", {}, []])
+      expect(wayOf(odd), String(odd)).toBe(fallback);
+    expect(wayOf("processor")).toBe(fallback);
+    expect(wayOf("chip")).toBe("Full quality about 15 min, usually a larger file");
+    expect(wayOf("faster")).toBe("Full quality about 15 min, the picture may be slightly softer");
+  });
+
   it("says why it asks on a PC whose check did not finish, and what Quick changes where it changes only one thing", () => {
     expect(describeRouteQuestion({ ...question, pcClass: "unfinished" }).lines[0]).toBe(
       "This PC could not finish its speed check, so ArtDaddy treats it as slower than most.",
