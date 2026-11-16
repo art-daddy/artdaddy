@@ -25,6 +25,7 @@ import {
   type ChipMaker,
   type SizeClass,
 } from "./exportEncoder";
+import { flags3cNow } from "./flags3c";
 
 /** Bumped whenever the test means something different, so that a pass remembered by an older test is not believed.
  *  1: the first test (30 frames a second at both classes; a file compared at its own length).
@@ -577,7 +578,9 @@ const FLAG_OF: Record<ChipMaker, ExportFlagName> = {
 
 /** A chip that may be used for an export at `sizeClass`: the first, in order of preference, that is switched on, not under
  *  suspicion and proven (remembered, or tested now when `allowRun`). Never throws; "no chip" is the processor's encode.
- *  The person's own switch is read first and here only: Off is never tested, offered or used, whatever the server says. */
+ *  The person's own switch is read first and here only: Off is never tested, offered or used, whatever the server says, while
+ *  Quick export is on. With `quick_export` off the row that could undo Off is not drawn and the app is 0.27.0's, which has no such
+ *  switch: the choice is not read, a chip that passes is used, and what was chosen is left as it is for when the switch is back on. */
 export async function findChip(
   sizeClass: SizeClass,
   options: { allowRun: boolean; signal?: AbortSignal },
@@ -587,7 +590,8 @@ export async function findChip(
   try {
     if (options.signal?.aborted) return { chip: null, events: [] };
     const deps = given ?? realDeps();
-    if (readChipPref(deps.storage) === "off") return { chip: null, events: [] };
+    if (flags3cNow().quick_export && readChipPref(deps.storage) === "off")
+      return { chip: null, events: [] };
     const adapters = await deps.adapters();
     const memory = load(deps);
     const candidates = [...adapters]
