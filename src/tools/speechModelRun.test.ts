@@ -97,7 +97,10 @@ interface RigOptions {
   installed?: readonly string[];
   /** What the engine says it heard, per launch and clip. Absent: English. */
   say?: (launch: number, args: string[], clip: string) => Say;
-  engine?: (launch: number, args: string[]) => { code: number; stderr?: string };
+  engine?: (
+    launch: number,
+    args: string[],
+  ) => { code: number; stderr?: string; noOutput?: boolean };
   /** Runs when the audio is extracted: after the plan, before the launch. */
   onExtract?: () => void;
   background?: boolean;
@@ -168,7 +171,7 @@ function rig(options: RigOptions = {}) {
       launches.push(args);
       if (!wasChecked(args)) lastCheck.unchecked.push(args);
       const answer = options.engine?.(launch, args) ?? { code: 0 };
-      if (answer.code === 0) {
+      if (answer.code === 0 && answer.noOutput !== true) {
         const outs = flagValues(args, "-of");
         flagValues(args, "-f").forEach((wav, place) => {
           const source = wavSource.get(wav);
@@ -318,17 +321,104 @@ describe("a PC that transcribes on its processor, with both files on disk", () =
 
   it("does not take a crash of the smaller file's launch for the chip's, and keeps no hold for it", async () => {
     noChip();
+    // Only the smaller file's launch crashes (with the chip's own signature in its log): it never had the chip on.
     const r = rig({
-      engine: () => ({ code: ENGINE_CRASH, stderr: VULKAN_LOG }),
+      engine: (_launch, args) =>
+        modelOf(args) === pathOf(SMALL) ? { code: ENGINE_CRASH, stderr: VULKAN_LOG } : { code: 0 },
     });
-    const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
-    expect(failure).toBeInstanceOf(TranscriptionFailure);
-    // One launch: no retry "with the chip off" of a launch that never had the chip on.
-    expect(r.launches).toHaveLength(1);
+    const kept = await runWhisper(r.ctx, fresh(), "small", "en");
+    // The smaller file's launch is not retried "with the chip off" (it was a processor launch from the start); the
+    // request goes on with the full-size file, once (see the next describe).
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL)]);
     expect(onProcessor(r.launches[0])).toBe(true);
     expect(cpuOnlyNow()).toBe(false);
     expect(localStorage.getItem(SPEECH_CPU_ONLY_KEY)).toBeNull();
+    expect(kept.words.map((w) => w.word).join(" ")).toBe("launch 1");
+  });
+});
+
+// The net under the smaller file (RM-006): it was never run on a Linux PC, and on Linux it is the default. When the
+// engine itself fails on it (it cannot load it, it crashes, it leaves nothing), the request is run once more with the
+// full-size file, which every language accepts; nothing else changes: the smaller file is still only ever started with
+// -ng, nothing wrong is kept, and the runs never loop.
+describe("when the engine fails on the smaller file", () => {
+  const FAILURES: Array<[how: string, answer: { code: number; stderr?: string; noOutput?: boolean }]> =
+    [
+      ["it cannot load the file", { code: 1, stderr: "whisper_init_from_file: failed to load model" }],
+      ["it crashes", { code: ENGINE_CRASH, stderr: VULKAN_LOG }],
+      ["it exits cleanly and leaves no transcript", { code: 0, noOutput: true }],
+    ];
+
+  it.each(FAILURES)(
+    "the request goes on with the full-size file, once, when %s",
+    async (_how, failure) => {
+      noChip();
+      const r = rig({
+        engine: (_launch, args) => (modelOf(args) === pathOf(SMALL) ? failure : { code: 0 }),
+      });
+      const src = fresh();
+      const kept = await runWhisper(r.ctx, src, "small", "en");
+      expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL)]);
+      expect(onProcessor(r.launches[0])).toBe(true);
+      expect(kept.words.map((w) => w.word).join(" ")).toBe("launch 1");
+      // The words kept are the full-size file's, under the key that answers the request later.
+      expect(await r.words(src, "en")).toBe("launch 1");
+    },
+  );
+
+  it("is one more run at most: when the full-size file fails too, the failure is the engine's own and nothing is kept", async () => {
+    noChip();
+    const r = rig({ engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(TranscriptionFailure);
+    expect((failure as TranscriptionFailure).reason).toBe("engine_failed");
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(FULL)]);
     expect(r.kept.size).toBe(0);
+  });
+
+  it("asks for the full-size file when only the smaller one is here, and says why plainly when it cannot be fetched", async () => {
+    noChip();
+    const r = rig({ installed: [SMALL], engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL)]);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+    expect(r.kept.size).toBe(0);
+  });
+
+  it("does not go on when the engine cannot start at all: a missing library is not the model's fault", async () => {
+    noChip();
+    const STATUS_DLL_NOT_FOUND = -1073741515;
+    const r = rig({ engine: () => ({ code: STATUS_DLL_NOT_FOUND, stderr: "" }) });
+    const failure = await runWhisper(r.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("engine_unavailable");
+    expect(r.launches).toHaveLength(1);
+  });
+
+  it("does not touch a PC that runs the full-size file: its failure is its own, with one launch", async () => {
+    // A chip PC, and a processor PC that already holds the full-size file with the owner's switch off, plan it.
+    noChip();
+    const held = rig({ installed: [FULL], engine: () => ({ code: 1, stderr: "failed to load model" }) });
+    const failure = await runWhisper(held.ctx, fresh(), "small", "en").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("engine_failed");
+    expect(held.launches.map(modelOf)).toEqual([pathOf(FULL)]);
+  });
+
+  it("goes on for every file of a run over several files, each with the full-size file", async () => {
+    noChip();
+    const files = [fresh(), fresh()];
+    const r = rig({
+      background: true,
+      engine: (_launch, args) =>
+        modelOf(args) === pathOf(SMALL) ? { code: 1, stderr: "failed to load model" } : { code: 0 },
+    });
+    const out = await ensureTranscripts(r.ctx, files, "small", "en");
+    expect(out.every((o) => o.ok)).toBe(true);
+    // Every launch of the smaller file is a processor launch, and every file ended with the full-size file's words.
+    for (const args of r.launches)
+      if (modelOf(args) === pathOf(SMALL)) expect(onProcessor(args)).toBe(true);
+    expect(r.launches.filter((a) => modelOf(a) === pathOf(FULL)).length).toBe(2);
+    for (const file of files) expect(await r.words(file, "en")).not.toBe("");
   });
 });
 

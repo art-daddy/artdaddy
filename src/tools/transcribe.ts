@@ -1398,6 +1398,13 @@ export async function runWhisper(
     try {
       return await runWhisperOnce(ctx, src, size, language, window, redo, joined);
     } catch (e) {
+      if (e instanceof EngineFailedOnSmallerFile) {
+        // The engine failed on the smaller file, which may be the cause: once more with the full-size file, which
+        // every language accepts. If that fails too, or the runs are spent, the failure is the engine's own.
+        if (attempt >= 2) throw e.failure;
+        redo = universalPlan();
+        continue;
+      }
       if (!(e instanceof WeakDecodeError) || attempt >= 2) throw e;
       // The language turned out to need another file or a wider beam than the prediction gave it. If a second
       // run finds yet another language, the full-size file with the engine's own default beam settles it: it is
@@ -1414,6 +1421,27 @@ const MODEL_VARIANT: ModelVariant = MODEL_MANIFEST[DEFAULT_MODEL_KEY].variant;
 /** What every language accepts on every path: the full-size file at the engine's own default beam. */
 function universalPlan(): ModelPlan {
   return { key: DEFAULT_MODEL_KEY, variant: MODEL_VARIANT, beam: DEFAULT_BEAM };
+}
+
+/** The engine itself failed on a run made with the smaller model file: it did not start, crashed, or left no output.
+ *  The file may be the cause (it was never run on a PC like this one), so {@link runWhisper} runs the request once
+ *  more with the full-size file; `failure` is what the caller is told when that cannot be done. It never leaves
+ *  runWhisper. */
+class EngineFailedOnSmallerFile extends Error {
+  constructor(readonly failure: unknown) {
+    super("the speech engine failed on the smaller model file");
+    this.name = "EngineFailedOnSmallerFile";
+  }
+}
+
+/** Whether `e`, thrown for a run made with `plan`, is the ENGINE failing on a file other than the baseline. Not the
+ *  person stopping it, not a run deferred for the cap, not an engine that cannot start at all (a missing library is
+ *  not the model's fault), not a language it does not know and not a transcript the commit point refused. */
+function engineFailedOnSmallerFile(e: unknown, plan: ModelPlan): boolean {
+  if (plan.key === DEFAULT_MODEL_KEY) return false;
+  if (e instanceof TranscriptionFailure) return e.reason === "engine_failed";
+  // The engine exited cleanly and left an output that is not a transcript (cut short).
+  return e instanceof SyntaxError;
 }
 
 /** The manifest keys whose file is whole on this PC right now (its size and checksum were verified when it landed). */
@@ -1638,7 +1666,11 @@ async function runWhisperOnce(
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
-        return await finishWhisper(ctx.store, meta, run, ctx.signal);
+        // The engine ran and failed on the smaller file: runWhisper goes on with the full-size one. A launch the
+        // manifest refused never gets here (it is thrown by engine() above), and neither does a cancel.
+        return await finishWhisper(ctx.store, meta, run, ctx.signal).catch((e: unknown) => {
+          throw engineFailedOnSmallerFile(e, plan) ? new EngineFailedOnSmallerFile(e) : e;
+        });
       } catch (e) {
         // The person stopped a whole file's run: it is theirs to ask for again, and nothing starts it behind
         // their back (the check at the top of this run, for the background).
