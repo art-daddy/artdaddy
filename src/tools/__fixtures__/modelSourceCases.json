@@ -1,6 +1,6 @@
 {
   "about": "The cases of acceptModelSources(raw, hosts) in src/tools/modelManifest.ts, which decides the extra places a remote answer may name for fetching the speech model. Two readers must give exactly these answers: the TypeScript test (src/tools/modelManifest.test.ts, which also checks that max_sources, max_length and allowed_hosts are the function's own, that every accept_entry is written the way the parser writes it, and that an answer holds only entries that were in the list it was given) and the server's Python twin.\n\nTHE RULES. The answer is a list of strings, worked out like this:\n1. raw must be a list (a JSON array). Anything else (null, a string, an object, a number, true) gives [].\n2. The list may hold at most max_sources entries, counted BEFORE repeats are removed. More gives [].\n3. EVERY entry must be acceptable (rules 4 to 11). If one is not, the answer is [] (a list is never trusted in part).\n4. An acceptable entry is a string. A number, null, true, an object or a nested list is not.\n5. It is at most max_length characters long, counted as JavaScript counts them (UTF-16 code units, the string as given). Rule 11 leaves only ASCII strings, so for any string that can pass, UTF-16 code units, code points and bytes are the same count.\n6. It is an https address: the scheme is https (not http, ftp, wss, file, data or javascript; an address with no scheme is refused too).\n7. It has no user-info (nothing like name@ or name:password@ before the host), no port (not 8443, and not even 443 or an empty port after a colon) and no fragment (no # anywhere, not even a bare # at the end; %23 is just an escape and is fine).\n8. Its host (for a string that passes rule 11, the text between https:// and the next slash) is a public name: at least two labels (the parts between dots), none of them empty (no leading dot, no trailing dot, no two dots in a row), every label made only of the lower-case letters a to z, digits and hyphens, not starting or ending with a hyphen and not starting with xn-- (no internationalised names), the last label not made only of digits (that is an IPv4 address in disguise), not localhost and not a name under localhost, and not an IPv6 address in brackets.\n9. The host is one of allowed_hosts or a name under one (it ends with a dot and then that name). allowed_hosts are lower case.\n10. Nothing else about the path or the query is limited: a query is allowed (an empty one too), and capitals, dots, dashes, underscores, at signs and escapes in them are fine.\n11. CANONICAL: the string is already written exactly the way the WHATWG URL parser writes it. In JavaScript: new URL(entry).href === entry. An address that needed any cleaning up is refused, never repaired, so that no other program has to reproduce the parser to agree with this one.\n12. The entries that pass come back exactly as given, in the order given, each once: an entry equal character for character to an earlier one is dropped and the first is kept. Two entries that differ only in the capitals of their path are two places.\n\nCANONICAL FORM, in plain words. The string is ASCII only: printable characters from ! to ~, so no space, no control character, no tab or newline (not even at the ends) and nothing outside ASCII. The scheme and the host are in lower case (capitals in the path and the query are kept by the parser and are fine). The host is written the way the parser writes it: a letter outside ASCII, a full-width letter, an ideographic full stop, a soft hyphen or a zero-width space in a host is rewritten or dropped by the parser, so it is not canonical. There is no default port (no :443, no empty port). There is a path and it starts with a slash: https://huggingface.co is not canonical, https://huggingface.co/ is, and so is a slash followed by a query. There are no dot segments: no path segment that is . or .., and a dot written as the escape %2e (in either letter case) counts as a dot, so %2e, .%2E, %2e. and %2E%2e are dot segments too; a segment such as ... or b..c or .d is fine. Only forward slashes: a backslash is rewritten to a slash. Every character the parser would percent-encode is written as an escape with UPPER-case hex digits: a space is %20, a letter outside ASCII is its UTF-8 bytes (%C3%A9), and the same goes for control characters, DEL and, in the path, the characters double quote, less-than, greater-than, left brace, right brace and backtick, and, in the query, double quote, less-than, greater-than and the apostrophe. An escape that is ALREADY in the string is left alone by the parser whatever its hex digits (%2f, %2F and %c3%a9 are all canonical, and they are different strings), so is an escape of a plain letter (%41), and so is a % that starts no escape. A reader that has no URL parser decides rule 11 with a pattern, and must never accept a string that is not canonical. Where the parser's behaviour is exotic and no case in this file shows it (for example the other ASCII characters the parser keeps in a path, such as ^ or |), a reader that cannot be sure must refuse: refusing a place the function would take is harmless, taking one it refuses is not.\n\nHOW A READER USES THE DATA, with hosts = allowed_hosts: legit_entry is itself accepted; for each refuse_entry, accept([entry]), accept([legit_entry, entry]) and accept([entry, legit_entry]) are all []; for each accept_entry, accept([entry]) == [entry] (it is already canonical, so nothing is rewritten); for each lists case, accept(raw) == expect, where raw is any JSON value (null, a string, an object, a number, nested lists, a list).",
-  "allowed_hosts": ["huggingface.co"],
+  "allowed_hosts": ["huggingface.co", "artdaddy.app"],
   "max_sources": 3,
   "max_length": 300,
   "legit_entry": "https://huggingface.co/someone/some-model/resolve/main/ggml-small.bin",
@@ -337,6 +337,138 @@
     {
       "what": "a space at the very end only (the parser trims it)",
       "entry": "https://huggingface.co/a "
+    },
+    {
+      "what": "the second allowed name as the start of another domain",
+      "entry": "https://artdaddy.app.evil.example/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "the second allowed name glued to a longer name",
+      "entry": "https://evilartdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a hyphen that glues the second allowed name to another label",
+      "entry": "https://models-artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a hyphen that glues the second allowed name to another domain",
+      "entry": "https://artdaddy.app-evil.example/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a sibling top-level domain of the second allowed name",
+      "entry": "https://artdaddy.com/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a sibling top-level domain under the second allowed name's first label",
+      "entry": "https://models.artdaddy.dev/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "the second allowed name as user-info before another host",
+      "entry": "https://models.artdaddy.app@evil.example/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "user-info with a password before the second allowed name",
+      "entry": "https://user:pw@models.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a port other than 443 on the second allowed name",
+      "entry": "https://models.artdaddy.app:8443/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an explicit port 443 on the second allowed name (the parser drops a default port)",
+      "entry": "https://models.artdaddy.app:443/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a plain http address on the second allowed name",
+      "entry": "http://models.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a fragment on the second allowed name",
+      "entry": "https://models.artdaddy.app/whisper/a/ggml-small.bin#part"
+    },
+    {
+      "what": "a trailing-dot second allowed name",
+      "entry": "https://models.artdaddy.app./whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a trailing-dot bare second allowed name",
+      "entry": "https://artdaddy.app./whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an empty label inside the second allowed name",
+      "entry": "https://models..artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "capitals in the second allowed name (the parser writes lower case)",
+      "entry": "https://MODELS.ARTDADDY.APP/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "capitals in one label of the second allowed name (the parser writes lower case)",
+      "entry": "https://models.ArtDaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an IPv4 address in place of the second allowed name",
+      "entry": "https://192.0.2.7/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an IPv6 address in place of the second allowed name",
+      "entry": "https://[2001:db8::7]/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an internationalised label under the second allowed name (valid punycode)",
+      "entry": "https://xn--caf-dma.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a punycode look-alike of the second allowed name",
+      "entry": "https://xn--artdadd-12a.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an accented look-alike letter in the second allowed name (the parser writes punycode)",
+      "entry": "https://artdadd\u00fd.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a Cyrillic look-alike letter in the second allowed name (the parser writes punycode)",
+      "entry": "https://artd\u0430ddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a label that starts with a hyphen under the second allowed name",
+      "entry": "https://-a.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an underscore in a label under the second allowed name",
+      "entry": "https://a_b.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a name under localhost built from the second allowed name",
+      "entry": "https://models.artdaddy.app.localhost/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "the second allowed name in the path of another host",
+      "entry": "https://evil.example/models.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "the second allowed name in the query of another host",
+      "entry": "https://evil.example/?u=https://models.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "an encoded dot that builds another host from the second allowed name",
+      "entry": "https://models.artdaddy.app%2eevil.example/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a backslash that ends the host early before the second allowed name",
+      "entry": "https://evil.example\\@models.artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a tab inside the second allowed name (the parser drops it)",
+      "entry": "https://models.artdaddy\t.app/whisper/a/ggml-small.bin"
+    },
+    {
+      "what": "a dot segment in the path on the second allowed name (the parser resolves it away)",
+      "entry": "https://models.artdaddy.app/whisper/../a/ggml-small.bin"
+    },
+    {
+      "what": "no path at all on the second allowed name (the parser writes a slash)",
+      "entry": "https://models.artdaddy.app"
     }
   ],
   "accept_entry": [
@@ -355,6 +487,10 @@
     {
       "what": "the compiled-in address itself",
       "entry": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+    },
+    {
+      "what": "the compiled-in address of the small q8_0 model",
+      "entry": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q8_0.bin"
     },
     { "what": "an empty query", "entry": "https://huggingface.co/a?" },
     { "what": "the host and a slash only", "entry": "https://huggingface.co/" },
@@ -391,7 +527,37 @@
     {
       "what": "an at sign in the path, which is not user-info",
       "entry": "https://huggingface.co/@evil.example/a"
-    }
+    },
+    {
+      "what": "the compiled second place of the small model",
+      "entry": "https://models.artdaddy.app/whisper/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+    },
+    {
+      "what": "the compiled second place of the small q8_0 model",
+      "entry": "https://models.artdaddy.app/whisper/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q8_0.bin"
+    },
+    {
+      "what": "the second allowed name itself",
+      "entry": "https://artdaddy.app/whisper/a/ggml-small.bin"
+    },
+    { "what": "another name under the second allowed name", "entry": "https://cdn.artdaddy.app/a/b" },
+    {
+      "what": "a deeper name under the second allowed name",
+      "entry": "https://a.b.artdaddy.app/x"
+    },
+    {
+      "what": "a hyphenated label under the second allowed name",
+      "entry": "https://models-2.artdaddy.app/a"
+    },
+    {
+      "what": "a query on the second allowed name",
+      "entry": "https://models.artdaddy.app/whisper/a/ggml-small.bin?download=true"
+    },
+    {
+      "what": "capitals in the path on the second allowed name, which the parser keeps",
+      "entry": "https://models.artdaddy.app/Whisper/A/GGML-Small.bin"
+    },
+    { "what": "the second allowed host and a slash only", "entry": "https://models.artdaddy.app/" }
   ],
   "lists": [
     { "what": "null", "raw": null, "expect": [] },
@@ -620,6 +786,74 @@
       "what": "an address of 301 UTF-16 code units (300 code points), its host written with a mathematical bold h: refused (over the limit in UTF-16 code units, and not written the way the parser writes it)",
       "raw": [
         "https://\ud835\udc21uggingface.co/ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "expect": []
+    },
+    {
+      "what": "a place on each allowed host, kept in the order given",
+      "raw": [
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+        "https://models.artdaddy.app/whisper/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+      ],
+      "expect": [
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+        "https://models.artdaddy.app/whisper/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+      ]
+    },
+    {
+      "what": "three places on the second allowed host, kept in the order given and not sorted",
+      "raw": [
+        "https://models.artdaddy.app/whisper/c/ggml-small.bin",
+        "https://artdaddy.app/whisper/a/ggml-small-q8_0.bin",
+        "https://cdn.artdaddy.app/b/ggml-small.bin"
+      ],
+      "expect": [
+        "https://models.artdaddy.app/whisper/c/ggml-small.bin",
+        "https://artdaddy.app/whisper/a/ggml-small-q8_0.bin",
+        "https://cdn.artdaddy.app/b/ggml-small.bin"
+      ]
+    },
+    {
+      "what": "a repeat on the second allowed host, removed with the first kept",
+      "raw": [
+        "https://models.artdaddy.app/a",
+        "https://models.artdaddy.app/b",
+        "https://models.artdaddy.app/a"
+      ],
+      "expect": ["https://models.artdaddy.app/a", "https://models.artdaddy.app/b"]
+    },
+    {
+      "what": "a legitimate place on the second allowed host and then one with user-info before another host: the whole list is refused",
+      "raw": [
+        "https://models.artdaddy.app/whisper/a/ggml-small.bin",
+        "https://models.artdaddy.app@evil.example/whisper/a/ggml-small.bin"
+      ],
+      "expect": []
+    },
+    {
+      "what": "a place with the second allowed name glued to a longer name and then a legitimate place on it: the whole list is refused",
+      "raw": [
+        "https://evilartdaddy.app/whisper/a/ggml-small.bin",
+        "https://models.artdaddy.app/whisper/a/ggml-small.bin"
+      ],
+      "expect": []
+    },
+    {
+      "what": "a legitimate place on each allowed host and then a port on the second: the whole list is refused",
+      "raw": [
+        "https://huggingface.co/a",
+        "https://models.artdaddy.app/a",
+        "https://models.artdaddy.app:8443/a"
+      ],
+      "expect": []
+    },
+    {
+      "what": "four distinct places on the second allowed host: refused for the count",
+      "raw": [
+        "https://models.artdaddy.app/a",
+        "https://models.artdaddy.app/b",
+        "https://models.artdaddy.app/c",
+        "https://models.artdaddy.app/d"
       ],
       "expect": []
     }

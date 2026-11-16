@@ -2,8 +2,9 @@
 // it is pinned to and the decoding variant the accuracy gate measured for it (speechGate.json).
 // Nothing else states any of these.
 //
-// The model can be fetched from more than one place. The primary place is compiled in. A remote
-// answer may add a few more, and acceptModelSources decides which of them are acceptable: a place
+// The model can be fetched from more than one place. Two are compiled in: the primary one and a second one, run by
+// the owner (secondPlaces), which the app asks when the primary fails. A remote answer may add a few more,
+// and acceptModelSources decides which of them are acceptable: a place
 // only says WHERE to ask. Whether what arrives is the model is decided by `bytes` and `sha256`
 // here, never by where it came from. The list bounds the places that are NAMED: a place that answers with a redirect
 // to another host is followed by the browser's own fetch (the real download of the primary does this too, to its
@@ -67,8 +68,19 @@ export function primaryUrl(entry: Pinned): string {
   return `${PRIMARY_BASE}/${entry.revision}/${entry.file}`;
 }
 
-/** The only hosts a place to fetch the model from may be on: each one, and any name under it. */
-export const MODEL_HOSTS: readonly string[] = ["huggingface.co"];
+/** The second place, run by ArtDaddy on its own storage behind its own name: the ONE compiled base. Each file's
+ *  address is derived from it and from its entry (see {@link secondPlaces}), never written out a second time. */
+export const SECOND_PLACE_BASE = "https://models.artdaddy.app/whisper";
+
+/** The places compiled in after the primary one, in the order to ask them: `<base>/<revision>/<file>` for this entry.
+ *  Derived from the entry alone, so a new manifest entry has its second place without anything else being edited. */
+export function secondPlaces(entry: Pinned): readonly string[] {
+  return [`${SECOND_PLACE_BASE}/${entry.revision}/${entry.file}`];
+}
+
+/** The only hosts a place to fetch the model from may be on: each one, and any name under it. The second is
+ *  ArtDaddy's own domain, so that a later change of the exact name is an entry of the remote list and not a release. */
+export const MODEL_HOSTS: readonly string[] = ["huggingface.co", "artdaddy.app"];
 
 export const MAX_EXTRA_SOURCES = 3;
 export const MAX_SOURCE_URL_LENGTH = 300;
@@ -153,4 +165,31 @@ export function acceptModelSources(
  *  extra ones, each place once. */
 export function modelOrigins(entry: Pinned, extra: readonly string[]): readonly string[] {
   return [...new Set([primaryUrl(entry), ...extra])];
+}
+
+/** The last path segment of `place` (its query is not part of the path), or null when it is not an address. */
+function lastSegment(place: unknown): string | null {
+  if (typeof place !== "string") return null;
+  try {
+    return new URL(place).pathname.split("/").pop() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The places of a remote list that name this model's file: the last path segment of the address is exactly the
+ *  file's name. With more than one file in the manifest an address names ONE of them, so it is asked for that file and
+ *  never for another, and an address that names none of ours is never asked for a download at all. Only the list is
+ *  narrowed: which hosts are acceptable is acceptModelSources' decision, taken where the list arrives, and what any
+ *  place sends is still decided by the file's size and SHA-256. Keeps the order given; never throws. */
+export function remotePlacesFor(
+  entry: Pick<ModelEntry, "file">,
+  extra: readonly string[],
+): readonly string[] {
+  if (typeof entry.file !== "string" || entry.file === "") return [];
+  try {
+    return extra.filter((place) => lastSegment(place) === entry.file);
+  } catch {
+    return [];
+  }
 }

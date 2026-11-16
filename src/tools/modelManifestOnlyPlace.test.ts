@@ -1,13 +1,13 @@
-// The speech model is stated in ONE place, `modelManifest.ts`: its size, checksum, revision and the address it
-// is pinned to. Every other file reads the table. This walks the source and fails on a second statement of any of
-// them, which is how the two copies of the file name (a URL and a path, each derived from the model's key)
-// drifted apart before the manifest existed.
+// The speech model is stated in ONE place, `modelManifest.ts`: its size, checksum, revision and the addresses it
+// is pinned to and fetched from. Every other file reads the table. This walks the source and fails on a second
+// statement of any of them, which is how the two copies of the file name (a URL and a path, each derived from the
+// model's key) drifted apart before the manifest existed.
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { MODEL_MANIFEST, PRIMARY_BASE } from "./modelManifest";
+import { MODEL_MANIFEST, PRIMARY_BASE, SECOND_PLACE_BASE } from "./modelManifest";
 
 const SRC = path.resolve(__dirname, "..");
 const TESTS = /\.(test|e2e|smoke|property|eval)\.tsx?$/;
@@ -36,6 +36,10 @@ describe("the speech model is stated once", () => {
       [`${key} size`, e.bytes.toLocaleString("en-US").replace(/,/g, "_")],
     ]);
     needles.push(["the address", new URL(PRIMARY_BASE).host + new URL(PRIMARY_BASE).pathname]);
+    needles.push([
+      "the second place's address",
+      new URL(SECOND_PLACE_BASE).host + new URL(SECOND_PLACE_BASE).pathname,
+    ]);
     const found: string[] = [];
     for (const file of files) {
       const text = readFileSync(file, "utf8");
