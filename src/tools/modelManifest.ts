@@ -2,11 +2,11 @@
 // it is pinned to and the decoding variant the accuracy gate measured for it (speechGate.json).
 // Nothing else states any of these.
 //
-// The model can be fetched from more than one place. Two are compiled in: the primary one and a second one, run by
-// the owner (secondPlaces), which the app asks when the primary fails. A remote answer may add a few more,
-// and acceptModelSources decides which of them are acceptable: a place
-// only says WHERE to ask. Whether what arrives is the model is decided by `bytes` and `sha256`
-// here, never by where it came from. The list bounds the places that are NAMED: a place that answers with a redirect
+// The model can be fetched from more than one place. Two are compiled in: the primary one and a second one that
+// ArtDaddy runs (secondPlaces), which the app asks when the primary fails. A remote answer may add a few more, and
+// acceptModelSources decides which of them are acceptable: a place only says WHERE to ask. Whether what arrives is the
+// model is decided by `bytes` and `sha256` here, never by where it came from. The list bounds the places that are
+// NAMED: a place that answers with a redirect
 // to another host is followed by the browser's own fetch (the real download of the primary does this too, to its
 // content network), which a web view cannot be told not to do; what that host sends is still only accepted if it is
 // exactly these bytes.
