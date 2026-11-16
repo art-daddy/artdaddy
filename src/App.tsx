@@ -17,10 +17,11 @@ import { projectDocuments } from "./project/documentRegistry";
 import { asProjectId } from "./project/types";
 import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
+import { hasFreshAccessToken } from "./api/desktopAuth";
 import { installUpdate } from "./update/updater";
 import { flushAgentEventsForExit } from "./api/agentEvents";
 import { flushEditorEventsForExit } from "./api/editorEvents";
-import { refreshExportFlags } from "./api/exportFlags";
+import { keepExportFlagsFresh, refreshExportFlags } from "./api/exportFlags";
 import { useCompatibility } from "./update/compatibility";
 
 function ShellRoute() {
@@ -56,6 +57,10 @@ export default function App() {
     // leaves the last good answer.
     const exportFlags =
       platform.name === "tauri" ? setTimeout(() => void refreshExportFlags(), 4_000) : undefined;
+    // And again while the window stays open and visible, so a switch the server turned off reaches an
+    // app left open on an edit session within about ten minutes, not only at the next export.
+    const exportFlagsKept =
+      platform.name === "tauri" ? keepExportFlagsFresh(hasFreshAccessToken) : undefined;
     const prevent = (e: DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
     };
@@ -74,6 +79,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(prefetch);
       clearTimeout(exportFlags);
+      exportFlagsKept?.();
       stop?.();
       window.removeEventListener("dragover", prevent);
       window.removeEventListener("drop", prevent);

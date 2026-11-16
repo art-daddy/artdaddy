@@ -57,7 +57,7 @@ import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
 import { useSpeechJobs } from "./speechJobs";
-import { exportFlag } from "../api/exportFlags";
+import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import { useProxyJobs } from "./proxyJobs";
 import { focusRef, frameAt } from "./proxyOrder";
 
@@ -571,6 +571,9 @@ export class IndexCoordinator {
         // hold on the chip that lapsed, a pace this PC measured): only then does it get another look.
         this.replanDeferred();
         if (this.txQ.length === 0) break;
+        // The server's switches are asked for beside the work, never waited for: the answer can land while this
+        // waits for its turn, so a batch is chosen by switches that are at most about ten minutes old.
+        void refreshExportFlags();
         // One background whisper in the app at a time, and none starts while an export is queued
         // or running or a look's whisper runs. Closed while it waits: dropped with the queue.
         const waiting = this.showWaiting();

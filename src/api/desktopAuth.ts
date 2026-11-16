@@ -171,6 +171,13 @@ export async function ensureFreshAccessToken(): Promise<string | null> {
   return null;
 }
 
+/** True when the token held now can be handed to a request as it is: the very test `ensureFreshAccessToken` makes
+ *  before it renews. For a look that must not itself cause a renewal (a read of the keychain and a call to the
+ *  server). */
+export function hasFreshAccessToken(): boolean {
+  return Boolean(accessToken) && !expiringWithin(EXPIRY_SKEW_MS);
+}
+
 /** The server refused `used`: true when the token held now is a different one, renewing first
  *  unless a newer token already replaced it. The local clock's verdict does not count here. */
 export async function renewAfterRejection(used: string | null): Promise<boolean> {

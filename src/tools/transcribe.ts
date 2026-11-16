@@ -74,6 +74,7 @@ import { recordFact, type ModelFact } from "../lib/localFacts";
 import { settledWithin } from "../lib/settledWithin";
 import { stoppedAnswer } from "../lib/stopped";
 import { trackSpeechWait } from "../store/liveWait";
+import { refreshExportFlags } from "../api/exportFlags";
 import type { SpeechPurpose } from "../store/speechJobs";
 import {
   clearModelDownload,
@@ -2845,6 +2846,8 @@ export async function getTranscriptTool(
   ctx: ClientToolContext | null,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
+  // The server's switches are asked for beside the work, never waited for.
+  void refreshExportFlags();
   const timeline = await loadTimeline(ctx.store).catch(() => null);
   if (!timeline) return { ok: false, error: "no timeline to transcribe" };
   const fps = Number(timeline.canvas?.fps) || 30;

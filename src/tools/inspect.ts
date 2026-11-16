@@ -23,7 +23,7 @@ import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
 import type { SpanWindow } from "../store/speechWake";
 import { clock, tooLongNotReady } from "./transcriptWords";
 import { prioritizeTranscript } from "./transcriptQueue";
-import { exportFlag } from "../api/exportFlags";
+import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import { currentPaceModel, projectedS } from "./speechPace";
 import { CAP_S } from "./speechPlan";
 import { lookLoudness, type Loudness } from "./loudness";
@@ -317,6 +317,8 @@ async function lookTranscript(
   },
 ): Promise<Result> {
   try {
+    // The server's switches are asked for beside the work, never waited for.
+    void refreshExportFlags();
     const from = Math.max(0, opts.start ?? 0);
     const to = opts.end ?? opts.duration;
     // A window that covers the whole file IS the whole-file transcript: asking for it as a window

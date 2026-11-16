@@ -6,7 +6,7 @@
 // once did. It now waits as long as get_transcript does and, past that, says what is still pending
 // and leaves the work running, so the next call finds the words in the cache.
 import type { ClientToolContext } from "./context";
-import { exportFlag } from "../api/exportFlags";
+import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
 import { ensureTranscript, transcribeSpan, type ParsedTranscript } from "./transcribe";
 import type { TranscriptFailureReason } from "./speechFailure";
@@ -36,6 +36,8 @@ export async function captionWords(
   deadline: number,
   window: { start: number; end: number },
 ): Promise<CaptionWords> {
+  // The server's switches are asked for beside the work, never waited for.
+  void refreshExportFlags();
   const bySpan = exportFlag("speech_cpu_cap");
   const seconds = Math.max(0, window.end - window.start);
   // Where the file is, so that the card can find the speech job that transcribes it (it names files by path).

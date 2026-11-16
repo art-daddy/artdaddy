@@ -207,9 +207,17 @@ function acceptPcClass(raw: unknown): PcClassCutoffs | null {
 }
 
 const STORAGE_KEY = "artdaddy.exportFlags.v1";
-/** At most one question to the server in this long, unless asked to ask. */
+/** At most one question to the server in this long after it answered, unless asked to ask. */
 const REFRESH_MS = 10 * 60_000;
-const TIMEOUT_MS = 3_000;
+/** The server sleeps when nobody has used it for a few minutes. Waking it takes 21 to 26 seconds (the app's own text
+ *  says up to 30), and the renewal of the session that may have to come first measured 18 to 43 (api/desktopAuth.ts),
+ *  so a question waits a minute. It always runs beside other work, never in front of it. */
+const TIMEOUT_MS = 60_000;
+/** After a question that got no answer the next one waits this long, doubling for each miss in a row up to
+ *  REFRESH_MS: a miss costs a minute, not the whole wait. */
+const RETRY_MS = 60_000;
+/** How often an app that stays open looks at whether its answer has become old. */
+const WATCH_MS = 30_000;
 
 function stored(): Record<ExportFlagName, boolean> {
   const flags = { ...COMPILED_FLAG_DEFAULTS };
@@ -234,7 +242,12 @@ let currentPcClass: Readonly<PcClassCutoffs> = COMPILED_PC_CLASS;
 /** Memory only, like the pair above: the extra places the answer named for fetching the speech model, as
  *  `acceptModelSources` accepted them (the whole list or none). */
 let currentModelSources: readonly string[] = [];
-let askedAt = 0;
+/** When the last question ended (answered or not) and how long the next one that is not forced waits after that:
+ *  REFRESH_MS after an answer, RETRY_MS doubled per miss in a row after none. A look that found nobody signed in
+ *  changes neither, so signing in after the app opened still asks. */
+let endedAt = 0;
+let waitMs = REFRESH_MS;
+let misses = 0;
 let inflight: Promise<void> | null = null;
 
 /** Whether a behaviour is on right now. A name this client does not know is never on. */
@@ -265,36 +278,82 @@ interface RefreshOptions {
 }
 
 /** Ask the server which behaviours to run, and keep the answer (also across a restart: a switch that was
- *  turned off must stay off when the app opens offline). One request at a time, however many places ask; and
- *  only a look at a signed-in session uses up the wait, so signing in after the app opened still asks. */
+ *  turned off must stay off when the app opens offline). One request at a time, however many places ask. The wait
+ *  before the next question starts when this one ENDS: a full one after an answer, a short one after none (the
+ *  server asleep, down, or an answer that is not one). Only a look at a signed-in session uses up a wait, so
+ *  signing in after the app opened still asks. Never throws and never rejects. */
 export function refreshExportFlags(options: RefreshOptions = {}): Promise<void> {
   if (inflight) return inflight;
   const now = Date.now();
-  if (!options.force && askedAt !== 0 && now - askedAt >= 0 && now - askedAt < REFRESH_MS)
+  if (!options.force && endedAt !== 0 && now - endedAt >= 0 && now - endedAt < waitMs)
     return Promise.resolve();
-  const asking = ask(options).finally(() => {
-    if (inflight === asking) inflight = null;
-  });
+  const asking: Promise<void> = ask(options)
+    .then((outcome) => {
+      // A reset (tests only) drops `inflight`: what an ask begun before it learns is not kept.
+      if (outcome === "nobody" || inflight !== asking) return;
+      endedAt = Date.now();
+      misses = outcome === "answered" ? 0 : misses + 1;
+      waitMs = misses === 0 ? REFRESH_MS : Math.min(REFRESH_MS, RETRY_MS * 2 ** (misses - 1));
+    })
+    .finally(() => {
+      if (inflight === asking) inflight = null;
+    });
   inflight = asking;
   return asking;
 }
 
-async function ask(options: RefreshOptions): Promise<void> {
+/** While the app stays open and visible, ask again once the answer is old (or the last question got none and its
+ *  short wait is over), so a switch the server turned off reaches an app left open on an edit session within about
+ *  ten minutes, not at the next export. It only looks every WATCH_MS, asks nothing while the window is hidden, and
+ *  the rules above are the only ones there are: one question at a time, never sooner than its wait.
+ *  `sessionAtHand` says whether a live session token is held already. When none is, no look is made: looking at a
+ *  session would have to renew it (a read of the keychain and a call to the server) for nobody's work, so an app that
+ *  nobody is using goes quiet when its token runs out, and an app that is being used keeps its token alive itself.
+ *  Returns how to stop. */
+export function keepExportFlagsFresh(sessionAtHand: () => boolean = () => true): () => void {
+  const timer = setInterval(() => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    if (!sessionAtHand()) return;
+    void refreshExportFlags();
+  }, WATCH_MS);
+  return () => clearInterval(timer);
+}
+
+/** "answered": a valid answer was taken. "missed": none came in time, or it was not a valid one: nothing changed.
+ *  "nobody": nobody is signed in, so nothing was asked. */
+type Outcome = "answered" | "missed" | "nobody";
+
+async function ask(options: RefreshOptions): Promise<Outcome> {
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), options.timeoutMs ?? TIMEOUT_MS);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The deadline is kept here and not left to the request: whatever comes after it is never taken (hear checks), and
+  // a question that is stuck before its request (the sign-in look) still ends.
+  const late = new Promise<Outcome>((resolve) => {
+    timer = setTimeout(() => {
+      timeout.abort();
+      resolve("missed");
+    }, options.timeoutMs ?? TIMEOUT_MS);
+  });
   try {
-    if (!(await (options.signedIn ?? hasSession)())) return;
-    askedAt = Date.now();
+    return await Promise.race([hear(options, timeout.signal), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function hear(options: RefreshOptions, signal: AbortSignal): Promise<Outcome> {
+  try {
+    if (!(await (options.signedIn ?? hasSession)())) return "nobody";
+    if (signal.aborted) return "missed";
     const fetcher: Fetcher = options.fetcher ?? ((url, init) => authedFetch(url, init));
-    const response = await fetcher(`${apiBase()}/client/export-flags`, {
-      method: "GET",
-      signal: timeout.signal,
-    });
-    if (!response.ok) return;
+    const response = await fetcher(`${apiBase()}/client/export-flags`, { method: "GET", signal });
+    if (!response.ok) return "missed";
     const body: unknown = await response.json();
-    if (!body || typeof body !== "object" || (body as { v?: unknown }).v !== 1) return;
+    // Past the deadline a newer question may be asking, or have answered: this answer is old news.
+    if (signal.aborted) return "missed";
+    if (!body || typeof body !== "object" || (body as { v?: unknown }).v !== 1) return "missed";
     const told = (body as { flags?: unknown }).flags;
-    if (!told || typeof told !== "object") return;
+    if (!told || typeof told !== "object") return "missed";
     const next = { ...current };
     for (const name of EXPORT_FLAG_NAMES) {
       const value = (told as Record<string, unknown>)[name];
@@ -313,10 +372,10 @@ async function ask(options: RefreshOptions): Promise<void> {
     } catch {
       /* not being able to remember is not a failure */
     }
+    return "answered";
   } catch {
     /* unreachable, slow, damaged: the last good answer (or the defaults) stands */
-  } finally {
-    clearTimeout(timer);
+    return "missed";
   }
 }
 
@@ -327,7 +386,9 @@ export function __setExportFlag(name: ExportFlagName, value: boolean): void {
 
 /** Tests only. */
 export function __resetExportFlags(options: { keepStorage?: boolean } = {}): void {
-  askedAt = 0;
+  endedAt = 0;
+  waitMs = REFRESH_MS;
+  misses = 0;
   inflight = null;
   currentPcClass = COMPILED_PC_CLASS;
   currentModelSources = [];
