@@ -9,6 +9,7 @@
 // to another host is followed by the browser's own fetch (the real download of the primary does this too, to its
 // content network), which a web view cannot be told not to do; what that host sends is still only accepted if it is
 // exactly these bytes.
+import type { SpeechBackend } from "./speechPace";
 import type { ModelVariant } from "./speechDecoding";
 
 export interface ModelEntry {
@@ -21,6 +22,18 @@ export interface ModelEntry {
   revision: string;
   /** The model variant speechGate.json holds measurements for. */
   variant: ModelVariant;
+  /** The engine paths this file may be launched on: "gpu" is the graphics chip, "cpu" is the launch with `-ng`. Absent
+   *  means both, which is what every file was before one was measured on the processor alone; a file is restricted only
+   *  when speechGate.json holds measurements for its variant on the paths it names and on no other. Read it through
+   *  {@link backendsOf}. */
+  backends?: readonly SpeechBackend[];
+}
+
+const EVERY_PATH: readonly SpeechBackend[] = ["gpu", "cpu"];
+
+/** The engine paths `entry` may be launched on. */
+export function backendsOf(entry: Pick<ModelEntry, "backends">): readonly SpeechBackend[] {
+  return entry.backends ?? EVERY_PATH;
 }
 
 export const MODEL_MANIFEST: Readonly<Record<string, ModelEntry>> = {
@@ -30,6 +43,16 @@ export const MODEL_MANIFEST: Readonly<Record<string, ModelEntry>> = {
     sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
     revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
     variant: "f16",
+  },
+  // `small` squeezed to 8-bit weights: 252 MiB against 465. Measured on the processor only (speech study L5): a launch on
+  // the graphics chip is never made with it, and speechModel.ts says which languages may use it there.
+  small_q8_0: {
+    file: "ggml-small-q8_0.bin",
+    bytes: 264_464_607,
+    sha256: "49c8fb02b65e6049d5fa6c04f81f53b867b5ec9540406812c643f177317f779f",
+    revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+    variant: "q8_0",
+    backends: ["cpu"],
   },
 };
 
