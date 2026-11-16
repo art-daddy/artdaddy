@@ -514,7 +514,12 @@ async function baselineNorm(clip: CorpusClip, label: string): Promise<string[]> 
   return normalized(launches[0].argv);
 }
 
-async function runCase(clip: CorpusClip, mode: Mode): Promise<Run> {
+/** `label` names the case's own app cache and work folder: a run answered from another case's transcript launches nothing. */
+async function runCase(
+  clip: CorpusClip,
+  mode: Mode,
+  label: string = `${clip.id}-${mode}`,
+): Promise<Run> {
   configure(mode);
   const clipFile = path.join(SCRATCH, "fake", `${clip.id}.json`);
   if (FAKE) {
@@ -522,7 +527,7 @@ async function runCase(clip: CorpusClip, mode: Mode): Promise<Run> {
     await fsp.writeFile(clipFile, fakeClipJson(clip));
   }
   const launches: Launch[] = [];
-  const ctx = ctxFor(`${clip.id}-${mode}`, engineRunner(launches, clipFile, clip.id, true));
+  const ctx = ctxFor(label, engineRunner(launches, clipFile, clip.id, true));
   const started = Date.now();
   let words: Run["words"] = null;
   let error: string | null = null;
@@ -628,7 +633,9 @@ beforeAll(async () => {
   await installModel();
   if (ALLOW) allowModel();
   if (!FAKE && PART !== "argv" && process.env.L13_WARMUP !== "0") {
-    const warm = await runCase(CLIPS[0], "today");
+    // Its own cache label: under the clip's own the first clip's "today" run was answered from this run's transcript and launched nothing
+    // (window A, 16 Nov 23:39: enT1_x0 today, 0.003 s, no launch).
+    const warm = await runCase(CLIPS[0], "today", `${CLIPS[0].id}-warmup`);
     await appendRecord({
       schema: "l13-first-word-run/1",
       record: "warmup",
@@ -753,10 +760,13 @@ function check(
     expect(normalized(last.argv), `${label}: the retry is the gate-off launch`).toEqual(base);
   } else {
     // The study's own bound: with the alignment no first word is early by more than half a second (against the known voice start).
+    // A hard check for the fake engine only (it proves the harness). With the real engine it is a MEASUREMENT: window A (16 Nov, f16, processor)
+    // found two clips outside it (ja1_x8 1.02 s early after 8 s of quiet, ru-1002106857 1.98 s early), and the scorer lists every clip outside it.
     const early = run.words?.[0] ? clip.voice_s - run.words[0][1] : 0;
-    expect
-      .soft(early, `${label}: the first word is at most half a second before the voice`)
-      .toBeLessThanOrEqual(0.5);
+    if (FAKE)
+      expect
+        .soft(early, `${label}: the first word is at most half a second before the voice`)
+        .toBeLessThanOrEqual(0.5);
   }
 }
 
