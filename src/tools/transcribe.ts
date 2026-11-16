@@ -1384,15 +1384,18 @@ async function installedModels(ctx: ClientToolContext): Promise<string[]> {
   return here;
 }
 
-/** The plan for a language that is known (named, predicted or just detected), on the path a run started now takes. */
+/** The plan for a language that is known (named, predicted or just detected), on the path a run started now takes.
+ *  `predicted`: the language is only a guess from the last run, which never makes the PC fetch a file (speechModel.ts). */
 async function planForLanguage(
   ctx: ClientToolContext,
   language: string | null,
+  predicted = false,
 ): Promise<ModelPlan> {
   return planModel({
     backend: backendNow(readPace()),
     language,
     installed: await installedModels(ctx),
+    ...(predicted ? { predicted } : {}),
   });
 }
 
@@ -1402,8 +1405,8 @@ function replanFor(ctx: ClientToolContext, detected: string): Promise<ModelPlan>
 }
 
 /** What to run with, BEFORE the run. A named language is known; "auto" is predicted from the last language this
- *  machine detected and CHECKED once the engine has said (finishWhisper). A model size the gate did not measure is
- *  never narrowed, and a re-run is given what it was sent for. */
+ *  machine detected and CHECKED once the engine has said (finishWhisper), and a prediction never makes the PC fetch a
+ *  file. A model size the gate did not measure is never narrowed, and a re-run is given what it was sent for. */
 async function planFor(
   ctx: ClientToolContext,
   size: string,
@@ -1419,15 +1422,16 @@ async function planFor(
       variant: MODEL_MANIFEST[size]?.variant ?? MODEL_VARIANT,
       beam: DEFAULT_BEAM,
     };
-  return planForLanguage(ctx, whisperCode(lang) || lastSpeechLanguage());
+  const named = whisperCode(lang);
+  return planForLanguage(ctx, named || lastSpeechLanguage(), named === "");
 }
 
 /** The file the launch prefetch fetches: the one the plan for this PC names while no language is asked for (the
- *  last language this PC detected, if any). A PC that already holds a file the plan accepts fetches nothing. */
+ *  last language this PC detected, if any, as a guess). A PC that already holds a file the plan accepts fetches nothing. */
 export async function ensureLaunchModel(
   ctx: ClientToolContext,
 ): Promise<{ path: string; downloaded: boolean }> {
-  const plan = await planForLanguage(ctx, lastSpeechLanguage());
+  const plan = await planForLanguage(ctx, lastSpeechLanguage(), true);
   return ensureWhisperModel(ctx, plan.key);
 }
 

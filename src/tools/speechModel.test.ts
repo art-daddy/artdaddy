@@ -1,8 +1,10 @@
 // speechModel.ts: which model file a run uses, and the rule that the smaller file only ever runs on the processor.
 //
 // The invariant under test: the 8-bit file is launched on the processor path and never on the graphics chip; a
-// language the gate did not clear on the processor uses today's file on every path; a PC with a graphics chip is
-// planned exactly as before. The oracles here are NOT the module: they are the study's own table (the document's
+// language the gate did not clear on the processor uses today's file on every path (a language that is only a
+// prediction may start on the smaller file when that is the one that is here: nothing is kept from it, and a guess
+// never makes a PC download); a PC with a graphics chip is planned exactly as before. The oracles here are NOT the
+// module: they are the study's own table (the document's
 // section 10.1, __fixtures__/speechGateCpuS1.json), the raw cells of the gate re-read with the owner's rule, the
 // frozen answers of the old code (speechDecodingFreeze.json), and the manifest's own `backends`.
 import fc from "fast-check";
@@ -393,6 +395,105 @@ describe("planModel on a PC with no usable graphics chip", () => {
       if (how === "NEITHER passes") expect([got.key, got.beam], code).toEqual([BASELINE, 5]);
       else expect([got.key, got.beam], code).toEqual([SMALLER, how === "greedy" ? 1 : 5]);
     }
+  });
+});
+
+// A language that is only a GUESS (the last one this PC heard) never makes a PC fetch a file: the plan for it names a
+// file that is here whenever one is, and the commit point still refuses what a wrong guess made. A language that was
+// named or heard keeps the rule above (the baseline file, downloaded when it is not here).
+const guess = (
+  backend: SpeechBackend,
+  language: string | null,
+  installed: readonly string[],
+  offer?: boolean,
+): { key: string; variant: ModelVariant; beam: number } =>
+  planModel({ backend, language, installed, predicted: true }, offer);
+
+describe("planModel for a language that is only predicted", () => {
+  it("starts a processor PC that holds only the smaller file on that file, for EVERY language the engine knows", () => {
+    for (const code of CODES) {
+      const got = guess("cpu", code, [SMALLER]);
+      expect(got.key, code).toBe(SMALLER);
+      // A cleared language at the beam the study cleared it at, any other at the beam that suits every language.
+      expect(got.beam, code).toBe(needOf(code) ?? DEFAULT_BEAM);
+      // The same language NAMED, and not cleared, still needs the baseline file: a download, by design.
+      expect(plan("cpu", code, [SMALLER]).key, `${code} named`).toBe(
+        needOf(code) === null ? BASELINE : SMALLER,
+      );
+    }
+  });
+
+  it("is the plan it always was on every other set of files, on the graphics chip, and with the switch on", () => {
+    for (const language of [...CODES, null, "", "zz", "auto"])
+      for (const offer of [false, true]) {
+        for (const installed of [[], [BASELINE], [BASELINE, SMALLER]])
+          expect(guess("cpu", language, installed, offer), `${language} ${installed}`).toEqual(
+            plan("cpu", language, installed, offer),
+          );
+        for (const installed of [[], [BASELINE], [SMALLER], [BASELINE, SMALLER]])
+          expect(guess("gpu", language, installed, offer), `${language} ${installed}`).toEqual(
+            plan("gpu", language, installed, offer),
+          );
+      }
+    // With only the smaller file here the switch has nothing to offer: the smaller file is here already.
+    for (const language of CODES)
+      expect(guess("cpu", language, [SMALLER], true)).toEqual(
+        guess("cpu", language, [SMALLER], false),
+      );
+  });
+
+  it("names a file that is installed whenever one is, on the processor with the owner's switch off: a guess never needs a download", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constantFrom(...SPELLINGS), fc.string(), fc.constant(null)),
+        fc.subarray([BASELINE, SMALLER], { minLength: 1 }),
+        (language, installed) => {
+          expect(installed).toContain(guess("cpu", language, installed, false).key);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
+  it("starts what the commit point will refuse for a language the study did not clear on the smaller file, and keeps what it clears", () => {
+    for (const code of CODES) {
+      const got = guess("cpu", code, [SMALLER]);
+      expect(acceptableRun(got, code), code).toBe(needOf(code) !== null);
+      // English was cleared at the narrowest beam, so a run at any beam is kept when that is what the clip says.
+      expect(acceptableRun(got, "en"), `${code} turning out English`).toBe(true);
+    }
+  });
+
+  it("is re-planned once, for the language the engine heard, when the guess was wrong, and that plan is kept (the loop ends)", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...SPELLINGS),
+        fc.constantFrom(...SPELLINGS),
+        fc.subarray([BASELINE, SMALLER]),
+        (guessed, heard, installed) => {
+          if (!resolvable(heard)) return;
+          const first = guess("cpu", guessed, installed, false);
+          if (acceptableRun(first, heard)) return;
+          // The first run made its file, so it is installed now; the language is known, so it is no longer a guess.
+          const second = plan("cpu", heard, [...installed, first.key], false);
+          expect(acceptableRun(second, heard)).toBe(true);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("is a guess only when it is exactly true", () => {
+    for (const predicted of [false, undefined, null, 0, 1, "true", "yes", {}, []])
+      expect(
+        planModel({
+          backend: "cpu",
+          language: "ar",
+          installed: [SMALLER],
+          predicted: predicted as never,
+        }),
+        String(predicted),
+      ).toEqual(plan("cpu", "ar", [SMALLER]));
   });
 });
 

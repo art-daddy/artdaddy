@@ -65,6 +65,7 @@ import {
   WHISPER_MODELS,
   whisperModelPath,
 } from "./transcribe";
+import { WHISPER_LANGUAGES } from "./whisperLanguages";
 import { __resetWorkGate } from "./workGate";
 
 const DIR = "C:/data/projects/p1";
@@ -360,6 +361,81 @@ describe("which file counts as installed", () => {
     const r = rig({ installed: [], short: [FULL] });
     await runWhisper(r.ctx, fresh(), "small", "en").catch(() => undefined);
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[SMALL]));
+  });
+});
+
+describe("a language that was only predicted, on a PC that holds only the smaller file", () => {
+  it("does not fetch the full-size file for an `auto` request because the last clip was Arabic: the next clip is transcribed with the file that is here", async () => {
+    noChip();
+    lastHeard("en");
+    const arabic = fresh();
+    const english = fresh();
+    const r = rig({
+      installed: [SMALL],
+      say: (_launch, _args, clip) =>
+        clip === arabic
+          ? { language: "ar", text: "arabic words" }
+          : { language: "en", text: "english words" },
+    });
+    // The Arabic clip is refused at the commit point and the full-size file cannot be fetched (offline): the request
+    // fails saying why, nothing wrong is kept, and the guess is Arabic from now on.
+    const failure = await runWhisper(r.ctx, arabic, "small", "auto").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+    expect(localStorage.getItem(SPEECH_LANGUAGE_KEY)).toBe("ar");
+    expect(r.kept.size).toBe(0);
+
+    // The next request is an English clip. It needs no download, though the guess is still Arabic.
+    fetchedUrls.length = 0;
+    const kept = await runWhisper(r.ctx, english, "small", "auto");
+    expect(fetchedUrls).toEqual([]);
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL), pathOf(SMALL)]);
+    expect(onProcessor(r.launches[1])).toBe(true);
+    expect(kept.words.map((w) => w.word).join(" ")).toBe("english words");
+    // The guess has corrected itself, because this run reached the engine.
+    expect(localStorage.getItem(SPEECH_LANGUAGE_KEY)).toBe("en");
+    expect(await r.words(english, "auto")).toBe("english words");
+  });
+
+  it("holds for every language the engine knows as the guess: the request starts on the file that is here and fetches nothing", async () => {
+    noChip();
+    for (const code of Object.keys(WHISPER_LANGUAGES)) {
+      lastHeard(code);
+      fetchedUrls.length = 0;
+      const r = rig({ installed: [SMALL] });
+      await runWhisper(r.ctx, fresh(), "small", "auto");
+      expect(fetchedUrls, code).toEqual([]);
+      expect(r.launches.map(modelOf), code).toEqual([pathOf(SMALL)]);
+      expect(onProcessor(r.launches[0]), code).toBe(true);
+    }
+  });
+
+  it("does the same in a run over several files", async () => {
+    noChip();
+    lastHeard("ar");
+    const files = [fresh(), fresh()];
+    const r = rig({ installed: [SMALL], background: true });
+    const out = await ensureTranscripts(r.ctx, files, "small", "auto");
+    expect(out.every((o) => o.ok)).toBe(true);
+    expect(fetchedUrls).toEqual([]);
+    expect(r.launches.map(modelOf)).toEqual([pathOf(SMALL)]);
+    expect(r.launches.map((a) => flagValues(a, "-f").length)).toEqual([2]);
+    expect(onProcessor(r.launches[0])).toBe(true);
+  });
+
+  it("still never keeps Arabic made with the smaller file when Arabic is both what was guessed and what is heard", async () => {
+    noChip();
+    lastHeard("ar");
+    const r = rig({ installed: [SMALL], say: () => ({ language: "ar" }) });
+    const src = fresh();
+    const failure = await runWhisper(r.ctx, src, "small", "auto").catch((e: unknown) => e);
+    expect((failure as TranscriptionFailure).reason).toBe("model_unavailable");
+    // One run on the smaller file, refused at the commit point; then the full-size file was asked for and not there.
+    expect(r.launches).toHaveLength(1);
+    expect(onProcessor(r.launches[0])).toBe(true);
+    expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+    expect(r.kept.size).toBe(0);
+    expect(await r.words(src, "auto")).toBe("");
   });
 });
 

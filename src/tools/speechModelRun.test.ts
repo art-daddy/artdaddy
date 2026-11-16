@@ -482,12 +482,20 @@ describe("the file the app fetches when it starts", () => {
     expect(fetchedUrls).toEqual([]);
   });
 
-  it("is the full-size one for a PC whose last language was Arabic, even on the processor", async () => {
+  it("is the full-size one for a PC whose last language was Arabic, even on the processor, when it holds no file", async () => {
     noChip();
     localStorage.setItem("artdaddy.speech_language", "ar");
     const r = rig({ installed: [] });
     await ensureLaunchModel(r.ctx).catch(() => undefined);
     expect(fetchedUrls[0]).toBe(primaryUrl(MODEL_MANIFEST[FULL]));
+  });
+
+  it("is nothing at all on a PC that holds only the smaller file, even when the last language it heard was Arabic: a guess fetches nothing", async () => {
+    noChip();
+    localStorage.setItem("artdaddy.speech_language", "ar");
+    const r = rig({ installed: [SMALL] });
+    expect(await ensureLaunchModel(r.ctx)).toEqual({ path: pathOf(SMALL), downloaded: false });
+    expect(fetchedUrls).toEqual([]);
   });
 });
 

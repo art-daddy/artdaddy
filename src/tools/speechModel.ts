@@ -2,7 +2,10 @@
 //
 // The invariant: the file the manifest restricts to the processor (the 8-bit one) is launched only on the processor
 // path, the launch with `-ng`, never on the graphics chip; and a language the gate did not clear on the processor
-// uses the baseline file on every path. A PC with a graphics chip is planned exactly as it was before this existed.
+// uses the baseline file on every path and is never kept from the smaller one. (The one exception is to the PLAN, never
+// to what is kept: a language that is only PREDICTED may start on the smaller file when it is here and the baseline
+// file is not, so that a guess never makes a PC download anything; the commit point sends a wrong guess back.) A PC
+// with a graphics chip is planned exactly as it was before this existed.
 //
 // Two authorities, and nothing copied from them: the manifest (`backends` of an entry says which paths a FILE may
 // be launched on) and the accuracy gate (speechGate.json says which LANGUAGE a variant is cleared for, on which path,
@@ -45,6 +48,10 @@ export interface PlanInput {
   language: string | null;
   /** The manifest keys whose file is whole on disk. Keys the manifest does not have are ignored. */
   installed: readonly string[];
+  /** True when `language` is only a GUESS (the last language this PC heard), not one the request named and not one
+   *  the engine has just heard. A guess never makes the app fetch a file for a language the smaller file is not
+   *  cleared for while the smaller file is here: see {@link planModel}. Anything but `true` is not a guess. */
+  predicted?: boolean;
 }
 
 /** A launch the manifest does not allow: a file it does not name, or a file on a path it was not cleared for. The
@@ -122,7 +129,15 @@ export function modelRules(
         : planOf(smallerKey, smallerEntry, DEFAULT_BEAM);
     }
     const beam = beamOnProcessor(code);
-    if (beam === null) return today();
+    if (beam === null) {
+      // Not cleared on the processor, so the baseline file. But a language that is only a GUESS must not make the PC
+      // download it while the smaller file is here: that run starts as it does when nothing is known (the smaller
+      // file, the beam that suits every language) and the commit point sends a language it was not cleared for back to
+      // the baseline. A language that was named or heard still needs the baseline file, whatever is installed.
+      return input.predicted === true && have.has(smallerKey) && !have.has(baselineKey)
+        ? planOf(smallerKey, smallerEntry, DEFAULT_BEAM)
+        : today();
+    }
     // Cleared: the smaller file when it is here; else the baseline when that is here and the owner's switch leaves
     // an installed PC alone (no surprise download); else the smaller file, the halved download.
     return have.has(smallerKey) || !have.has(baselineKey) || offerSmallerToInstalled
@@ -224,9 +239,10 @@ const SHIPPED = modelRules(MODEL_MANIFEST, DEFAULT_MODEL_KEY, SHIPPED_EVIDENCE);
 
 /** The file and beam to start a run with. On the graphics chip: today's plan, the baseline file at the beam the
  *  chip's gate gives the language. On the processor: the smaller file for a language the gate cleared on the
- *  processor, at the beam it cleared; the baseline file for every other language. Nothing known: the baseline file
- *  when it is installed, else the smaller one, at the default beam, and the commit point checks the result.
- *  `offerSmallerToInstalled` is {@link OFFER_SMALLER_TO_INSTALLED}'s switch. */
+ *  processor, at the beam it cleared; the baseline file for every other language, except that a language which is only
+ *  PREDICTED (`input.predicted`) starts on the smaller file when that is the file that is here, at the default beam.
+ *  Nothing known: the baseline file when it is installed, else the smaller one, at the default beam, and the commit
+ *  point checks the result. `offerSmallerToInstalled` is {@link OFFER_SMALLER_TO_INSTALLED}'s switch. */
 export function planModel(
   input: PlanInput,
   offerSmallerToInstalled: boolean = OFFER_SMALLER_TO_INSTALLED,
