@@ -78,8 +78,13 @@ export interface SpeechRigOptions {
    *  Absent: the extracts are empty files, whose length cannot be told. */
   audioSeconds?: number;
   /** The audio each extract holds, as its WAV bytes, for tests of what a launch does with the audio it hears: `null` is a
-   *  file that cannot be read. Absent: the store has no ranged read at all, as a build without one. */
-  audio?: (source: string, wav: string) => Uint8Array | null;
+   *  file that cannot be read. `span` is the stretch of the source a window's extract was cut from, null for the whole
+   *  file. Absent: the store has no ranged read at all, as a build without one. */
+  audio?: (
+    source: string,
+    wav: string,
+    span: { start: number; end: number | null } | null,
+  ) => Uint8Array | null;
 }
 
 let seq = 0;
@@ -91,6 +96,7 @@ export function speechRig(options: SpeechRigOptions = {}) {
   const texts = new Map<string, string>();
   const kept = new Map<string, unknown>();
   const wavSource = new Map<string, string>();
+  const wavSpan = new Map<string, { start: number; end: number | null } | null>();
   const sizes = new Map<string, number>();
   /** Every program the page's own runner was asked to run, in order. */
   const programs: string[] = [];
@@ -116,6 +122,7 @@ export function speechRig(options: SpeechRigOptions = {}) {
       files.add(to);
       const src = wavSource.get(from);
       if (src) wavSource.set(to, src);
+      if (wavSpan.has(from)) wavSpan.set(to, wavSpan.get(from) ?? null);
       const size = sizes.get(from);
       if (size !== undefined) sizes.set(to, size);
     },
@@ -125,7 +132,8 @@ export function speechRig(options: SpeechRigOptions = {}) {
       ? {
           readHead: async (p: string, maxBytes: number): Promise<Uint8Array | null> => {
             const source = wavSource.get(p);
-            const bytes = source === undefined ? null : options.audio!(source, p);
+            const bytes =
+              source === undefined ? null : options.audio!(source, p, wavSpan.get(p) ?? null);
             return bytes === null ? null : bytes.subarray(0, maxBytes);
           },
         }
@@ -162,6 +170,14 @@ export function speechRig(options: SpeechRigOptions = {}) {
         const out = args[args.length - 1];
         files.add(out);
         wavSource.set(out, args[args.indexOf("-i") + 1]);
+        const seek = (flag: string): number | null =>
+          args.includes(flag) ? Number(args[args.indexOf(flag) + 1]) : null;
+        wavSpan.set(
+          out,
+          args.includes("-ss") || args.includes("-to")
+            ? { start: seek("-ss") ?? 0, end: seek("-to") }
+            : null,
+        );
         if (options.audioSeconds !== undefined) sizes.set(out, 44 + 32_000 * options.audioSeconds);
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -193,4 +209,29 @@ export function speechRig(options: SpeechRigOptions = {}) {
     /** What is left in the app's work folder: audio and scratch output nobody cleaned up. */
     leftovers: (): string[] => [...files].filter((p) => p.startsWith(`${WORK}/`)),
   };
+}
+
+/** Make model files of the manifest whole on the rig's disk, with the sizes and checksums the manifest says, so the app
+ *  takes each for installed (the smaller file is planned only for a PC that holds it or holds nothing). */
+export function installModels(
+  rig: { store: object; files: Set<string> },
+  keys: readonly string[],
+): void {
+  const specs = new Map(
+    Object.entries(WHISPER_MODELS).map(([key, spec]) => [whisperModelPath(DIR, key), spec]),
+  );
+  const before = (rig.store as { byteSize: (p: string) => Promise<number | null> }).byteSize;
+  Object.assign(rig.store, {
+    byteSize: async (p: string) => specs.get(p)?.bytes ?? before(p),
+    probeMedia: async (p: string) => {
+      const spec = specs.get(p) ?? WHISPER_MODELS.small;
+      return {
+        id12: spec.sha256.slice(0, 12),
+        sha256: spec.sha256,
+        size: spec.bytes,
+        head: new Uint8Array(),
+      };
+    },
+  });
+  for (const key of keys) rig.files.add(whisperModelPath(DIR, key));
 }
