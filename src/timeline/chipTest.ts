@@ -25,7 +25,6 @@ import {
   type ChipMaker,
   type SizeClass,
 } from "./exportEncoder";
-import { flags3cNow } from "./flags3c";
 
 /** Bumped whenever the test means something different, so that a pass remembered by an older test is not believed.
  *  1: the first test (30 frames a second at both classes; a file compared at its own length).
@@ -528,6 +527,8 @@ async function verdictFor(
     ssimMilli,
     ms,
   });
+  // Off is the person's: no verdict, remembered or tested, is given for a chip they turned off, whenever in a lookup they turned it off.
+  if (readChipPref(deps.storage) === "off") return null;
   const memory = load(deps);
   const known = memory.results[key];
   if (known) {
@@ -541,8 +542,12 @@ async function verdictFor(
   const pending = inflight.get(key);
   if (pending) return untilAborted(pending, options.signal, null);
   const task = (async (): Promise<ChipVerdict | null> => {
-    const run = await inTurn(() => runTest(adapter, sizeClass, deps));
-    if (!run) return null;
+    // The person's Off is read where a test would start (a turn in the PC check's slot may have been waited for) and again where its answer would be kept:
+    // a chip turned off is not tested, offered or used, so a test that finishes after the click is dropped, with no stored result and no event for the next report.
+    const run = await inTurn(async () =>
+      readChipPref(deps.storage) === "off" ? null : runTest(adapter, sizeClass, deps),
+    );
+    if (!run || readChipPref(deps.storage) === "off") return null;
     event(run.result, run.ms, run.ssimMilli);
     unreported.push({
       maker: adapter.maker,
@@ -578,9 +583,8 @@ const FLAG_OF: Record<ChipMaker, ExportFlagName> = {
 
 /** A chip that may be used for an export at `sizeClass`: the first, in order of preference, that is switched on, not under
  *  suspicion and proven (remembered, or tested now when `allowRun`). Never throws; "no chip" is the processor's encode.
- *  The person's own switch is read first and here only: Off is never tested, offered or used, whatever the server says, while
- *  Quick export is on. With `quick_export` off the row that could undo Off is not drawn and the app is 0.27.0's, which has no such
- *  switch: the choice is not read, a chip that passes is used, and what was chosen is left as it is for when the switch is back on. */
+ *  The person's own switch is read first and here only: Off is never tested, offered or used, whatever the server says
+ *  (Quick export included: a choice the person made is theirs, and the Export dialog draws the row that undoes it whenever it is Off). */
 export async function findChip(
   sizeClass: SizeClass,
   options: { allowRun: boolean; signal?: AbortSignal },
@@ -590,8 +594,7 @@ export async function findChip(
   try {
     if (options.signal?.aborted) return { chip: null, events: [] };
     const deps = given ?? realDeps();
-    if (flags3cNow().quick_export && readChipPref(deps.storage) === "off")
-      return { chip: null, events: [] };
+    if (readChipPref(deps.storage) === "off") return { chip: null, events: [] };
     const adapters = await deps.adapters();
     const memory = load(deps);
     const candidates = [...adapters]

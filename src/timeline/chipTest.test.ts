@@ -907,113 +907,149 @@ describe("the chip test takes its turn", () => {
   });
 });
 
-// The person's own Off (artdaddy.chipPref.v1) holds only while Quick export is on: with the switch off the app is 0.27.0's, which has no such
-// switch and no row to undo it, so a chip that passes is used, and the stored choice is left alone for when the switch is back on.
+// The person's own Off (artdaddy.chipPref.v1) is theirs, so it holds whatever the server's switch for Quick export says. (An earlier rule read it only while the switch was
+// on: an operator who turned the switch off to hide the new row also gave the chip back to a person who had turned it off, and the row that could undo it was hidden.)
 describe("the person's Off and the server's switch for Quick export", () => {
   afterEach(() => __setExportFlag("quick_export", true));
 
   const OFF = (h: ReturnType<typeof harness>) => h.storage.set(CHIP_PREF_KEY, "off");
 
-  it("with Quick export on, Off is never tested, offered or used (today's behaviour of this release)", async () => {
-    __setExportFlag("quick_export", true);
-    const h = harness([amd]);
-    OFF(h);
-    for (const allowRun of [true, false])
-      expect(await findChip("hd", { allowRun }, h.deps), `run ${allowRun}`).toEqual({
-        chip: null,
-        events: [],
-      });
-    expect(h.calls).toEqual([]);
-  });
+  it.each([true, false])(
+    "with Quick export %s, Off is never tested, offered or used",
+    async (quickExport) => {
+      __setExportFlag("quick_export", quickExport);
+      const h = harness([amd]);
+      OFF(h);
+      for (const allowRun of [true, false])
+        expect(await findChip("hd", { allowRun }, h.deps), `run ${allowRun}`).toEqual({
+          chip: null,
+          events: [],
+        });
+      expect(h.calls).toEqual([]);
+    },
+  );
 
-  it("with Quick export off, Off changes nothing: a chip that passes is used and one that fails is not, as in 0.27.0", async () => {
-    __setExportFlag("quick_export", false);
-    const off = harness([amd]);
-    OFF(off);
-    const used = await findChip("hd", { allowRun: true }, off.deps);
-    expect(used.chip).toMatchObject({ maker: "amd", ok: true, result: "passed" });
-    expect(off.calls.length).toBeGreaterThan(0);
-    // the same PC with no choice made: the same answer
-    __resetChipTests();
-    const auto = harness([amd]);
-    expect(await findChip("hd", { allowRun: true }, auto.deps)).toEqual(used);
-    // a chip that fails its test is still not used: only the person's choice stopped counting
-    __resetChipTests();
-    const failing = harness([amd], { chip: "fail" });
-    OFF(failing);
-    expect((await findChip("hd", { allowRun: true }, failing.deps)).chip).toBeNull();
-    expect(failing.calls.length).toBeGreaterThan(0);
-  });
-
-  it("leaves the stored choice as it was, and turning the switch on again restores the person's Off", async () => {
-    __setExportFlag("quick_export", false);
+  it("does not hand back a chip that was remembered as passing: Off wins over a remembered pass, with the switch on or off, and Auto brings the pass back without a new test", async () => {
     const h = harness([amd]);
-    OFF(h);
-    expect((await findChip("hd", { allowRun: true }, h.deps)).chip?.maker).toBe("amd");
+    expect((await findChip("hd", { allowRun: true }, h.deps)).chip).toMatchObject({ ok: true });
     const tested = h.calls.length;
-    expect(h.storage.get(CHIP_PREF_KEY)).toBe("off");
-    expect((await chipStatusOf("hd", h.deps)).pref).toBe("off");
-    __setExportFlag("quick_export", true);
-    for (const allowRun of [true, false])
-      expect(await findChip("hd", { allowRun }, h.deps), `run ${allowRun}`).toEqual({
-        chip: null,
-        events: [],
-      });
+    OFF(h);
+    for (const quickExport of [true, false]) {
+      __setExportFlag("quick_export", quickExport);
+      for (const allowRun of [true, false])
+        expect(
+          await findChip("hd", { allowRun }, h.deps),
+          `quick ${quickExport} run ${allowRun}`,
+        ).toEqual({ chip: null, events: [] });
+    }
     expect(h.calls.length).toBe(tested);
-    expect(h.storage.get(CHIP_PREF_KEY)).toBe("off");
-    // and back to off again: the pass that was remembered while it was off is used
-    __setExportFlag("quick_export", false);
-    expect((await findChip("hd", { allowRun: false }, h.deps)).chip?.maker).toBe("amd");
+    h.storage.delete(CHIP_PREF_KEY);
+    expect((await findChip("hd", { allowRun: false }, h.deps)).chip).toMatchObject({
+      maker: "amd",
+    });
     expect(h.calls.length).toBe(tested);
   });
 
-  it("holds for every maker, both size classes and every scripted behaviour: with the switch off a stored Off is the same as no choice (rule over the class)", async () => {
+  it("leaves the stored choice as it was, whatever the switch says, so the row that undoes it still finds it", async () => {
+    const h = harness([amd]);
+    OFF(h);
+    for (const quickExport of [false, true, false]) {
+      __setExportFlag("quick_export", quickExport);
+      await findChip("hd", { allowRun: true }, h.deps);
+      expect(h.storage.get(CHIP_PREF_KEY)).toBe("off");
+      expect((await chipStatusOf("hd", h.deps)).pref).toBe("off");
+    }
+  });
+
+  it("holds for every maker, both size classes and every scripted behaviour, with the switch on or off: a stored Off gives no chip and runs nothing (rule over the class)", async () => {
     const behaviours: Behaviour[] = [{}, { chip: "fail" }, { chip: "no_device" }, { chip: "busy" }];
     for (const maker of [amd, nvidia, intel])
       for (const sizeClass of ["hd", "uhd"] as const)
         for (const behaviour of behaviours)
-          for (const allowRun of [true, false]) {
-            const label = `${maker.maker} ${sizeClass} ${JSON.stringify(behaviour)} run ${allowRun}`;
-            __setExportFlag("quick_export", false);
-            __resetChipTests();
-            const chosen = harness([maker], behaviour);
-            OFF(chosen);
-            const withOff = await findChip(sizeClass, { allowRun }, chosen.deps);
-            __resetChipTests();
-            const none = harness([maker], behaviour);
-            const without = await findChip(sizeClass, { allowRun }, none.deps);
-            expect(withOff, label).toEqual(without);
-            expect(
-              chosen.calls.map((call) => call.kind),
-              label,
-            ).toEqual(none.calls.map((call) => call.kind));
-            // ... and the same PC with the switch on is the other way round: Off wins whatever the behaviour
-            __setExportFlag("quick_export", true);
-            __resetChipTests();
-            const onAgain = harness([maker], behaviour);
-            OFF(onAgain);
-            expect(await findChip(sizeClass, { allowRun }, onAgain.deps), label).toEqual({
-              chip: null,
-              events: [],
-            });
-            expect(onAgain.calls, label).toEqual([]);
-          }
+          for (const allowRun of [true, false])
+            for (const quickExport of [true, false]) {
+              const label = `${maker.maker} ${sizeClass} ${JSON.stringify(behaviour)} run ${allowRun} quick ${quickExport}`;
+              __setExportFlag("quick_export", quickExport);
+              __resetChipTests();
+              const chosen = harness([maker], behaviour);
+              OFF(chosen);
+              expect(await findChip(sizeClass, { allowRun }, chosen.deps), label).toEqual({
+                chip: null,
+                events: [],
+              });
+              expect(chosen.calls, label).toEqual([]);
+            }
+  });
+});
+
+// Off is the person's switch, and a click can come at any moment of a test: while it runs, and while it waits for its turn in the PC check's one slot.
+describe("the person turns the chip off while it is being tested", () => {
+  const OFF = (h: ReturnType<typeof harness>) => h.storage.set(CHIP_PREF_KEY, "off");
+  const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** A scripted PC whose ffmpeg does not answer until `open()`: the test is under way when the person acts. */
+  function held(adapters: Parameters<typeof harness>[0], behaviour: Behaviour = {}) {
+    const h = harness(adapters, behaviour);
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) => {
+        await gate;
+        return h.deps.probe(args, options);
+      },
+    };
+    return { h, deps, open: () => open() };
+  }
+
+  it("drops a test that finishes after the click: nothing is remembered or reported for the next export, and the row's answer stays unknown", async () => {
+    const { h, deps, open } = held([amd]);
+    const lookup = findChip("hd", { allowRun: true }, deps);
+    await later(10);
+    OFF(h);
+    open();
+    expect(await lookup).toEqual({ chip: null, events: [] });
+    expect(takeChipTestEvents()).toEqual([]);
+    expect(await chipStatusOf("hd", h.deps)).toMatchObject({ pref: "off", verdict: "unknown" });
+    // Auto again: the test is made afresh, and this time its answer is kept
+    h.storage.delete(CHIP_PREF_KEY);
+    expect((await findChip("hd", { allowRun: true }, h.deps)).chip).toMatchObject({ ok: true });
+    expect((await chipStatusOf("hd", h.deps)).verdict).toBe("passed");
   });
 
-  it("reads the switch where it reads everything of its kind: a switch that cannot be read is its compiled default, which is on, so Off holds", async () => {
-    const flags = await import("../api/exportFlags");
-    __setExportFlag("quick_export", false);
-    const spy = vi.spyOn(flags, "exportFlag").mockImplementation((name) => {
-      if (name === "quick_export") throw new Error("the switches cannot be read");
-      return true;
+  it("does not go on to test another chip after the click", async () => {
+    const { h, deps, open } = held([amd, nvidia], { chip: "fail" });
+    const lookup = findChip("hd", { allowRun: true }, deps);
+    await later(10);
+    OFF(h);
+    open();
+    expect(await lookup).toEqual({ chip: null, events: [] });
+    const chipsTested = new Set(
+      h.calls
+        .filter((call) => call.kind === "chip-test-encode")
+        .map((call) => call.args[call.args.indexOf("-c:v") + 1]),
+    );
+    expect(
+      chipsTested.size,
+      "the test under way ran to its end; the next chip was never started",
+    ).toBe(1);
+  });
+
+  it("never starts a test that is still waiting for its turn in the PC check's slot when the click comes", async () => {
+    type Turn = { ran: true; value: never } | { ran: false };
+    const h = harness([amd]);
+    let open!: () => void;
+    const turnGiven = new Promise<void>((resolve) => (open = resolve));
+    setChipTestGate(async (fn: () => Promise<unknown>): Promise<Turn> => {
+      await turnGiven;
+      return { ran: true, value: (await fn()) as never };
     });
-    try {
-      const h = harness([amd]);
-      OFF(h);
-      expect(await findChip("hd", { allowRun: true }, h.deps)).toEqual({ chip: null, events: [] });
-      expect(h.calls).toEqual([]);
-    } finally {
-      spy.mockRestore();
-    }
+    const lookup = findChip("hd", { allowRun: true }, h.deps);
+    await later(10);
+    OFF(h);
+    open();
+    expect(await lookup).toEqual({ chip: null, events: [] });
+    expect(h.calls).toEqual([]);
+    expect(takeChipTestEvents()).toEqual([]);
   });
 });

@@ -22,8 +22,11 @@ export interface ChipRowInput {
   setAside: boolean;
   /** The server's switches that let a chip be used at all (the maker's own and `chip_default`) are on. */
   flagsOn: boolean;
-  /** `quick_export` is on. Off, the old Mode row comes back and this row is not drawn. */
+  /** `quick_export` is on. Off, the old Mode row comes back and this row is not drawn, unless the person's own Off is stored: that is drawn, so it can be undone. */
   quickFlagOn: boolean;
+  /** The delivered picture is in a size class the chip is tested and used at. 8K, 4K at 50 or 60, 1440p at 50 or 60 and 1080p at 100 or more are not: the
+   *  processor makes those, and Auto has nothing true to say of the chip there. */
+  sizeServed: boolean;
 }
 
 export interface ChipRowModel {
@@ -71,12 +74,18 @@ function stateOf(
   return "checking";
 }
 
-/** The row's model. Anything that is not exactly what the type says is read as the quiet answer (no row), and nothing throws. */
+/** The row's model. The person's own Off is drawn wherever a chip is found, whatever the server's switches and the picture's size say: it holds whatever they say, so it must
+ *  always be there to undo. Auto is drawn only where it has something true to say: the server allows the chip and this row, and the picture is in a size class the chip serves.
+ *  Anything that is not exactly what the type says is read as the quiet answer (no row), and nothing throws. */
 export function chipRowModel(input: ChipRowInput): ChipRowModel {
   try {
     if (input === null || typeof input !== "object") return hidden();
     const fields: Partial<Record<keyof ChipRowInput, unknown>> = input;
-    if (fields.found !== true || fields.flagsOn !== true || fields.quickFlagOn !== true)
+    if (fields.found !== true) return hidden();
+    if (
+      fields.pref !== "off" &&
+      (fields.flagsOn !== true || fields.quickFlagOn !== true || fields.sizeServed !== true)
+    )
       return hidden();
     const state = stateOf(fields);
     return { state, visible: true, note: CHIP_ROW_NOTES[state], action: ACTIONS[state] };

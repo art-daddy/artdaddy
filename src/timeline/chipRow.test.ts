@@ -17,10 +17,11 @@ const base: ChipRowInput = {
   setAside: false,
   flagsOn: true,
   quickFlagOn: true,
+  sizeServed: true,
 };
 const model = (over: Partial<ChipRowInput>) => chipRowModel({ ...base, ...over });
 
-/** Every combination of the row's inputs: 2 x 2 x 2 x 3 x 2 x 2 x 2 = 192. */
+/** Every combination of the row's inputs: 2 x 2 x 2 x 3 x 2 x 2 x 2 x 2 = 384. */
 function* everyInput(): Generator<ChipRowInput> {
   for (const found of [false, true])
     for (const pref of ["auto", "off"] as ChipPref[])
@@ -29,7 +30,17 @@ function* everyInput(): Generator<ChipRowInput> {
           for (const setAside of [false, true])
             for (const flagsOn of [false, true])
               for (const quickFlagOn of [false, true])
-                yield { found, pref, testing, verdict, setAside, flagsOn, quickFlagOn };
+                for (const sizeServed of [false, true])
+                  yield {
+                    found,
+                    pref,
+                    testing,
+                    verdict,
+                    setAside,
+                    flagsOn,
+                    quickFlagOn,
+                    sizeServed,
+                  };
 }
 
 const STATES: ChipRowState[] = [
@@ -136,9 +147,9 @@ describe("the graphics-chip row: which state wins", () => {
 describe("the graphics-chip row: every combination of its inputs (a conformance walk)", () => {
   const all = [...everyInput()];
 
-  it("walks all 192 combinations", () => {
-    expect(all).toHaveLength(192);
-    expect(new Set(all.map((input) => JSON.stringify(input))).size).toBe(192);
+  it("walks all 384 combinations", () => {
+    expect(all).toHaveLength(384);
+    expect(new Set(all.map((input) => JSON.stringify(input))).size).toBe(384);
   });
 
   it("gives every combination exactly one known state, and never throws", () => {
@@ -149,17 +160,37 @@ describe("the graphics-chip row: every combination of its inputs (a conformance 
     }
   });
 
-  it("draws the row exactly when a chip is found, the server allows it and quick_export is on", () => {
+  it("draws the row exactly when a chip is found and either the person's own Off is stored or the server allows the chip and this row and the picture is one the chip serves", () => {
     for (const input of all) {
       const row = chipRowModel(input);
       expect(row.visible, JSON.stringify(input)).toBe(
-        input.found && input.flagsOn && input.quickFlagOn,
+        input.found &&
+          (input.pref === "off" || (input.flagsOn && input.quickFlagOn && input.sizeServed)),
       );
       // One thing, said four ways: a row that is not drawn is state none and has no words and no link.
       expect(row.visible).toBe(row.state !== "none");
       expect(row.note !== null).toBe(row.visible);
       if (!row.visible) expect(row.action).toBeNull();
     }
+  });
+
+  it("always draws the person's own Off where a chip is found, so it can be undone, whatever the server's switches and the picture's size say", () => {
+    const offs = all.filter((input) => input.found && input.pref === "off");
+    expect(offs.length).toBeGreaterThan(0);
+    for (const input of offs)
+      expect(chipRowModel(input), JSON.stringify(input)).toEqual({
+        state: "off",
+        visible: true,
+        note: CHIP_ROW_NOTES.off,
+        action: "turn_on",
+      });
+  });
+
+  it("does not speak for the chip at a picture size it never serves: Auto draws no row there", () => {
+    const unserved = all.filter((input) => input.pref === "auto" && !input.sizeServed);
+    expect(unserved.length).toBeGreaterThan(0);
+    for (const input of unserved)
+      expect(chipRowModel(input).visible, JSON.stringify(input)).toBe(false);
   });
 
   it("with the switch Off never tests, offers or uses a chip: no state or link of the row asks for one", () => {
@@ -224,6 +255,8 @@ describe("the graphics-chip row: hostile input", () => {
       { ...base, found: 1 },
       { ...base, flagsOn: undefined },
       { ...base, quickFlagOn: null },
+      { ...base, sizeServed: undefined },
+      { ...base, sizeServed: "yes" },
       new Proxy(
         {},
         {
@@ -239,7 +272,12 @@ describe("the graphics-chip row: hostile input", () => {
   it("reads a pref that is not Off as Auto, as the stored pref does, and fields it was not given as not set", () => {
     expect(model({ pref: "banana" as ChipPref, verdict: "passed" }).state).toBe("auto_passed");
     expect(
-      chipRowModel({ found: true, flagsOn: true, quickFlagOn: true } as ChipRowInput).state,
+      chipRowModel({
+        found: true,
+        flagsOn: true,
+        quickFlagOn: true,
+        sizeServed: true,
+      } as ChipRowInput).state,
     ).toBe("checking");
     expect(model({ verdict: "maybe" as "passed" }).state).toBe("checking");
   });

@@ -8,7 +8,8 @@ import { processorName, resolveExportResources, runCapabilityProbe } from "../pl
 import { amd, harness, intel, nvidia, type Behaviour } from "../test/chipHarness";
 import { CHIP_PREF_KEY } from "../timeline/chipPref";
 import { CHIP_ROW_NOTES } from "../timeline/chipRow";
-import { __resetChipTests, markChipSuspect } from "../timeline/chipTest";
+import { __resetChipTests, markChipSuspect, takeChipTestEvents } from "../timeline/chipTest";
+import { sizeClassOf } from "../timeline/exportEncoder";
 import type { GraphicsAdapter } from "../platform/host";
 import ChipRow from "./ChipRow";
 
@@ -175,6 +176,46 @@ describe("the chip row", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it.each([
+    ["with the server's switch for Quick export off", "quick_export"],
+    ["with the server's switch for choosing the chip off", "chip_default"],
+    ["with the server's switch for this maker off", "chip_amd"],
+  ] as const)(
+    "still draws the person's own Off %s, so it can be undone, and Auto takes the row away again",
+    async (_why, flag) => {
+      pc([amd]);
+      localStorage.setItem(CHIP_PREF_KEY, "off");
+      __setExportFlag(flag, false);
+      const changed = vi.fn();
+      render(<ChipRow onChange={changed} />);
+      await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.off));
+      expect(screen.getByRole("radio", { name: "Off" })).toBeChecked();
+      await settled();
+      expect(probe).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+      expect(localStorage.getItem(CHIP_PREF_KEY)).toBeNull();
+      expect(changed).toHaveBeenCalledTimes(1);
+      // with the server's switch off the row is not drawn for Auto: it was there only for the Off that could not otherwise be undone
+      await waitFor(() => expect(screen.queryByTestId("chip-row")).toBeNull());
+    },
+  );
+
+  it("drops a test that finishes after the person turned the chip off: nothing is remembered and nothing is reported for the next export", async () => {
+    let open!: () => void;
+    pc([amd], {}, null, new Promise<void>((resolve) => (open = resolve)));
+    render(<ChipRow />);
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.checking));
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.off));
+    await act(async () => open());
+    await waitFor(() => expect(chipCalls()).toHaveLength(4));
+    await settled();
+    await settled();
+    expect(localStorage.getItem("artdaddy.chipTest.v1")).toBeNull();
+    expect(takeChipTestEvents()).toEqual([]);
+    expect(note()).toHaveTextContent(CHIP_ROW_NOTES.off);
+  });
+
   it("never breaks the dialog: a PC that cannot be asked draws nothing, and a name that cannot be read only costs the hint", async () => {
     pc([amd]);
     vi.mocked(resolveExportResources).mockRejectedValue(new Error("no PC"));
@@ -191,19 +232,57 @@ describe("the chip row", () => {
     expect(screen.queryByTestId("chip-row-hint")).toBeNull();
   });
 
-  it("tests the chip at the size the picture will be delivered in: 4K for a 4K project, and 1080p for one outside both classes", async () => {
+  it("tests the chip at the size the picture will be delivered in: 4K for a 4K project", async () => {
     pc([amd]);
     render(<ChipRow workload={{ width: 3840, height: 2160, fps: 30 }} />);
     await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
     expect(chipCalls().some(([args]) => args.join(" ").includes("size=3840x2160"))).toBe(true);
-    cleanup();
-    localStorage.clear();
-    __resetChipTests();
+  });
+
+  it.each([
+    ["8K", { width: 7680, height: 4320, fps: 30 }],
+    ["4K at 60 frames a second", { width: 3840, height: 2160, fps: 60 }],
+    ["1440p at 60 frames a second", { width: 2560, height: 1440, fps: 60 }],
+    ["1080p at 120 frames a second", { width: 1920, height: 1080, fps: 120 }],
+  ])(
+    "draws no row for %s, a picture the chip never serves, and tests nothing; the person's own Off is still drawn",
+    async (_what, workload) => {
+      pc([amd]);
+      const { container, unmount } = render(<ChipRow workload={workload} />);
+      await settled();
+      await settled();
+      expect(container).toBeEmptyDOMElement();
+      expect(probe).not.toHaveBeenCalled();
+      unmount();
+      localStorage.setItem(CHIP_PREF_KEY, "off");
+      render(<ChipRow workload={workload} />);
+      await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.off));
+      expect(probe).not.toHaveBeenCalled();
+    },
+  );
+
+  it("is drawn for exactly the pictures that have a size class: a walk over sizes and rates, against sizeClassOf itself", async () => {
     pc([amd]);
-    render(<ChipRow workload={{ width: 7680, height: 4320, fps: 30 }} />);
-    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
-    expect(chipCalls().some(([args]) => args.join(" ").includes("size=1080x1920"))).toBe(true);
-    expect(chipCalls().some(([args]) => args.join(" ").includes("size=7680"))).toBe(false);
+    const sizes: Array<[number, number]> = [
+      [1280, 720],
+      [1920, 1080],
+      [2560, 1440],
+      [3840, 2160],
+      [7680, 4320],
+    ];
+    for (const [width, height] of sizes)
+      for (const fps of [30, 60, 120]) {
+        const { container, unmount } = render(<ChipRow workload={{ width, height, fps }} />);
+        const label = `${width}x${height} at ${fps}`;
+        if (sizeClassOf(width, height, fps) !== null) {
+          await waitFor(() => expect(note(), label).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
+        } else {
+          await settled();
+          await settled();
+          expect(container, label).toBeEmptyDOMElement();
+        }
+        unmount();
+      }
   });
 });
 
