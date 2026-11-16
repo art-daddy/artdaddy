@@ -27,8 +27,9 @@ import type { LeanOptions } from "./leanOptions";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
-/** Bump when exports get faster, slower or hungrier; measurements from before then stop estimating. */
-export const EXPORT_SPEED_REVISION = 1;
+/** Bump when exports get faster, slower or hungrier; measurements from before then stop estimating. 2: 0.28.0's lean render paths and gentler
+ *  rungs made many exports faster and hungrier in other ways, so the times and peaks 0.27.0 stored (revision 1) no longer describe them. */
+export const EXPORT_SPEED_REVISION = 2;
 
 /** The encoder an export runs and is remembered under. The chip is used only when Fast was chosen AND a chip is named
  *  (exportEncoder.ts `chooseEncoder` decides that); the faster setting only for Full quality's processor path. Anything

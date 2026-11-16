@@ -511,6 +511,16 @@ describe("local measured export estimates", () => {
     ).toBe(16);
   });
 
+  it("ignores what 0.27.0 stored: its measurements carry revision 1 and describe an exporter this release replaced", () => {
+    const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };
+    const stored = { ...sample, revision: 1 };
+    expect(estimate(workload, [stored])).toEqual(unknown);
+    // The plan's memory prediction reads the same filter: a peak 0.27.0 stored no longer picks a rung either.
+    expect(peakSamples(workload, output, "medium", "partition-pipes-v1", [stored])).toEqual([]);
+    // And the measurement the same export makes under this release is believed again.
+    expect(estimate(workload, [stored, sample]).seconds).toBe(16);
+  });
+
   it("does not invent observations for absent or incompatible history", () => {
     const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };
     expect(estimate(workload, [])).toEqual(unknown);
