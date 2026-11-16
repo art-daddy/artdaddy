@@ -1,0 +1,192 @@
+{
+ "base": "B",
+ "others": [
+  "ZB_cpu"
+ ],
+ "first_en": null,
+ "corrected": false,
+ "exclusions": {},
+ "rule": "diff <= 2.0 and hi <= 4.0",
+ "rows": [
+  {
+   "set": "nl",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 17.69,
+   "results": {
+    "ZB_cpu": {
+     "pct": 18.78,
+     "diff": 1.09,
+     "lo": -0.63,
+     "hi": 3.07,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.009
+    }
+   }
+  },
+  {
+   "set": "ko",
+   "unit": "cer",
+   "n": 40,
+   "base_pct": 5.76,
+   "results": {
+    "ZB_cpu": {
+     "pct": 6.54,
+     "diff": 0.78,
+     "lo": 0.0,
+     "hi": 1.6,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 0.993
+    }
+   }
+  },
+  {
+   "set": "hi",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 54.85,
+   "results": {
+    "ZB_cpu": {
+     "pct": 53.99,
+     "diff": -0.86,
+     "lo": -2.85,
+     "hi": 1.3,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 0.985
+    }
+   }
+  },
+  {
+   "set": "tr",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 15.01,
+   "results": {
+    "ZB_cpu": {
+     "pct": 14.29,
+     "diff": -0.72,
+     "lo": -2.17,
+     "hi": 0.93,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.003
+    }
+   }
+  },
+  {
+   "set": "pl",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 18.37,
+   "results": {
+    "ZB_cpu": {
+     "pct": 19.24,
+     "diff": 0.87,
+     "lo": -1.01,
+     "hi": 2.83,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.004
+    }
+   }
+  },
+  {
+   "set": "ar",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 20.63,
+   "results": {
+    "ZB_cpu": {
+     "pct": 22.68,
+     "diff": 2.05,
+     "lo": 0.0,
+     "hi": 4.13,
+     "verdict": "FAIL",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.003
+    }
+   }
+  },
+  {
+   "set": "fa",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 54.58,
+   "results": {
+    "ZB_cpu": {
+     "pct": 55.88,
+     "diff": 1.29,
+     "lo": -1.07,
+     "hi": 3.86,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.058
+    }
+   }
+  },
+  {
+   "set": "zh",
+   "unit": "cer",
+   "n": 40,
+   "base_pct": 20.04,
+   "results": {
+    "ZB_cpu": {
+     "pct": 18.96,
+     "diff": -1.08,
+     "lo": -3.95,
+     "hi": 1.7,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 0.95
+    }
+   }
+  },
+  {
+   "set": "vi",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 19.61,
+   "results": {
+    "ZB_cpu": {
+     "pct": 20.72,
+     "diff": 1.11,
+     "lo": -0.59,
+     "hi": 2.94,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.004
+    }
+   }
+  },
+  {
+   "set": "sv",
+   "unit": "wer",
+   "n": 40,
+   "base_pct": 22.72,
+   "results": {
+    "ZB_cpu": {
+     "pct": 24.65,
+     "diff": 1.93,
+     "lo": 0.3,
+     "hi": 3.83,
+     "verdict": "PASS",
+     "empty": 0,
+     "overlong": 0,
+     "hyp_ref": 1.015
+    }
+   }
+  }
+ ]
+}

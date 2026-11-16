@@ -1,0 +1,53 @@
+{
+ "source": "The speech study's decision materials (S1-DECISION-MATERIALS.md), section 10.1 'small q8_0 on the processor path', transcribed by hand from the document's two result tables and its language table, which the study's own tools\\render_q8cpu.py printed from the score files. It is the independent witness for the processor cells in speechGate.json: the gate cells are generated from the score files, this is what the document says about them.",
+ "columns": ["the document's row label", "the gate's set", "today's small with 5 beams on the chip (%)", "q8_0 on the processor (%)", "difference (points)", "interval low", "interval high", "the document's verdict"],
+ "greedy": [
+  ["English (150 read-aloud)", "en", 6.02, 6.44, 0.42, -0.10, 0.92, "pass"],
+  ["Spanish", "es", 4.62, 5.32, 0.70, -0.10, 1.54, "pass"],
+  ["Russian", "ru", 11.58, 11.94, 0.36, -0.94, 1.76, "pass"],
+  ["Portuguese", "pt", 6.67, 7.25, 0.58, -0.47, 1.64, "pass"],
+  ["Indonesian", "id", 33.98, 34.37, 0.39, -1.02, 1.76, "pass"],
+  ["Italian", "it", 9.53, 8.35, -1.18, -2.49, 0.09, "pass"],
+  ["Dutch", "nl", 17.69, 20.52, 2.84, 0.70, 5.22, "fail"],
+  ["Japanese", "ja", 14.03, 14.03, 0.00, -1.33, 1.45, "pass"],
+  ["German", "de", 8.47, 9.52, 1.05, 0.09, 2.09, "pass"],
+  ["French", "fr", 15.43, 15.25, -0.18, -1.63, 1.16, "pass"],
+  ["Ukrainian", "uk", 17.43, 18.40, 0.97, -1.08, 3.33, "pass"],
+  ["English (160 harder)", "en_gs", 9.42, 9.47, 0.05, -0.48, 0.60, "pass"]
+ ],
+ "beams": [
+  ["Dutch", "nl", 17.69, 18.78, 1.09, -0.63, 3.07, "pass"],
+  ["Korean", "ko", 5.76, 6.54, 0.78, 0.00, 1.60, "pass"],
+  ["Hindi", "hi", 54.85, 53.99, -0.86, -2.85, 1.30, "pass"],
+  ["Turkish", "tr", 15.01, 14.29, -0.72, -2.17, 0.93, "pass"],
+  ["Polish", "pl", 18.37, 19.24, 0.87, -1.01, 2.83, "pass"],
+  ["Arabic", "ar", 20.63, 22.68, 2.05, 0.00, 4.13, "fail"],
+  ["Persian", "fa", 54.58, 55.88, 1.29, -1.07, 3.86, "pass"],
+  ["Chinese", "zh", 20.04, 18.96, -1.08, -3.95, 1.70, "pass"],
+  ["Vietnamese", "vi", 19.61, 20.72, 1.11, -0.59, 2.94, "pass"],
+  ["Swedish", "sv", 22.72, 24.65, 1.93, 0.30, 3.83, "pass"]
+ ],
+ "languageTable": [
+  ["English (150 read-aloud)", "en", "greedy"],
+  ["Spanish", "es", "greedy"],
+  ["Russian", "ru", "greedy"],
+  ["Korean", "ko", "5 beams"],
+  ["Portuguese", "pt", "greedy"],
+  ["Hindi", "hi", "5 beams"],
+  ["Indonesian", "id", "greedy"],
+  ["Italian", "it", "greedy"],
+  ["Turkish", "tr", "5 beams"],
+  ["Dutch", "nl", "5 beams"],
+  ["Polish", "pl", "5 beams"],
+  ["Arabic", "ar", "NEITHER passes"],
+  ["Persian", "fa", "5 beams"],
+  ["Japanese", "ja", "greedy"],
+  ["German", "de", "greedy"],
+  ["French", "fr", "greedy"],
+  ["Chinese", "zh", "5 beams"],
+  ["Vietnamese", "vi", "5 beams"],
+  ["Ukrainian", "uk", "greedy"],
+  ["Swedish", "sv", "5 beams"]
+ ],
+ "summary": "greedy in 10 languages, 5 beams in 9, neither passes in 1, pending 0"
+}
