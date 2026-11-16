@@ -1,0 +1,4080 @@
+{
+ "about": "The study's reference answers for the speech-onset detector (see work/freeze_reference.py). Written once; never regenerate it to make a test pass.",
+ "provenance": {
+  "reference": "speech_onset_ms of the speech study (tools/pkwords.py), run through a copy proven identical to it by syntax tree (check_detector_copy.py)",
+  "reference_ast_sha256": "3c2f2da4d69a6beccf4c290dba740d13866f46a85994f3466322d2e9728cfaec",
+  "python": "3.13.14",
+  "numpy": "2.2.6",
+  "generator": "synth.py (pure integer: a 31-bit LCG, an integer triangle phase, integer amplitudes); the TypeScript twin is src/test/synthAudio.ts"
+ },
+ "scan_seconds": 30,
+ "cases": [
+  {
+   "id": "quiet-0s-then-voice",
+   "what": "0 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 0,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "c50b0777",
+   "reference": {
+    "onset_ms": 0,
+    "frames": 150,
+    "floor_db": -60.03836295933896,
+    "threshold_db": -45.03836295933896,
+    "margin_db": 14.58637265511394
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-0.5s-then-voice",
+   "what": "0.5 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 8000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 56000,
+   "fnv": "64aa35e6",
+   "reference": {
+    "onset_ms": 500,
+    "frames": 175,
+    "floor_db": -60.054870656157874,
+    "threshold_db": -45.054870656157874,
+    "margin_db": 14.390181073251696
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-0.9s-then-voice",
+   "what": "0.9 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 14400,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 62400,
+   "fnv": "dc7ec023",
+   "reference": {
+    "onset_ms": 900,
+    "frames": 195,
+    "floor_db": -60.142151230605855,
+    "threshold_db": -45.142151230605855,
+    "margin_db": 14.36896203328024
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-then-voice",
+   "what": "1 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "23e44bf1",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 14.369446968474108
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.02s-then-voice",
+   "what": "1.02 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16320,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64320,
+   "fnv": "db72c867",
+   "reference": {
+    "onset_ms": 1020,
+    "frames": 201,
+    "floor_db": -60.0696441802235,
+    "threshold_db": -45.0696441802235,
+    "margin_db": 14.360117501159046
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.1s-then-voice",
+   "what": "1.1 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 17600,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 65600,
+   "fnv": "148d89a9",
+   "reference": {
+    "onset_ms": 1100,
+    "frames": 205,
+    "floor_db": -60.1180001704839,
+    "threshold_db": -45.1180001704839,
+    "margin_db": 14.29837010237393
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.5s-then-voice",
+   "what": "1.5 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 24000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 72000,
+   "fnv": "74de0fe1",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.125011453450554,
+    "threshold_db": -45.125011453450554,
+    "margin_db": 14.30475022793199
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-3s-then-voice",
+   "what": "3 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 48000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 96000,
+   "fnv": "6c4aefc9",
+   "reference": {
+    "onset_ms": 3000,
+    "frames": 300,
+    "floor_db": -60.18814030428966,
+    "threshold_db": -45.18814030428966,
+    "margin_db": 14.228229968568172
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-8s-then-voice",
+   "what": "8 s of quiet (noise at -60 dBFS), then 3 s of voice (-20 dBFS, a 60 ms pause of quiet in every 240 ms)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 128000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 176000,
+   "fnv": "b97f2616",
+   "reference": {
+    "onset_ms": 8000,
+    "frames": 550,
+    "floor_db": -60.21156731812744,
+    "threshold_db": -45.21156731812744,
+    "margin_db": 14.104549983575652
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-0.9s-then-voice-seed-7",
+   "what": "the same with another noise: seed 7",
+   "rate": 16000,
+   "seed": 7,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 14400,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 62400,
+   "fnv": "c67a3e6a",
+   "reference": {
+    "onset_ms": 900,
+    "frames": 195,
+    "floor_db": -60.143234273971316,
+    "threshold_db": -45.143234273971316,
+    "margin_db": 14.267504032712942
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-then-voice-seed-7",
+   "what": "the same with another noise: seed 7",
+   "rate": 16000,
+   "seed": 7,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "604265dc",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.103068933791064,
+    "threshold_db": -45.103068933791064,
+    "margin_db": 14.307669372893194
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.02s-then-voice-seed-7",
+   "what": "the same with another noise: seed 7",
+   "rate": 16000,
+   "seed": 7,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16320,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64320,
+   "fnv": "8b6433be",
+   "reference": {
+    "onset_ms": 1020,
+    "frames": 201,
+    "floor_db": -60.086979543882954,
+    "threshold_db": -45.086979543882954,
+    "margin_db": 14.323758762801305
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.1s-then-voice-seed-7",
+   "what": "the same with another noise: seed 7",
+   "rate": 16000,
+   "seed": 7,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 17600,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 65600,
+   "fnv": "59979a55",
+   "reference": {
+    "onset_ms": 1100,
+    "frames": 205,
+    "floor_db": -60.08785399387898,
+    "threshold_db": -45.08785399387898,
+    "margin_db": 14.322884312805279
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-0.9s-then-voice-seed-12345",
+   "what": "the same with another noise: seed 12345",
+   "rate": 16000,
+   "seed": 12345,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 14400,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 62400,
+   "fnv": "8b51b4a0",
+   "reference": {
+    "onset_ms": 900,
+    "frames": 195,
+    "floor_db": -60.08267206687863,
+    "threshold_db": -45.08267206687863,
+    "margin_db": 14.359132828153548
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-then-voice-seed-12345",
+   "what": "the same with another noise: seed 12345",
+   "rate": 16000,
+   "seed": 12345,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "13fcdc5b",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.082961943698564,
+    "threshold_db": -45.082961943698564,
+    "margin_db": 14.34291086889963
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.02s-then-voice-seed-12345",
+   "what": "the same with another noise: seed 12345",
+   "rate": 16000,
+   "seed": 12345,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16320,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64320,
+   "fnv": "fc211b27",
+   "reference": {
+    "onset_ms": 1020,
+    "frames": 201,
+    "floor_db": -60.08404040370803,
+    "threshold_db": -45.08404040370803,
+    "margin_db": 14.341832408890163
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1.1s-then-voice-seed-12345",
+   "what": "the same with another noise: seed 12345",
+   "rate": 16000,
+   "seed": 12345,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 17600,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 65600,
+   "fnv": "4b258c36",
+   "reference": {
+    "onset_ms": 1100,
+    "frames": 205,
+    "floor_db": -60.111761071310994,
+    "threshold_db": -45.111761071310994,
+    "margin_db": 14.330043823721184
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-2s-at-45-below-then-voice",
+   "what": "2 s of noise at -45 dBFS, then 3 s of voice at -20 whose pauses are the same noise",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 319,
+     "db": -45
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 319,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -45
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "af149a19",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -45.19388730977054,
+    "threshold_db": -30.19388730977054,
+    "margin_db": 9.630240288012722
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-2s-at-80-below-then-voice",
+   "what": "2 s of noise at -80 dBFS, then 3 s of voice at -20 whose pauses are the same noise",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 6,
+     "db": -80
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 6,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -80
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "a8fc67bb",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -79.65268405098436,
+    "threshold_db": -50.0,
+    "margin_db": 28.90593819467631
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-2s-at-100-below-then-voice",
+   "what": "2 s of noise at -100 dBFS, then 3 s of voice at -20 whose pauses are the same noise",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 1,
+     "db": -100
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 1,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -100
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "b1ff6c34",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -93.50384200812829,
+    "threshold_db": -50.0,
+    "margin_db": 29.436352978242184
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-56-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -56 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 236,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -56,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "cc9afd48",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 10.411971641794466
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-52-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -52 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 373,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -52,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "33a95332",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 6.436245923150636
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-48-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -48 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 592,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -48,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "0d517d78",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 2.4152226238063434
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-44-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -44 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 938,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -44,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "c1b61b18",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 0.47039754783211407
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-40-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -40 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 1486,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -40,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "4e4d2bc5",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 4.4686060915119015
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-30-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -30 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 4700,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -30,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "d8e08e07",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 14.369446968474108
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-10-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -10 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 46998,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -10,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "94fa33f0",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 14.369446968474108
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-60-below-then-voice-at-3-below",
+   "what": "1 s of noise at -60 dBFS, then 3 s of voice at -3 dBFS (the threshold is 15 dB over the quiet, and never under -50 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 105216,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -3,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "57ec5fc6",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.060314712908436,
+    "threshold_db": -45.060314712908436,
+    "margin_db": 14.369446968474108
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-90-below-then-voice-at-65-below",
+   "what": "1 s of noise at -90 dBFS, then 3 s of voice at -65 dBFS (above 15 dB over the quiet; only the -50 dBFS floor decides)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 2,
+     "db": -90
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 84,
+     "gapAmp": 2,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -65,
+     "gapDb": -90
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "df95a7bb",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -88.70146682047958,
+    "threshold_db": -50.0,
+    "margin_db": 14.485405046280206
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-90-below-then-voice-at-55-below",
+   "what": "1 s of noise at -90 dBFS, then 3 s of voice at -55 dBFS (above 15 dB over the quiet; only the -50 dBFS floor decides)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 2,
+     "db": -90
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 264,
+     "gapAmp": 2,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -55,
+     "gapDb": -90
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "e495093c",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -88.70146682047958,
+    "threshold_db": -50.0,
+    "margin_db": 4.50004694736392
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-90-below-then-voice-at-52-below",
+   "what": "1 s of noise at -90 dBFS, then 3 s of voice at -52 dBFS (above 15 dB over the quiet; only the -50 dBFS floor decides)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 2,
+     "db": -90
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 373,
+     "gapAmp": 2,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -52,
+     "gapDb": -90
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "21c626e3",
+   "reference": {
+    "onset_ms": null,
+    "frames": 200,
+    "floor_db": -88.70146682047958,
+    "threshold_db": -50.0,
+    "margin_db": 1.4965606360590726
+   },
+   "cut": null
+  },
+  {
+   "id": "quiet-1s-at-90-below-then-voice-at-48-below",
+   "what": "1 s of noise at -90 dBFS, then 3 s of voice at -48 dBFS (above 15 dB over the quiet; only the -50 dBFS floor decides)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 2,
+     "db": -90
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 592,
+     "gapAmp": 2,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -48,
+     "gapDb": -90
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "7ddb7495",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -88.70146682047958,
+    "threshold_db": -50.0,
+    "margin_db": 1.4081665330122277
+   },
+   "cut": null
+  },
+  {
+   "id": "steady-voice-with-no-pauses-and-no-quiet",
+   "what": "3 s of voice at -20 dBFS with no pause and no quiet in front: nothing is 15 dB over the quietest tenth",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 0,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "dcda252a",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -20.326027183147808,
+    "threshold_db": -5.326027183147808,
+    "margin_db": 14.17986267832902
+   },
+   "cut": null
+  },
+  {
+   "id": "steady-voice-after-1s-quiet",
+   "what": "1 s of quiet, then 3 s of voice with no pause (the quiet is more than a tenth of the clip)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 0,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64000,
+   "fnv": "36e1ec6a",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.01944547920018,
+    "threshold_db": -45.01944547920018,
+    "margin_db": 14.605290135252723
+   },
+   "cut": null
+  },
+  {
+   "id": "noise-only-minus-60-for-3s",
+   "what": "3 s of noise at -60 dBFS and nothing else",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 48000,
+     "amp": 57,
+     "db": -60
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "02cd47e0",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -60.31735167791416,
+    "threshold_db": -45.31735167791416,
+    "margin_db": 14.099018594943672
+   },
+   "cut": null
+  },
+  {
+   "id": "noise-only-minus-20-for-3s",
+   "what": "3 s of loud steady noise at -20 dBFS: loud, but nothing stands out of it",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 48000,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "8c70e60f",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -20.352734940833212,
+    "threshold_db": -5.352734940833212,
+    "margin_db": 14.095980219282637
+   },
+   "cut": null
+  },
+  {
+   "id": "noise-only-minus-80-for-3s",
+   "what": "3 s of noise at -80 dBFS",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 48000,
+     "amp": 6,
+     "db": -80
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "639f1ac3",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -79.81119593730872,
+    "threshold_db": -50.0,
+    "margin_db": 28.90593819467631
+   },
+   "cut": null
+  },
+  {
+   "id": "all-zero-for-3s",
+   "what": "3 s of digital silence",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 48000
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "7e4bc9c5",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 70.0
+   },
+   "cut": null
+  },
+  {
+   "id": "one-lsb-flicker-for-3s",
+   "what": "3 s of noise whose samples are only -1, 0 and 1 (about -100 dBFS)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 48000,
+     "amp": 1,
+     "db": -100
+    }
+   ],
+   "post": null,
+   "samples": 48000,
+   "fnv": "e6058269",
+   "reference": {
+    "onset_ms": null,
+    "frames": 150,
+    "floor_db": -93.7067612168657,
+    "threshold_db": -50.0,
+    "margin_db": 42.775476214909276
+   },
+   "cut": null
+  },
+  {
+   "id": "empty",
+   "what": "no samples at all",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 0
+    }
+   ],
+   "post": null,
+   "samples": 0,
+   "fnv": "811c9dc5",
+   "reference": {
+    "onset_ms": null,
+    "frames": 0,
+    "floor_db": null,
+    "threshold_db": null,
+    "margin_db": null
+   },
+   "cut": null
+  },
+  {
+   "id": "one-sample",
+   "what": "a single sample",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 1,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 1,
+   "fnv": "e2687918",
+   "reference": {
+    "onset_ms": null,
+    "frames": 0,
+    "floor_db": null,
+    "threshold_db": null,
+    "margin_db": null
+   },
+   "cut": null
+  },
+  {
+   "id": "a-partial-frame-only",
+   "what": "319 loud samples: not even one 20 ms frame",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 319,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 319,
+   "fnv": "acc8d4d7",
+   "reference": {
+    "onset_ms": null,
+    "frames": 0,
+    "floor_db": null,
+    "threshold_db": null,
+    "margin_db": null
+   },
+   "cut": null
+  },
+  {
+   "id": "1-frames-of-voice",
+   "what": "1 frame(s) of loud noise: fewer than three frames, or nothing quieter to stand out of",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 320,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 320,
+   "fnv": "243e8a89",
+   "reference": {
+    "onset_ms": null,
+    "frames": 1,
+    "floor_db": null,
+    "threshold_db": null,
+    "margin_db": null
+   },
+   "cut": null
+  },
+  {
+   "id": "2-frames-of-voice",
+   "what": "2 frame(s) of loud noise: fewer than three frames, or nothing quieter to stand out of",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 640,
+   "fnv": "728d1c4f",
+   "reference": {
+    "onset_ms": null,
+    "frames": 2,
+    "floor_db": null,
+    "threshold_db": null,
+    "margin_db": null
+   },
+   "cut": null
+  },
+  {
+   "id": "3-frames-of-voice",
+   "what": "3 frame(s) of loud noise: fewer than three frames, or nothing quieter to stand out of",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 960,
+   "fnv": "03e38224",
+   "reference": {
+    "onset_ms": null,
+    "frames": 3,
+    "floor_db": -20.180245760231465,
+    "threshold_db": -5.180245760231465,
+    "margin_db": 14.813525875576538
+   },
+   "cut": null
+  },
+  {
+   "id": "one-quiet-frame-then-two-loud",
+   "what": "3 frames [zero, loud, loud]: the run of three cannot fit",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 320
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 960,
+   "fnv": "fd101b30",
+   "reference": {
+    "onset_ms": null,
+    "frames": 3,
+    "floor_db": -100.04149346568761,
+    "threshold_db": -50.0,
+    "margin_db": 29.792532671561943
+   },
+   "cut": null
+  },
+  {
+   "id": "one-quiet-frame-then-three-loud",
+   "what": "4 frames [zero, loud, loud, loud]: the first run of three",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 320
+    },
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 1280,
+   "fnv": "664496b0",
+   "reference": {
+    "onset_ms": 20,
+    "frames": 4,
+    "floor_db": -90.06224019853141,
+    "threshold_db": -50.0,
+    "margin_db": 29.792532671561943
+   },
+   "cut": null
+  },
+  {
+   "id": "a-partial-tail-would-complete-the-run",
+   "what": "[zero x2, loud x2] and 100 more loud samples: the partial frame must not be counted",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 640
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "noise",
+     "n": 100,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 1380,
+   "fnv": "b866131c",
+   "reference": {
+    "onset_ms": null,
+    "frames": 4,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 30.006228364191998
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-in-the-last-three-frames",
+   "what": "10 quiet frames then 3 loud frames, the end of the clip: the last place a run fits",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 4160,
+   "fnv": "a4bae4a9",
+   "reference": {
+    "onset_ms": 200,
+    "frames": 13,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.920182053364623
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-in-the-last-two-frames",
+   "what": "10 quiet frames then 2 loud frames: no run of three",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    }
+   ],
+   "post": null,
+   "samples": 3840,
+   "fnv": "41fb2583",
+   "reference": {
+    "onset_ms": null,
+    "frames": 12,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.920182053364623
+   },
+   "cut": null
+  },
+  {
+   "id": "a-lone-loud-frame",
+   "what": "a single loud frame between silences",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 320,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 3200
+    }
+   ],
+   "post": null,
+   "samples": 6720,
+   "fnv": "f4dad4a7",
+   "reference": {
+    "onset_ms": null,
+    "frames": 21,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.920182053364623
+   },
+   "cut": null
+  },
+  {
+   "id": "two-loud-frames",
+   "what": "two loud frames in a row between silences",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 3200
+    }
+   ],
+   "post": null,
+   "samples": 7040,
+   "fnv": "ec7e3183",
+   "reference": {
+    "onset_ms": null,
+    "frames": 22,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.920182053364623
+   },
+   "cut": null
+  },
+  {
+   "id": "three-loud-frames",
+   "what": "three loud frames in a row between silences: the shortest voice",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 3200
+    }
+   ],
+   "post": null,
+   "samples": 7360,
+   "fnv": "0ff488a9",
+   "reference": {
+    "onset_ms": 200,
+    "frames": 23,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.920182053364623
+   },
+   "cut": null
+  },
+  {
+   "id": "a-gap-of-one-quiet-frame-splits-the-run",
+   "what": "loud x2, quiet x1, loud x2 and then silence: no run of three anywhere",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 320
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 3200
+    }
+   ],
+   "post": null,
+   "samples": 8000,
+   "fnv": "ba11980b",
+   "reference": {
+    "onset_ms": null,
+    "frames": 25,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.890476951951474
+   },
+   "cut": null
+  },
+  {
+   "id": "a-later-run-after-a-split",
+   "what": "loud x2, quiet x1, loud x3: the onset is the second burst, not the first",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "zero",
+     "n": 3200
+    },
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 320
+    },
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 5676,
+     "db": -20
+    },
+    {
+     "kind": "zero",
+     "n": 3200
+    }
+   ],
+   "post": null,
+   "samples": 8320,
+   "fnv": "7dc93877",
+   "reference": {
+    "onset_ms": 260,
+    "frames": 26,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 29.890476951951474
+   },
+   "cut": null
+  },
+  {
+   "id": "hiss-minus-55-for-2s-then-voice",
+   "what": "2 s of hiss at -55 dBFS (10 dB over the pauses of the voice) and then the voice: the hiss is not the voice",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 101,
+     "db": -55
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "e23bf5b0",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -59.82601658119251,
+    "threshold_db": -44.82601658119251,
+    "margin_db": 9.632362349679944
+   },
+   "cut": null
+  },
+  {
+   "id": "hiss-minus-40-for-2s-then-voice",
+   "what": "2 s of hiss at -40 dBFS (20 dB over the pauses of the voice) and then the voice: the hiss reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 568,
+     "db": -40
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "2fb20cee",
+   "reference": {
+    "onset_ms": 0,
+    "frames": 250,
+    "floor_db": -59.82601658119251,
+    "threshold_db": -44.82601658119251,
+    "margin_db": 4.17591870400004
+   },
+   "cut": null
+  },
+  {
+   "id": "steady-tone-minus-50-for-2s-then-voice",
+   "what": "2 s of a steady tone at -50 dBFS, then the voice",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "tone",
+     "n": 32000,
+     "amp": 179,
+     "pitch": 140,
+     "db": -50
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "a4c4355d",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -59.82601658119251,
+    "threshold_db": -44.82601658119251,
+    "margin_db": 4.9416481865431265
+   },
+   "cut": null
+  },
+  {
+   "id": "steady-tone-minus-30-for-2s-then-voice",
+   "what": "2 s of a steady tone (music) at -30 dBFS, then the voice: the tone reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "tone",
+     "n": 32000,
+     "amp": 1795,
+     "pitch": 140,
+     "db": -30
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80000,
+   "fnv": "69fe9e25",
+   "reference": {
+    "onset_ms": 0,
+    "frames": 250,
+    "floor_db": -59.82601658119251,
+    "threshold_db": -44.82601658119251,
+    "margin_db": 14.517948317200016
+   },
+   "cut": null
+  },
+  {
+   "id": "click-of-1-frames-then-2s-near-silence-then-voice",
+   "what": "a click of 1 loud frame(s), 2 s of quiet, then the voice: a click of three or more frames reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 320,
+     "amp": 17948,
+     "db": -10
+    },
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80320,
+   "fnv": "bab2c209",
+   "reference": {
+    "onset_ms": 2020,
+    "frames": 251,
+    "floor_db": -60.162161554062266,
+    "threshold_db": -45.162161554062266,
+    "margin_db": 14.254208718795567
+   },
+   "cut": null
+  },
+  {
+   "id": "click-of-2-frames-then-2s-near-silence-then-voice",
+   "what": "a click of 2 loud frame(s), 2 s of quiet, then the voice: a click of three or more frames reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 17948,
+     "db": -10
+    },
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80640,
+   "fnv": "61cce363",
+   "reference": {
+    "onset_ms": 2040,
+    "frames": 252,
+    "floor_db": -60.16061739471348,
+    "threshold_db": -45.16061739471348,
+    "margin_db": 14.25575287814435
+   },
+   "cut": null
+  },
+  {
+   "id": "click-of-3-frames-then-2s-near-silence-then-voice",
+   "what": "a click of 3 loud frame(s), 2 s of quiet, then the voice: a click of three or more frames reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 960,
+     "amp": 17948,
+     "db": -10
+    },
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 80960,
+   "fnv": "c01f2ac7",
+   "reference": {
+    "onset_ms": 0,
+    "frames": 253,
+    "floor_db": -60.154615124403215,
+    "threshold_db": -45.154615124403215,
+    "margin_db": 14.261755148454618
+   },
+   "cut": null
+  },
+  {
+   "id": "click-of-4-frames-then-2s-near-silence-then-voice",
+   "what": "a click of 4 loud frame(s), 2 s of quiet, then the voice: a click of three or more frames reads as the voice (a named limit)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 1280,
+     "amp": 17948,
+     "db": -10
+    },
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 81280,
+   "fnv": "abcabea7",
+   "reference": {
+    "onset_ms": 0,
+    "frames": 254,
+    "floor_db": -60.14640230258069,
+    "threshold_db": -45.14640230258069,
+    "margin_db": 14.252686681167809
+   },
+   "cut": null
+  },
+  {
+   "id": "dc-offset-20-on-2s-quiet-then-voice",
+   "what": "2 s of quiet then voice, every sample shifted by 20 (then clamped)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "dc": 20
+   },
+   "samples": 80000,
+   "fnv": "18f0706a",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -58.87622191835937,
+    "threshold_db": -43.87622191835937,
+    "margin_db": 14.18685263690108
+   },
+   "cut": null
+  },
+  {
+   "id": "dc-offset-100-on-2s-quiet-then-voice",
+   "what": "2 s of quiet then voice, every sample shifted by 100 (then clamped)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "dc": 100
+   },
+   "samples": 80000,
+   "fnv": "daff31d6",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -49.98644989935548,
+    "threshold_db": -34.98644989935548,
+    "margin_db": 14.458637700358853
+   },
+   "cut": null
+  },
+  {
+   "id": "dc-offset-400-on-2s-quiet-then-voice",
+   "what": "2 s of quiet then voice, every sample shifted by 400 (then clamped)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "dc": 400
+   },
+   "samples": 80000,
+   "fnv": "4bf345f0",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -38.27349499229408,
+    "threshold_db": -23.273494992294083,
+    "margin_db": 2.781868237324929
+   },
+   "cut": null
+  },
+  {
+   "id": "dc-offset-2000-on-2s-quiet-then-voice",
+   "what": "2 s of quiet then voice, every sample shifted by 2000 (then clamped)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "dc": 2000
+   },
+   "samples": 80000,
+   "fnv": "f1495c9a",
+   "reference": {
+    "onset_ms": null,
+    "frames": 250,
+    "floor_db": -24.29444371607169,
+    "threshold_db": -9.29444371607169,
+    "margin_db": 8.86357338785825
+   },
+   "cut": null
+  },
+  {
+   "id": "dc-offset--400-on-2s-quiet-then-voice",
+   "what": "2 s of quiet then voice, every sample shifted by -400 (then clamped)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "dc": -400
+   },
+   "samples": 80000,
+   "fnv": "44f09ab6",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -38.27901480994212,
+    "threshold_db": -23.27901480994212,
+    "margin_db": 2.6632279009008712
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-clipped-at-32767",
+   "what": "1 s quiet then a loud voice at -3 dBFS at 4x gain: most of the burst samples sit at +-32767",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 105216,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -3,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "gainQ8": 1024
+   },
+   "samples": 64000,
+   "fnv": "8f6b1d37",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -48.01911901480203,
+    "threshold_db": -33.01911901480203,
+    "margin_db": 14.369446410545088
+   },
+   "cut": null
+  },
+  {
+   "id": "everything-at-10x-gain-clipped",
+   "what": "2 s of quiet, then voice, all at 10x gain",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "gainQ8": 2560
+   },
+   "samples": 80000,
+   "fnv": "1eeaa640",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 250,
+    "floor_db": -40.14752396188053,
+    "threshold_db": -25.14752396188053,
+    "margin_db": 14.282241489975256
+   },
+   "cut": null
+  },
+  {
+   "id": "square-wave-voice",
+   "what": "1 s of quiet then a voice at 100x gain: a clipped square wave",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": {
+    "gainQ8": 25600
+   },
+   "samples": 64000,
+   "fnv": "acfc6fa0",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -20.060319116151238,
+    "threshold_db": -5.060319116151238,
+    "margin_db": 4.835889921940506
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-1-samples-after-one-second",
+   "what": "the voice starts 1 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16001,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64001,
+   "fnv": "0c747e58",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.04881536123738,
+    "threshold_db": -45.04881536123738,
+    "margin_db": 0.12580089607227052
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-2-samples-after-one-second",
+   "what": "the voice starts 2 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16002,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64002,
+   "fnv": "8e12fa2a",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.04881536123738,
+    "threshold_db": -45.04881536123738,
+    "margin_db": 0.8679184073373634
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-3-samples-after-one-second",
+   "what": "the voice starts 3 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16003,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64003,
+   "fnv": "2908471b",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.04881536123738,
+    "threshold_db": -45.04881536123738,
+    "margin_db": 0.23736025833925822
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-100-samples-after-one-second",
+   "what": "the voice starts 100 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16100,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64100,
+   "fnv": "c863d7fb",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.04881536123738,
+    "threshold_db": -45.04881536123738,
+    "margin_db": 14.380946320145163
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-319-samples-after-one-second",
+   "what": "the voice starts 319 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16319,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64319,
+   "fnv": "0b82f7d3",
+   "reference": {
+    "onset_ms": 1000,
+    "frames": 200,
+    "floor_db": -60.04881536123738,
+    "threshold_db": -45.04881536123738,
+    "margin_db": 0.2577240762611197
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-321-samples-after-one-second",
+   "what": "the voice starts 321 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16321,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64321,
+   "fnv": "0e21eeb1",
+   "reference": {
+    "onset_ms": 1020,
+    "frames": 201,
+    "floor_db": -60.06733288290097,
+    "threshold_db": -45.06733288290097,
+    "margin_db": 0.6985856046853982
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-639-samples-after-one-second",
+   "what": "the voice starts 639 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16639,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64639,
+   "fnv": "b1620c13",
+   "reference": {
+    "onset_ms": 1020,
+    "frames": 201,
+    "floor_db": -60.06733288290097,
+    "threshold_db": -45.06733288290097,
+    "margin_db": 1.007678432953682
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-starts-641-samples-after-one-second",
+   "what": "the voice starts 641 samples after 1.000 s (the frame hop is 320 samples)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16641,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 64641,
+   "fnv": "a1c799e7",
+   "reference": {
+    "onset_ms": 1040,
+    "frames": 202,
+    "floor_db": -60.11056343071414,
+    "threshold_db": -45.11056343071414,
+    "margin_db": 0.11207924476381947
+   },
+   "cut": null
+  },
+  {
+   "id": "voice-at-8-seconds-sample-exact",
+   "what": "400 frames of quiet then the voice: a hop of 319 or 321 samples would move this onset by a frame",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 128017,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 48000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 176017,
+   "fnv": "e6aebacb",
+   "reference": {
+    "onset_ms": 8000,
+    "frames": 550,
+    "floor_db": -60.206665373154195,
+    "threshold_db": -45.206665373154195,
+    "margin_db": 2.808797809846567
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-8000-quiet-1.5s-then-voice",
+   "what": "the same program at 8000 Hz (hop 160 samples)",
+   "rate": 8000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 12000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 24000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 36000,
+   "fnv": "19f0f4e4",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.193718069431746,
+    "threshold_db": -45.193718069431746,
+    "margin_db": 13.938028771894544
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-11025-quiet-1.5s-then-voice",
+   "what": "the same program at 11025 Hz (hop 220 samples)",
+   "rate": 11025,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 16538,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 33075,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 49613,
+   "fnv": "7a575ed4",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.190284848766076,
+    "threshold_db": -45.190284848766076,
+    "margin_db": 13.879451868582272
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-22050-quiet-1.5s-then-voice",
+   "what": "the same program at 22050 Hz (hop 441 samples)",
+   "rate": 22050,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 33075,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 66150,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 99225,
+   "fnv": "db33d77c",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.11421412024149,
+    "threshold_db": -45.11421412024149,
+    "margin_db": 14.430828591895406
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-44100-quiet-1.5s-then-voice",
+   "what": "the same program at 44100 Hz (hop 882 samples)",
+   "rate": 44100,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 66150,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 132300,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 198450,
+   "fnv": "2217cd93",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.04831484292495,
+    "threshold_db": -45.04831484292495,
+    "margin_db": 14.628031475374861
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-48000-quiet-1.5s-then-voice",
+   "what": "the same program at 48000 Hz (hop 960 samples)",
+   "rate": 48000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 72000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 144000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 216000,
+   "fnv": "f3a6e939",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 225,
+    "floor_db": -60.06062742573428,
+    "threshold_db": -45.06062742573428,
+    "margin_db": 14.553945014483588
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-11025-quiet-0.9s-then-voice",
+   "what": "0.9 s of quiet then voice at 11025 Hz, where 20 ms is 220.5 samples (the reference truncates to 220)",
+   "rate": 11025,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 9923,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 33075,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 42998,
+   "fnv": "a5bcf54f",
+   "reference": {
+    "onset_ms": 900,
+    "frames": 195,
+    "floor_db": -60.09249452949107,
+    "threshold_db": -45.09249452949107,
+    "margin_db": 14.426843378010183
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-11025-quiet-2.7s-then-voice",
+   "what": "2.7 s of quiet then voice at 11025 Hz, where 20 ms is 220.5 samples (the reference truncates to 220)",
+   "rate": 11025,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 29768,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 33075,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 62843,
+   "fnv": "f18aedcb",
+   "reference": {
+    "onset_ms": 2700,
+    "frames": 285,
+    "floor_db": -60.236111388957376,
+    "threshold_db": -45.236111388957376,
+    "margin_db": 13.826567202002806
+   },
+   "cut": null
+  },
+  {
+   "id": "rate-11025-quiet-6s-then-voice",
+   "what": "6 s of quiet then voice at 11025 Hz, where 20 ms is 220.5 samples (the reference truncates to 220)",
+   "rate": 11025,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 66150,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 33075,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 99225,
+   "fnv": "8d304d45",
+   "reference": {
+    "onset_ms": 6000,
+    "frames": 451,
+    "floor_db": -60.248770297871765,
+    "threshold_db": -45.248770297871765,
+    "margin_db": 3.2062392450024646
+   },
+   "cut": null
+  },
+  {
+   "id": "longer-than-the-scan-voice-after-31s",
+   "what": "31 s of quiet and then 9 s of voice: the first 30 s hold no voice",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 496000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 144000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 640000,
+   "fnv": "8b824b7d",
+   "reference": {
+    "onset_ms": 31000,
+    "frames": 2000,
+    "floor_db": -60.23614492178453,
+    "threshold_db": -45.23614492178453,
+    "margin_db": 14.019622102085918
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "c2ed1d9e",
+    "reference": {
+     "onset_ms": null,
+     "frames": 1500,
+     "floor_db": -60.2558669052979,
+     "threshold_db": -45.2558669052979,
+     "margin_db": 13.999900118572548
+    }
+   }
+  },
+  {
+   "id": "longer-than-the-scan-floor-comes-from-30s",
+   "what": "1.2 s of quiet, 28 s of steady voice, 10.8 s of quiet: the quiet tenth of the whole clip is quiet, of the first 30 s it is not",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 19200,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 448000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 0,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    },
+    {
+     "kind": "noise",
+     "n": 172800,
+     "amp": 57,
+     "db": -60
+    }
+   ],
+   "post": null,
+   "samples": 640000,
+   "fnv": "943fdf8c",
+   "reference": {
+    "onset_ms": 1200,
+    "frames": 2000,
+    "floor_db": -60.055339048076966,
+    "threshold_db": -45.055339048076966,
+    "margin_db": 14.277493399314011
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "057a348b",
+    "reference": {
+     "onset_ms": null,
+     "frames": 1500,
+     "floor_db": -20.42387650414909,
+     "threshold_db": -5.423876504149089,
+     "margin_db": 13.95701503866303
+    }
+   }
+  },
+  {
+   "id": "longer-than-the-scan-voice-starts-29.94s",
+   "what": "the voice starts at 29.94 s: exactly three frames fit in the first 30 s",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 479040,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 80000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 559040,
+   "fnv": "dc33f314",
+   "reference": {
+    "onset_ms": 29940,
+    "frames": 1747,
+    "floor_db": -60.24095213712792,
+    "threshold_db": -45.24095213712792,
+    "margin_db": 14.014814886742528
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "eda5ecac",
+    "reference": {
+     "onset_ms": 29940,
+     "frames": 1500,
+     "floor_db": -60.25556528010992,
+     "threshold_db": -45.25556528010992,
+     "margin_db": 14.000201743760528
+    }
+   }
+  },
+  {
+   "id": "longer-than-the-scan-voice-starts-29.98s",
+   "what": "the voice starts at 29.98 s: one frame fits in the first 30 s",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 479680,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 80000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 559680,
+   "fnv": "594b4ff2",
+   "reference": {
+    "onset_ms": 29980,
+    "frames": 1749,
+    "floor_db": -60.24236857519253,
+    "threshold_db": -45.24236857519253,
+    "margin_db": 14.013398448677918
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "c673e160",
+    "reference": {
+     "onset_ms": null,
+     "frames": 1500,
+     "floor_db": -60.2558669052979,
+     "threshold_db": -45.2558669052979,
+     "margin_db": 13.999900118572548
+    }
+   }
+  },
+  {
+   "id": "exactly-30s",
+   "what": "1.5 s of quiet and 28.5 s of voice: 480000 samples, the whole clip is scanned",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 24000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 456000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 480000,
+   "fnv": "414104c3",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 1500,
+    "floor_db": -60.03287399068097,
+    "threshold_db": -45.03287399068097,
+    "margin_db": 14.27280333629745
+   },
+   "cut": null
+  },
+  {
+   "id": "30s-and-one-sample",
+   "what": "the same with one more sample: the extra sample is not scanned",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 24000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 456001,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 480001,
+   "fnv": "c6eaa312",
+   "reference": {
+    "onset_ms": 1500,
+    "frames": 1500,
+    "floor_db": -60.03287399068097,
+    "threshold_db": -45.03287399068097,
+    "margin_db": 14.27280333629745
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "414104c3",
+    "reference": {
+     "onset_ms": 1500,
+     "frames": 1500,
+     "floor_db": -60.03287399068097,
+     "threshold_db": -45.03287399068097,
+     "margin_db": 14.27280333629745
+    }
+   }
+  },
+  {
+   "id": "a-minute-quiet-2s-then-voice",
+   "what": "2 s of quiet and then 58 s of voice (twice the scan)",
+   "rate": 16000,
+   "seed": 1,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 32000,
+     "amp": 57,
+     "db": -60
+    },
+    {
+     "kind": "voice",
+     "n": 928000,
+     "amp": 14862,
+     "gapAmp": 57,
+     "burstMs": 180,
+     "gapMs": 60,
+     "pitch": 140,
+     "db": -20,
+     "gapDb": -60
+    }
+   ],
+   "post": null,
+   "samples": 960000,
+   "fnv": "b530f087",
+   "reference": {
+    "onset_ms": 2000,
+    "frames": 3000,
+    "floor_db": -60.038829402042744,
+    "threshold_db": -45.038829402042744,
+    "margin_db": 14.216937621827704
+   },
+   "cut": {
+    "samples": 480000,
+    "fnv": "835d93de",
+    "reference": {
+     "onset_ms": 2000,
+     "frames": 1500,
+     "floor_db": -60.0586008802947,
+     "threshold_db": -45.0586008802947,
+     "margin_db": 14.19716614357575
+    }
+   }
+  },
+  {
+   "id": "kill-floor-is-the-minimum",
+   "what": "found by a seeded search: a clip whose reference answer differs from the slip `floor-is-the-minimum` (attempt 11)",
+   "rate": 16000,
+   "seed": 1219304706,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 959,
+     "amp": 1774,
+     "db": -30.1
+    },
+    {
+     "kind": "zero",
+     "n": 640
+    },
+    {
+     "kind": "tone",
+     "n": 1280,
+     "amp": 12561,
+     "pitch": 440,
+     "db": -13.1
+    },
+    {
+     "kind": "tone",
+     "n": 4160,
+     "amp": 1493,
+     "pitch": 140,
+     "db": -31.6
+    },
+    {
+     "kind": "noise",
+     "n": 9017,
+     "amp": 5236,
+     "db": -20.7
+    }
+   ],
+   "post": null,
+   "samples": 16056,
+   "fnv": "c00c7c00",
+   "reference": {
+    "onset_ms": 100,
+    "frames": 50,
+    "floor_db": -31.745159347999113,
+    "threshold_db": -16.745159347999113,
+    "margin_db": 3.559446999308019
+   },
+   "cut": null
+  },
+  {
+   "id": "kill-floor-p5",
+   "what": "found by a seeded search: a clip whose reference answer differs from the slip `floor-p5` (attempt 46)",
+   "rate": 16000,
+   "seed": 2053955686,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 320,
+     "amp": 6982,
+     "db": -18.2
+    },
+    {
+     "kind": "noise",
+     "n": 4800,
+     "amp": 10210,
+     "db": -14.9
+    },
+    {
+     "kind": "tone",
+     "n": 959,
+     "amp": 54,
+     "pitch": 140,
+     "db": -60.5
+    },
+    {
+     "kind": "noise",
+     "n": 1280,
+     "amp": 6442,
+     "db": -18.9
+    },
+    {
+     "kind": "noise",
+     "n": 3200,
+     "amp": 4207,
+     "db": -22.6
+    }
+   ],
+   "post": null,
+   "samples": 10559,
+   "fnv": "c11e19f2",
+   "reference": {
+    "onset_ms": null,
+    "frames": 32,
+    "floor_db": -22.824204248350174,
+    "threshold_db": -7.824204248350174,
+    "margin_db": 6.738616657919184
+   },
+   "cut": null
+  },
+  {
+   "id": "kill-percentile-lower",
+   "what": "found by a seeded search: a clip whose reference answer differs from the slip `percentile-lower` (attempt 83)",
+   "rate": 16000,
+   "seed": 97895085,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 640,
+     "amp": 421,
+     "db": -42.6
+    },
+    {
+     "kind": "noise",
+     "n": 4799,
+     "amp": 9419,
+     "db": -15.6
+    }
+   ],
+   "post": null,
+   "samples": 5439,
+   "fnv": "0b2308f9",
+   "reference": {
+    "onset_ms": null,
+    "frames": 16,
+    "floor_db": -29.077408827162124,
+    "threshold_db": -14.077408827162124,
+    "margin_db": 0.9689288998022985
+   },
+   "cut": null
+  },
+  {
+   "id": "kill-percentile-nearest",
+   "what": "found by a seeded search: a clip whose reference answer differs from the slip `percentile-nearest` (attempt 582)",
+   "rate": 16000,
+   "seed": 688812097,
+   "segments": [
+    {
+     "kind": "tone",
+     "n": 9017,
+     "amp": 11195,
+     "pitch": 140,
+     "db": -14.1
+    },
+    {
+     "kind": "noise",
+     "n": 1600,
+     "amp": 1754,
+     "db": -30.2
+    }
+   ],
+   "post": null,
+   "samples": 10617,
+   "fnv": "65d9b278",
+   "reference": {
+    "onset_ms": null,
+    "frames": 33,
+    "floor_db": -28.06137857638085,
+    "threshold_db": -13.06137857638085,
+    "margin_db": 0.7833791353126305
+   },
+   "cut": null
+  },
+  {
+   "id": "kill-percentile-midpoint",
+   "what": "found by a seeded search: a clip whose reference answer differs from the slip `percentile-midpoint` (attempt 77)",
+   "rate": 16000,
+   "seed": 1320168550,
+   "segments": [
+    {
+     "kind": "noise",
+     "n": 3520,
+     "amp": 52,
+     "db": -60.8
+    },
+    {
+     "kind": "noise",
+     "n": 1919,
+     "amp": 216,
+     "db": -48.4
+    },
+    {
+     "kind": "noise",
+     "n": 8960,
+     "amp": 13459,
+     "db": -12.5
+    },
+    {
+     "kind": "tone",
+     "n": 2240,
+     "amp": 11,
+     "pitch": 220,
+     "db": -74.6
+    },
+    {
+     "kind": "noise",
+     "n": 5759,
+     "amp": 366,
+     "db": -43.8
+    }
+   ],
+   "post": null,
+   "samples": 22398,
+   "fnv": "71b8ca55",
+   "reference": {
+    "onset_ms": 320,
+    "frames": 69,
+    "floor_db": -62.24548440928582,
+    "threshold_db": -47.24548440928582,
+    "margin_db": 0.9048593752118919
+   },
+   "cut": null
+  }
+ ],
+ "ties": [
+  {
+   "id": "tie-absolute-floor-eq",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.0
+    },
+    {
+     "count": 3,
+     "first": 0.05656853966649661
+    },
+    {
+     "count": 10,
+     "first": 0.0
+    }
+   ],
+   "expect": "none",
+   "what": "three frames whose level is EXACTLY the threshold: `>` does not take them, `>=` does (the -50 dBFS floor of a clip of digital silence)",
+   "reference": {
+    "onset_ms": null,
+    "frames": 53,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 0.0
+   },
+   "ge_would_answer": 800,
+   "tolerance_would_answer": null
+  },
+  {
+   "id": "tie-relative-threshold-eq",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.01788853487572417
+    },
+    {
+     "count": 3,
+     "first": 0.10059467278409337
+    },
+    {
+     "count": 10,
+     "first": 0.01788853487572417
+    }
+   ],
+   "expect": "none",
+   "what": "three frames whose level is EXACTLY the threshold: `>` does not take them, `>=` does (15 dB over a quiet of exactly -60 dBFS)",
+   "reference": {
+    "onset_ms": null,
+    "frames": 53,
+    "floor_db": -60.0,
+    "threshold_db": -45.0,
+    "margin_db": 0.0
+   },
+   "ge_would_answer": 800,
+   "tolerance_would_answer": null
+  },
+  {
+   "id": "tie-absolute-floor-up",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.0
+    },
+    {
+     "count": 3,
+     "first": 0.056568539666496664
+    },
+    {
+     "count": 10,
+     "first": 0.0
+    }
+   ],
+   "expect": "at",
+   "what": "three frames one level step ABOVE the threshold: `>` takes them, a tolerance does not (the -50 dBFS floor of a clip of digital silence)",
+   "reference": {
+    "onset_ms": 800,
+    "frames": 53,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 7.105427357601002e-15
+   },
+   "ge_would_answer": 800,
+   "tolerance_would_answer": null
+  },
+  {
+   "id": "tie-relative-threshold-up",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.01788853487572417
+    },
+    {
+     "count": 3,
+     "first": 0.10059467278409347
+    },
+    {
+     "count": 10,
+     "first": 0.01788853487572417
+    }
+   ],
+   "expect": "at",
+   "what": "three frames one level step ABOVE the threshold: `>` takes them, a tolerance does not (15 dB over a quiet of exactly -60 dBFS)",
+   "reference": {
+    "onset_ms": 800,
+    "frames": 53,
+    "floor_db": -60.0,
+    "threshold_db": -45.0,
+    "margin_db": 7.105427357601002e-15
+   },
+   "ge_would_answer": 800,
+   "tolerance_would_answer": null
+  },
+  {
+   "id": "tie-absolute-floor-dn",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.0
+    },
+    {
+     "count": 3,
+     "first": 0.05656853966649655
+    },
+    {
+     "count": 10,
+     "first": 0.0
+    }
+   ],
+   "expect": "none",
+   "what": "three frames one level step below the threshold: neither takes them (the -50 dBFS floor of a clip of digital silence)",
+   "reference": {
+    "onset_ms": null,
+    "frames": 53,
+    "floor_db": -120.0,
+    "threshold_db": -50.0,
+    "margin_db": 7.105427357601002e-15
+   },
+   "ge_would_answer": null,
+   "tolerance_would_answer": null
+  },
+  {
+   "id": "tie-relative-threshold-dn",
+   "rate": 16000,
+   "frames": [
+    {
+     "count": 40,
+     "first": 0.01788853487572417
+    },
+    {
+     "count": 3,
+     "first": 0.10059467278409326
+    },
+    {
+     "count": 10,
+     "first": 0.01788853487572417
+    }
+   ],
+   "expect": "none",
+   "what": "three frames one level step below the threshold: neither takes them (15 dB over a quiet of exactly -60 dBFS)",
+   "reference": {
+    "onset_ms": null,
+    "frames": 53,
+    "floor_db": -60.0,
+    "threshold_db": -45.0,
+    "margin_db": 7.105427357601002e-15
+   },
+   "ge_would_answer": null,
+   "tolerance_would_answer": null
+  }
+ ],
+ "mutants": {
+  "ge-instead-of-gt": [
+   "tie-absolute-floor-eq",
+   "tie-relative-threshold-eq"
+  ],
+  "epsilon-tolerance-on-gt": [
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ],
+  "two-frames-in-a-row": [
+   "one-quiet-frame-then-two-loud",
+   "a-partial-tail-would-complete-the-run",
+   "voice-in-the-last-two-frames",
+   "two-loud-frames",
+   "a-gap-of-one-quiet-frame-splits-the-run",
+   "a-later-run-after-a-split",
+   "click-of-2-frames-then-2s-near-silence-then-voice"
+  ],
+  "four-frames-in-a-row": [
+   "one-quiet-frame-then-three-loud",
+   "voice-in-the-last-three-frames",
+   "three-loud-frames",
+   "a-later-run-after-a-split",
+   "click-of-3-frames-then-2s-near-silence-then-voice",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ],
+  "floor-is-the-median": [
+   "quiet-0s-then-voice",
+   "quiet-0.5s-then-voice",
+   "quiet-0.9s-then-voice",
+   "quiet-1s-then-voice",
+   "quiet-1.02s-then-voice",
+   "quiet-1.1s-then-voice",
+   "quiet-1.5s-then-voice",
+   "quiet-0.9s-then-voice-seed-7",
+   "quiet-1s-then-voice-seed-7",
+   "quiet-1.02s-then-voice-seed-7",
+   "quiet-1.1s-then-voice-seed-7",
+   "quiet-0.9s-then-voice-seed-12345",
+   "quiet-1s-then-voice-seed-12345",
+   "quiet-1.02s-then-voice-seed-12345",
+   "quiet-1.1s-then-voice-seed-12345",
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "quiet-1s-at-60-below-then-voice-at-40-below",
+   "quiet-1s-at-60-below-then-voice-at-30-below",
+   "quiet-1s-at-60-below-then-voice-at-10-below",
+   "quiet-1s-at-60-below-then-voice-at-3-below",
+   "quiet-1s-at-90-below-then-voice-at-48-below",
+   "steady-voice-after-1s-quiet",
+   "one-quiet-frame-then-three-loud",
+   "hiss-minus-40-for-2s-then-voice",
+   "steady-tone-minus-30-for-2s-then-voice",
+   "voice-clipped-at-32767",
+   "square-wave-voice",
+   "voice-starts-1-samples-after-one-second",
+   "voice-starts-2-samples-after-one-second",
+   "voice-starts-3-samples-after-one-second",
+   "voice-starts-100-samples-after-one-second",
+   "voice-starts-319-samples-after-one-second",
+   "voice-starts-321-samples-after-one-second",
+   "voice-starts-639-samples-after-one-second",
+   "voice-starts-641-samples-after-one-second",
+   "rate-8000-quiet-1.5s-then-voice",
+   "rate-11025-quiet-1.5s-then-voice",
+   "rate-22050-quiet-1.5s-then-voice",
+   "rate-44100-quiet-1.5s-then-voice",
+   "rate-48000-quiet-1.5s-then-voice",
+   "rate-11025-quiet-0.9s-then-voice",
+   "longer-than-the-scan-floor-comes-from-30s",
+   "exactly-30s",
+   "30s-and-one-sample",
+   "a-minute-quiet-2s-then-voice",
+   "kill-floor-is-the-minimum",
+   "kill-percentile-midpoint"
+  ],
+  "floor-is-the-minimum": [
+   "kill-floor-is-the-minimum",
+   "kill-floor-p5",
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint"
+  ],
+  "floor-p5": [
+   "kill-floor-p5",
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint"
+  ],
+  "floor-p15": [
+   "hiss-minus-40-for-2s-then-voice",
+   "steady-tone-minus-30-for-2s-then-voice",
+   "kill-percentile-midpoint"
+  ],
+  "floor-p25": [
+   "quiet-0s-then-voice",
+   "steady-voice-after-1s-quiet",
+   "hiss-minus-40-for-2s-then-voice",
+   "steady-tone-minus-30-for-2s-then-voice",
+   "kill-percentile-midpoint"
+  ],
+  "percentile-lower": [
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint"
+  ],
+  "percentile-higher": [
+   "one-quiet-frame-then-three-loud",
+   "kill-percentile-midpoint"
+  ],
+  "percentile-nearest": [
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint"
+  ],
+  "percentile-midpoint": [
+   "kill-percentile-midpoint"
+  ],
+  "min-db-minus-40": [
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "quiet-1s-at-60-below-then-voice-at-40-below",
+   "quiet-1s-at-90-below-then-voice-at-48-below",
+   "hiss-minus-40-for-2s-then-voice",
+   "voice-starts-319-samples-after-one-second",
+   "kill-percentile-midpoint",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ],
+  "min-db-minus-60": [
+   "quiet-1s-at-90-below-then-voice-at-55-below",
+   "quiet-1s-at-90-below-then-voice-at-52-below",
+   "tie-absolute-floor-eq",
+   "tie-absolute-floor-dn"
+  ],
+  "min-db-minus-55": [
+   "quiet-1s-at-90-below-then-voice-at-55-below",
+   "quiet-1s-at-90-below-then-voice-at-52-below",
+   "tie-absolute-floor-eq",
+   "tie-absolute-floor-dn"
+  ],
+  "min-db-minus-45": [
+   "quiet-1s-at-90-below-then-voice-at-48-below",
+   "kill-percentile-midpoint",
+   "tie-absolute-floor-up"
+  ],
+  "above-10-db": [
+   "quiet-1s-at-60-below-then-voice-at-48-below",
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint",
+   "tie-relative-threshold-eq",
+   "tie-relative-threshold-dn"
+  ],
+  "above-12-db": [
+   "quiet-1s-at-60-below-then-voice-at-48-below",
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint",
+   "tie-relative-threshold-eq",
+   "tie-relative-threshold-dn"
+  ],
+  "above-14-db": [
+   "tie-relative-threshold-eq",
+   "tie-relative-threshold-dn"
+  ],
+  "above-16-db": [
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "kill-percentile-midpoint",
+   "tie-relative-threshold-up"
+  ],
+  "above-18-db": [
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "dc-offset--400-on-2s-quiet-then-voice",
+   "kill-percentile-midpoint",
+   "tie-relative-threshold-up"
+  ],
+  "hop-rounded": [
+   "rate-11025-quiet-1.5s-then-voice",
+   "rate-11025-quiet-0.9s-then-voice",
+   "rate-11025-quiet-2.7s-then-voice",
+   "rate-11025-quiet-6s-then-voice"
+  ],
+  "hop-ceiled": [
+   "rate-11025-quiet-1.5s-then-voice",
+   "rate-11025-quiet-0.9s-then-voice",
+   "rate-11025-quiet-2.7s-then-voice",
+   "rate-11025-quiet-6s-then-voice"
+  ],
+  "no-epsilon-in-sqrt": [
+   "one-quiet-frame-then-three-loud",
+   "voice-in-the-last-three-frames",
+   "three-loud-frames",
+   "a-later-run-after-a-split",
+   "tie-relative-threshold-eq",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-dn"
+  ],
+  "no-sqrt-in-level": [
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "quiet-1s-at-60-below-then-voice-at-40-below",
+   "quiet-1s-at-60-below-then-voice-at-30-below",
+   "quiet-1s-at-90-below-then-voice-at-48-below",
+   "hiss-minus-40-for-2s-then-voice",
+   "steady-tone-minus-30-for-2s-then-voice",
+   "voice-starts-319-samples-after-one-second",
+   "voice-starts-639-samples-after-one-second",
+   "rate-11025-quiet-6s-then-voice",
+   "kill-floor-p5",
+   "kill-percentile-lower",
+   "kill-percentile-nearest",
+   "kill-percentile-midpoint",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ],
+  "onset-at-last-frame-of-run": [
+   "quiet-0s-then-voice",
+   "quiet-0.5s-then-voice",
+   "quiet-0.9s-then-voice",
+   "quiet-1s-then-voice",
+   "quiet-1.02s-then-voice",
+   "quiet-1.1s-then-voice",
+   "quiet-1.5s-then-voice",
+   "quiet-3s-then-voice",
+   "quiet-8s-then-voice",
+   "quiet-0.9s-then-voice-seed-7",
+   "quiet-1s-then-voice-seed-7",
+   "quiet-1.02s-then-voice-seed-7",
+   "quiet-1.1s-then-voice-seed-7",
+   "quiet-0.9s-then-voice-seed-12345",
+   "quiet-1s-then-voice-seed-12345",
+   "quiet-1.02s-then-voice-seed-12345",
+   "quiet-1.1s-then-voice-seed-12345",
+   "quiet-2s-at-45-below-then-voice",
+   "quiet-2s-at-80-below-then-voice",
+   "quiet-2s-at-100-below-then-voice",
+   "quiet-1s-at-60-below-then-voice-at-44-below",
+   "quiet-1s-at-60-below-then-voice-at-40-below",
+   "quiet-1s-at-60-below-then-voice-at-30-below",
+   "quiet-1s-at-60-below-then-voice-at-10-below",
+   "quiet-1s-at-60-below-then-voice-at-3-below",
+   "quiet-1s-at-90-below-then-voice-at-48-below",
+   "steady-voice-after-1s-quiet",
+   "one-quiet-frame-then-three-loud",
+   "voice-in-the-last-three-frames",
+   "three-loud-frames",
+   "a-later-run-after-a-split",
+   "hiss-minus-55-for-2s-then-voice",
+   "hiss-minus-40-for-2s-then-voice",
+   "steady-tone-minus-50-for-2s-then-voice",
+   "steady-tone-minus-30-for-2s-then-voice",
+   "click-of-1-frames-then-2s-near-silence-then-voice",
+   "click-of-2-frames-then-2s-near-silence-then-voice",
+   "click-of-3-frames-then-2s-near-silence-then-voice",
+   "click-of-4-frames-then-2s-near-silence-then-voice",
+   "dc-offset-20-on-2s-quiet-then-voice",
+   "dc-offset-100-on-2s-quiet-then-voice",
+   "dc-offset-400-on-2s-quiet-then-voice",
+   "dc-offset--400-on-2s-quiet-then-voice",
+   "voice-clipped-at-32767",
+   "everything-at-10x-gain-clipped",
+   "square-wave-voice",
+   "voice-starts-1-samples-after-one-second",
+   "voice-starts-2-samples-after-one-second",
+   "voice-starts-3-samples-after-one-second",
+   "voice-starts-100-samples-after-one-second",
+   "voice-starts-319-samples-after-one-second",
+   "voice-starts-321-samples-after-one-second",
+   "voice-starts-639-samples-after-one-second",
+   "voice-starts-641-samples-after-one-second",
+   "voice-at-8-seconds-sample-exact",
+   "rate-8000-quiet-1.5s-then-voice",
+   "rate-11025-quiet-1.5s-then-voice",
+   "rate-22050-quiet-1.5s-then-voice",
+   "rate-44100-quiet-1.5s-then-voice",
+   "rate-48000-quiet-1.5s-then-voice",
+   "rate-11025-quiet-0.9s-then-voice",
+   "rate-11025-quiet-2.7s-then-voice",
+   "rate-11025-quiet-6s-then-voice",
+   "longer-than-the-scan-voice-after-31s",
+   "longer-than-the-scan-floor-comes-from-30s",
+   "longer-than-the-scan-voice-starts-29.94s",
+   "longer-than-the-scan-voice-starts-29.98s",
+   "exactly-30s",
+   "30s-and-one-sample",
+   "a-minute-quiet-2s-then-voice",
+   "kill-floor-is-the-minimum",
+   "kill-percentile-midpoint",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ],
+  "partial-last-frame-counted": [
+   "a-partial-tail-would-complete-the-run",
+   "kill-percentile-nearest"
+  ],
+  "ms-from-real-time": [
+   "rate-11025-quiet-1.5s-then-voice",
+   "rate-11025-quiet-0.9s-then-voice",
+   "rate-11025-quiet-2.7s-then-voice",
+   "rate-11025-quiet-6s-then-voice"
+  ],
+  "mean-abs-not-rms": [
+   "voice-starts-319-samples-after-one-second",
+   "voice-starts-639-samples-after-one-second",
+   "tie-absolute-floor-up",
+   "tie-relative-threshold-up"
+  ]
+ }
+}
