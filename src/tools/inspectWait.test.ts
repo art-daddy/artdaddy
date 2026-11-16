@@ -18,11 +18,13 @@ vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fo
 
 import type { ClientToolContext } from "./context";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { __resetHostInfo } from "../platform/host";
 import { buildTranscript } from "./inspect";
 import { clearModelDownload } from "../store/modelDownload";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { cancelSpeechJob, useSpeechJobs } from "../store/speechJobs";
 import { cpuOnlyNow, CPU_ONLY_HOLD_MS } from "./speechBackend";
+import { MODEL_MANIFEST } from "./modelManifest";
 import { TRANSCRIPT_FAILURE_REASONS, type TranscriptFailureReason } from "./speechFailure";
 import { readPace } from "./speechPace";
 import { transcriptCacheSlot, WHISPER_MODELS, whisperModelPath } from "./transcribe";
@@ -202,13 +204,22 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
+/** The length of the manifest file a place is asked for: a speech-model origin serves the file it was asked for, whichever file the PC needs
+ *  (the full-size one, or the smaller one that a PC known to transcribe on its processor, every Linux install included, fetches). */
+const lengthOf = (url: string): number => {
+  const entry = Object.values(MODEL_MANIFEST).find((e) => url.endsWith(`/${e.file}`));
+  if (!entry)
+    throw new Error(`the stalled origin was asked for a file the manifest does not name: ${url}`);
+  return entry.bytes;
+};
+
 /** A speech-model origin that accepts the request and never sends a byte. */
 function stalledOrigin() {
-  const fetchMock = vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+  const fetchMock = vi.fn(async (url: string, init?: { signal?: AbortSignal }) => {
     return {
       ok: true,
       status: 200,
-      headers: new Headers({ "content-length": String(WHISPER_MODELS.small.bytes) }),
+      headers: new Headers({ "content-length": String(lengthOf(String(url))) }),
       body: {
         getReader: () => ({
           read: () =>
@@ -396,7 +407,28 @@ describe("a look that has to wait for a transcript", () => {
   });
 });
 
-describe("a look that has to wait for the speech model", () => {
+const WINDOWS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+const LINUX_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+/** The PCs a look can end up waiting on. A PC with no run history is a chip PC on Windows (it fetches the full-size file) and a
+ *  processor PC on Linux, where the engine has no chip (it fetches the smaller file): the look's bound must hold for either
+ *  download, so every test below runs on both, with the host pinned in both directions (the test host's own default is Linux). */
+const WAITING_PCS = [
+  { pc: "a Windows PC with no run history", ua: WINDOWS_UA, key: "small" },
+  { pc: "a Linux PC with no run history", ua: LINUX_UA, key: "small_q8_0" },
+] as const;
+
+describe.each(WAITING_PCS)("a look that has to wait for the speech model on $pc", ({ ua, key }) => {
+  beforeEach(() => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
+    __resetHostInfo();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    __resetHostInfo();
+  });
+
   it("answers at the bound while the download is stalled, and says so", async () => {
     const origin = stalledOrigin();
     vi.stubGlobal("fetch", origin.fetch);
@@ -412,6 +444,10 @@ describe("a look that has to wait for the speech model", () => {
     expect(seen.result.note).toMatch(/The speech model is downloading/);
     expect(seen.result.note).toMatch(/The words start after that/);
     expect(origin.requests()).toBe(1);
+    expect(
+      origin.fetch.mock.calls[0][0],
+      "the look waits for the file this PC needs, so the pinned host took effect",
+    ).toContain(MODEL_MANIFEST[key].file);
     expect(engineRuns(), "nothing is transcribed before the model is there").toBe(0);
   });
 
