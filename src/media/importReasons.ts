@@ -33,8 +33,12 @@ const OS_REFUSALS: readonly [RegExp, ImportReason][] = [
  *  against, never copied: nothing of the message survives. */
 export function importReasonOf(error: unknown): ImportReason {
   if (error instanceof ImportRefusal) return error.reason;
-  const text = error instanceof Error ? error.message : String(error ?? "");
-  for (const [pattern, reason] of OS_REFUSALS) if (pattern.test(text)) return reason;
+  try {
+    const text = error instanceof Error ? error.message : String(error ?? "");
+    for (const [pattern, reason] of OS_REFUSALS) if (pattern.test(text)) return reason;
+  } catch {
+    // a thrown value that cannot be read as text (an object whose toString is not a function, one without a prototype) says nothing: `other`
+  }
   return "other";
 }
 

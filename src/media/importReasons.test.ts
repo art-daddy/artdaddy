@@ -72,6 +72,22 @@ describe("importReasonOf", () => {
     expect(importReasonOf(undefined)).toBe("other");
   });
 
+  it("never throws for a thrown value that cannot be read as text: an object whose toString is not a function, one without a prototype, a toString that throws, an error whose message is one", () => {
+    // the property above found `{ toString: false }` in the real pre-push run of 16 Nov (seed 1859805167): `String(value)` throws "Cannot convert object to primitive value"
+    expect(importReasonOf({ toString: false })).toBe("other");
+    expect(importReasonOf(Object.create(null))).toBe("other");
+    expect(
+      importReasonOf({
+        toString() {
+          throw new Error("no text");
+        },
+      }),
+    ).toBe("other");
+    expect(importReasonOf(Object.assign(new Error("x"), { message: { toString: false } }))).toBe(
+      "other",
+    );
+  });
+
   it("nothing of the message survives: the answer is the same word whatever name is in the text", () => {
     const named = importReasonOf(
       new Error("'My Private Holiday.mp4': Access is denied. (os error 5)"),
