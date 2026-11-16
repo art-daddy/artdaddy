@@ -9,7 +9,15 @@ import { describe, expect, it } from "vitest";
 
 import { backendsOf, MODEL_MANIFEST } from "./modelManifest";
 import { decodeArgs } from "./speechDecoding";
-import { assertLaunchArgv, launchPlan, modelKeyOfPath, ModelPairingError } from "./speechModel";
+import {
+  assertLaunchArgv,
+  launchPlan,
+  modelKeyOfPath,
+  ModelPairingError,
+  planModel,
+} from "./speechModel";
+import type { SpeechBackend } from "./speechPace";
+import { WHISPER_LANGUAGES } from "./whisperLanguages";
 
 // Written out on purpose: the module may not know a file or a key.
 const BASELINE_KEY = "small";
@@ -543,6 +551,49 @@ describe("fuzz: arguments in any shape", () => {
           expect(argv.includes("-ng") || argv.includes("--no-gpu")).toBe(true);
       }),
       { numRuns: 1500 },
+    );
+  });
+});
+
+// The plan is made at one moment and the engine is launched seconds later, and the graphics chip's hold can start or
+// run out in between. So planModel and launchPlan are each asked on their own state, and the 8-bit file must still
+// never reach the chip.
+describe("plan, then launch, as the app does them", () => {
+  const language = fc.oneof(
+    fc.constantFrom(...Object.keys(WHISPER_LANGUAGES)),
+    fc.string({ maxLength: 12 }),
+    fc.constant(null),
+  );
+  const installed = fc.subarray(KEYS);
+  const backend = fc.constantFrom<SpeechBackend>("gpu", "cpu");
+
+  it("spawns the 8-bit file with -ng and never without, whatever the backend was at the plan and is at the launch", () => {
+    fc.assert(
+      fc.property(
+        backend,
+        language,
+        installed,
+        fc.boolean(),
+        fc.boolean(),
+        (planned, lang, have, cpuOnlyNow, switchOn) => {
+          const plan = planModel({ backend: planned, language: lang, installed: have }, switchOn);
+          const args = appArgv(`C:\\models\\${MODEL_MANIFEST[plan.key].file}`, plan.beam);
+          const launch = launchPlan(args, cpuOnlyNow);
+          const argv = spawned(args, launch);
+          expect(() => assertLaunchArgv(argv)).not.toThrow();
+          if (plan.key === SMALLER_KEY) {
+            expect(argv).toContain("-ng");
+            expect(launch.cpuOnly).toBe(true);
+          } else {
+            // Today's file goes where the launch says, as before this existed.
+            expect(launch.cpuOnly).toBe(cpuOnlyNow);
+            expect(argv.includes("-ng")).toBe(cpuOnlyNow);
+          }
+          // On the graphics chip the plan is today's file.
+          if (planned === "gpu") expect(plan.key).toBe(BASELINE_KEY);
+        },
+      ),
+      { numRuns: 500 },
     );
   });
 });

@@ -84,9 +84,9 @@ export function clearedLanguages(rows: readonly GateRow[], settingId: string): R
 }
 
 /** The path a setting was measured on: the chip unless it says the processor. A setting that names any other path
- *  is on none, so it clears nothing anywhere. */
-export function measuredOn(setting: Pick<GateSetting, "backend">): SpeechBackend | null {
-  const where: unknown = setting.backend;
+ *  is on none, so it clears nothing anywhere. What the file holds is read as it is, not as the type says. */
+export function measuredOn(setting: { readonly backend?: unknown }): SpeechBackend | null {
+  const where = setting.backend;
   return where === undefined || where === "gpu" ? "gpu" : where === "cpu" ? "cpu" : null;
 }
 
