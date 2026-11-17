@@ -44,12 +44,14 @@ export function within(cells: readonly AccuracyCell[], factor: number = BAR.fact
 
 /** The verdict over a table. A cell is judged only when it is long enough (`minVideoS`) and has a measurement; an estimate that is not a positive number COUNTS AS A MISS (no line is not an accurate
  *  line), it is never dropped. The measures that decide: (1) the share within 2 times over the judged cells; (2) the same over the weak profiles alone; (3) the share whose measured time lies inside the shown
- *  range (only when the cells carry one); (4) no cell under-estimated by 4 times or more that did not say "could take much longer". `insufficient` (never `pass`) when a measure has too few cells to stand on. */
+ *  range; (4) no cell under-estimated by 4 times or more that did not say "could take much longer". `insufficient` (never `pass`) when a measure has too few cells to stand on, and that includes a measure the
+ *  table has NO cells for: a table without weak profiles has not been judged on the weak PCs, and one without a shown range has not been judged on its range. `rangeNotShown` waives the range measure alone, for
+ *  an estimate that never shows one (0.27.0's own); the weak measure is never waived. */
 export function compare(
   cells: readonly AccuracyCell[],
-  options: { minVideoS?: number; bar?: typeof BAR } = {},
+  options: { minVideoS?: number; bar?: typeof BAR; rangeNotShown?: boolean } = {},
 ): Verdict {
-  const { minVideoS = 20, bar = BAR } = options;
+  const { minVideoS = 20, bar = BAR, rangeNotShown = false } = options;
   const judged = cells.filter(
     (c) => finite(c.videoS) && c.videoS >= minVideoS && finite(c.measured) && c.measured > 0,
   );
@@ -77,8 +79,8 @@ export function compare(
       );
   };
   need("within 2 times, all judged cells", m1, true);
-  if (weakCells.length > 0) need("within 2 times, weak profiles", m2, true);
-  if (ranged.length > 0) need("measured time inside the shown range", m3, true);
+  need("within 2 times, weak profiles", m2, true);
+  if (!rangeNotShown) need("measured time inside the shown range", m3, true);
   if (silent.length > 0)
     reasons.push(
       `${silent.length} cell(s) under-estimated by ${bar.underFactor} times or more without "could take much longer": ${silent

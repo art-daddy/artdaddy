@@ -20,6 +20,8 @@ interface Line {
 const LINES = recorded.lines as unknown as Line[];
 
 const PROFILES = ["STRONG", "OK8", "WEAK4"];
+/** What an estimate that never shows a range (0.27.0's own) is judged by: the range measure has nothing to read, so it is waived; the weak profiles never are. */
+const noRange = { rangeNotShown: true } as const;
 /** A table of `n` long cells whose estimate is `factor` times the measured time. */
 const table = (n: number, factor: number | ((i: number) => number)): AccuracyCell[] =>
   Array.from({ length: n }, (_, i) => {
@@ -36,9 +38,9 @@ const table = (n: number, factor: number | ((i: number) => number)): AccuracyCel
 
 describe("the compare can fail, and passes what is right", () => {
   it("passes a predictor that is the measured time itself, and one that is always 1.9 times off either way", () => {
-    expect(compare(table(30, 1)).verdict).toBe("pass");
-    expect(compare(table(30, 1.9)).verdict).toBe("pass");
-    expect(compare(table(30, 1 / 1.9)).verdict).toBe("pass");
+    expect(compare(table(30, 1), noRange).verdict).toBe("pass");
+    expect(compare(table(30, 1.9), noRange).verdict).toBe("pass");
+    expect(compare(table(30, 1 / 1.9), noRange).verdict).toBe("pass");
   });
 
   it("fails a predictor that is always 3 times off, in either direction, and says why", () => {
@@ -52,8 +54,8 @@ describe("the compare can fail, and passes what is right", () => {
   it("fails when one in five cells is more than 2 times off, and passes at one in ten (the bar is 90 %)", () => {
     const off = (every: number) => table(40, (i) => (i % every === 0 ? 3 : 1));
     expect(compare(off(5)).verdict).toBe("fail");
-    expect(compare(off(10)).verdict).toBe("pass");
-    expect(compare(off(11)).verdict).toBe("pass");
+    expect(compare(off(10), noRange).verdict).toBe("pass");
+    expect(compare(off(11), noRange).verdict).toBe("pass");
   });
 
   it("holds the weak profiles to the bar on their own: a good average cannot hide them", () => {
@@ -72,7 +74,7 @@ describe("the compare can fail, and passes what is right", () => {
     expect(silent.measures.silentUnder4).toBe(1);
     const warned = quiet.map((c, i) => (i === 3 ? { ...c, couldTakeMuchLonger: true } : c));
     expect(compare(warned).measures.silentUnder4).toBe(0);
-    expect(compare(warned).verdict).toBe("pass"); // one miss in 30 is inside the 90 %
+    expect(compare(warned, noRange).verdict).toBe("pass"); // one miss in 30 is inside the 90 %
   });
 
   it("holds a shown range to the bar: the real time must lie inside it in 90 % of the cells that show one", () => {
@@ -90,10 +92,28 @@ describe("the compare can fail, and passes what is right", () => {
 
   it("is not a pass with too few cells to stand on", () => {
     expect(compare(table(BAR.minCells - 1, 1)).verdict).toBe("insufficient");
-    // exactly enough cells, none of them weak (a measure with fewer than ten cells of its own is thin too)
-    const strong = table(BAR.minCells, 1).map((c) => ({ ...c, profile: "STRONG" }));
-    expect(compare(strong).verdict).toBe("pass");
     expect(compare([]).verdict).toBe("insufficient");
+  });
+
+  it("does not pass what it has not judged: no weak profile, or no shown range, is insufficient and names the measure; the range alone can be waived for an estimate that shows none", () => {
+    // ten long cells and every one of them strong: judged on the average, never on the weak PCs
+    const strong = table(BAR.minCells, 1).map((c) => ({ ...c, profile: "STRONG" }));
+    const noWeak = compare(strong, noRange);
+    expect(noWeak.verdict).toBe("insufficient");
+    expect(noWeak.thin.join(" ")).toMatch(/weak profiles: 0 cells/);
+    // plenty of weak cells, but nothing shows a range
+    const plain = table(30, 1);
+    const unranged = compare(plain);
+    expect(unranged.verdict).toBe("insufficient");
+    expect(unranged.thin.join(" ")).toMatch(/inside the shown range: 0 cells/);
+    expect(compare(plain, noRange).verdict).toBe("pass");
+    // with weak cells present and a range shown, no waiver is needed (and the first case above shows that waiving the range never waives the weak profiles)
+    expect(
+      compare(
+        plain.map((c) => ({ ...c, low: c.measured * 0.5, high: c.measured * 2 })),
+        {},
+      ).verdict,
+    ).toBe("pass");
   });
 
   it("counts an estimate that is not a positive number as a miss, never drops the cell", () => {
@@ -124,7 +144,7 @@ describe("the compare can fail, and passes what is right", () => {
         (factors) => {
           const cells = table(factors.length, (i) => factors[i]);
           expect(within(cells).share).toBe(1);
-          expect(compare(cells).verdict).toBe("pass");
+          expect(compare(cells, noRange).verdict).toBe("pass");
         },
       ),
       { numRuns: 100 },
