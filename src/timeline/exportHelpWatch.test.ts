@@ -372,10 +372,14 @@ describe("Keep going and the limit of two (B3)", () => {
     // 400 s projected when it was answered: nothing until 800 s
     expect(new Set(kinds(95, 195))).toEqual(new Set(["none"]));
     expect(helpOf3c(JOB)!.keptGoing).toBe(true);
+    // one banner has been used: the line may still promise the next
+    expect(helpOf3c(JOB)!.mayWarnAgain).toBe(true);
     // the projection is 1,000 s from 200 s: more than double, so a second banner
     expect(kinds(200, 200)).toEqual(["slow"]);
     expect(keepGoing3c(JOB, "slow", "rendering")).toEqual({ ok: true });
     expect(new Set(kinds(205, 395))).toEqual(new Set(["none"]));
+    // the second banner was the last one: the quiet line that follows it must not promise a third
+    expect(helpOf3c(JOB)).toMatchObject({ keptGoing: true, mayWarnAgain: false });
     // 2,500 s is more than double again, and it is a third time: never
     expect(new Set(kinds(400, 700))).toEqual(new Set(["none"]));
   });

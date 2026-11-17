@@ -4,7 +4,12 @@ import { useState } from "react";
 
 import type { HelpView } from "../timeline/exportHelp";
 import type { KeepGoingResult } from "../timeline/exportHelpWatch";
-import { BANNER_BUTTON_LABELS, KEEP_GOING_NOTE, type BannerButton } from "../timeline/routeWords";
+import {
+  BANNER_BUTTON_LABELS,
+  KEEP_GOING_LAST_NOTE,
+  KEEP_GOING_NOTE,
+  type BannerButton,
+} from "../timeline/routeWords";
 import { cn } from "./ui";
 
 const quiet = "rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-800";
@@ -15,6 +20,8 @@ export interface SlowBannerProps {
   view: HelpView;
   /** The person already said keep going and no banner is up: one quiet line says so. */
   keptGoing?: boolean;
+  /** Another slow banner can still come (the limit of two is not spent): the quiet line promises it. Without it nothing is promised. Default: it can. */
+  mayWarnAgain?: boolean;
   /** Keep going was pressed. An answer that refuses it (the export is already finishing or has ended) is said in a line of its own. */
   onKeepGoing: () => KeepGoingResult | void;
   onCancel: () => void;
@@ -25,6 +32,7 @@ export interface SlowBannerProps {
 export default function SlowBanner({
   view,
   keptGoing = false,
+  mayWarnAgain = true,
   onKeepGoing,
   onCancel,
   onSwitchToQuick,
@@ -33,7 +41,7 @@ export default function SlowBanner({
   if (view.kind === "none")
     return keptGoing ? (
       <div data-testid="slow-banner-kept" className="mt-0.5 text-[11px] text-neutral-500">
-        {KEEP_GOING_NOTE}
+        {mayWarnAgain ? KEEP_GOING_NOTE : KEEP_GOING_LAST_NOTE}
       </div>
     ) : null;
 

@@ -33,6 +33,7 @@ export default function ExportHelpBanner({
       key={state.view.kind}
       view={state.view}
       keptGoing={state.keptGoing}
+      mayWarnAgain={state.mayWarnAgain}
       onKeepGoing={() => keepExportGoing(jobId, kind)}
       onCancel={onCancel}
       onSwitchToQuick={onSwitchToQuick ? () => onSwitchToQuick(id) : undefined}

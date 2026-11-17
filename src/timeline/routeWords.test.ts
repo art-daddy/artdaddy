@@ -7,6 +7,7 @@ import {
   ASSISTANT_SLOW_NOTE,
   ASSISTANT_SWITCHED_NOTE,
   BANNER_BUTTON_LABELS,
+  KEEP_GOING_LAST_NOTE,
   KEEP_GOING_NOTE,
   SWITCHING_NOTE,
   describeCheckQuestion,
@@ -277,6 +278,11 @@ describe("the slow banner: the owner's copy", () => {
     expect(KEEP_GOING_NOTE).toBe(
       "Keeping going. ArtDaddy will tell you again if it gets much slower.",
     );
+    // once the second slow banner has been answered no third can come: the line must not promise one
+    expect(KEEP_GOING_LAST_NOTE).toBe(
+      "Keeping going. ArtDaddy will not say again that this export is slower than expected.",
+    );
+    expect(KEEP_GOING_LAST_NOTE).not.toMatch(/will tell you again/);
     expect(SWITCHING_NOTE).toBe("Switching to Quick export. The export starts again.");
     expect(ASSISTANT_SLOW_NOTE).toBe(
       "This export is running slower than expected. Tell the person how long is left and, if quick_available is true, that Switch to Quick export is on the card. Do not cancel it and start another.",

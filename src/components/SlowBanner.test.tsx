@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import SlowBanner from "./SlowBanner";
 import { exportHelp, type HelpInput, type HelpView } from "../timeline/exportHelp";
-import { BANNER_BUTTON_LABELS, KEEP_GOING_NOTE, type BannerButton } from "../timeline/routeWords";
+import {
+  BANNER_BUTTON_LABELS,
+  KEEP_GOING_LAST_NOTE,
+  KEEP_GOING_NOTE,
+  type BannerButton,
+} from "../timeline/routeWords";
 
 afterEach(cleanup);
 
@@ -67,6 +72,15 @@ describe("the slow banner", () => {
     // and not while a banner is up: the banner is the answer to be given
     cleanup();
     render(<SlowBanner view={slowWithoutQuick()} keptGoing {...handlers()} />);
+    expect(screen.queryByText(KEEP_GOING_NOTE)).toBeNull();
+  });
+
+  it("promises a further banner only while one can still come: after the second answer the quiet line says it will not say again", () => {
+    render(<SlowBanner view={nothing()} keptGoing mayWarnAgain {...handlers()} />);
+    expect(screen.getByTestId("slow-banner-kept").textContent).toBe(KEEP_GOING_NOTE);
+    cleanup();
+    render(<SlowBanner view={nothing()} keptGoing mayWarnAgain={false} {...handlers()} />);
+    expect(screen.getByTestId("slow-banner-kept").textContent).toBe(KEEP_GOING_LAST_NOTE);
     expect(screen.queryByText(KEEP_GOING_NOTE)).toBeNull();
   });
 

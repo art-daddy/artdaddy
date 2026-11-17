@@ -12,6 +12,7 @@ import { useExportJob } from "../store/exportJob";
 import { __resetExportQuestions } from "../store/exportQuestionHost";
 import { formatActivityMark } from "../timeline/exportActivity";
 import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
+import { KEEP_GOING_LAST_NOTE } from "../timeline/routeWords";
 import {
   __resetExportQueue,
   listExportRecords,
@@ -243,10 +244,11 @@ describe("the slow banner on the card (B1)", () => {
     expect(banner()).not.toBeNull();
     expect(screen.queryByText(KEPT)).toBeNull();
     fireEvent.click(within(banner()!).getByRole("button", { name: "Keep going" }));
-    // and once more, far over: it is a third time
+    // and once more, far over: it is a third time, which can never come, so the line that stays must not promise it
     play(305, 600, 9000);
     expect(banner()).toBeNull();
-    expect(screen.getByText(KEPT)).toBeVisible();
+    expect(screen.queryByText(KEPT)).toBeNull();
+    expect(screen.getByTestId("slow-banner-kept").textContent).toBe(KEEP_GOING_LAST_NOTE);
     g.open();
   });
 

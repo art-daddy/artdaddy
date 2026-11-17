@@ -7,7 +7,13 @@ import { exportFlag } from "../api/exportFlags";
 import type { ExportReasonCode } from "../api/exportReason";
 import { quietVerdict } from "./exportActivity";
 import { noteFact3c } from "./exportFacts3c";
-import { exportHelp, type FirstPicture, type HelpInput, type HelpView } from "./exportHelp";
+import {
+  exportHelp,
+  MAX_SLOW_BANNERS,
+  type FirstPicture,
+  type HelpInput,
+  type HelpView,
+} from "./exportHelp";
 import { producedFraction } from "./exportRestart";
 import type { EstimateBasis } from "./exportTypes3c";
 import { timeLeftSeconds, type LiveFacts } from "./exportWords";
@@ -42,6 +48,8 @@ export interface HelpState {
   readonly view: HelpView;
   /** The person said keep going and no banner is on screen: one quiet line says so. */
   readonly keptGoing: boolean;
+  /** Another slow banner can still come for this export (the limit of two is not spent): what the quiet line may promise. */
+  readonly mayWarnAgain: boolean;
   /** The export is slower than said right now, whether or not the banner is on screen (the person may have silenced it): what the assistant is told. */
   readonly slow: HelpView | null;
 }
@@ -192,6 +200,7 @@ function stateOf(entry: Entry, flag: boolean): HelpState {
   const state: HelpState = {
     view,
     keptGoing: flag && entry.answered && view.kind === "none",
+    mayWarnAgain: entry.shown.slowShown < MAX_SLOW_BANNERS,
     slow: open.kind === "slow" ? open : null,
   };
   entry.cache = { flag, state };
@@ -203,7 +212,8 @@ const signatureOf = (state: HelpState): string =>
     state.view.kind,
     state.view.lines,
     state.view.buttons,
-    state.keptGoing,
+    // the quiet line has two wordings: one that promises a further banner and one that does not
+    state.keptGoing && !state.mayWarnAgain ? "last" : state.keptGoing,
     state.slow
       ? [state.slow.projectedTotalSeconds, state.slow.quickAvailable, state.slow.quickSeconds]
       : null,
