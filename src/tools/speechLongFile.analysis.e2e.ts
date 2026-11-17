@@ -22,7 +22,8 @@ import { tokenOnSound, WINDOW_MS } from "./speechWordTimes";
 import { parseWhisperCppJson } from "./transcribe";
 
 const DIR = process.env.L13_LONG_DIR ?? "";
-const files = DIR && fs.existsSync(DIR) ? fs.readdirSync(DIR).filter((f) => f.endsWith(".dtw.json")) : [];
+const files =
+  DIR && fs.existsSync(DIR) ? fs.readdirSync(DIR).filter((f) => f.endsWith(".dtw.json")) : [];
 const OUT = process.env.L13_LONG_OUT ?? path.join(DIR || ".", "long-analysis.txt");
 
 interface Token {
@@ -40,7 +41,11 @@ interface RawJson {
 
 const median = (xs: number[]): number | null => {
   const s = [...xs].sort((a, b) => a - b);
-  return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null;
+  return s.length
+    ? s.length % 2
+      ? s[(s.length - 1) / 2]
+      : (s[s.length / 2 - 1] + s[s.length / 2]) / 2
+    : null;
 };
 const quantile = (xs: number[], q: number): number | null => {
   const s = [...xs].sort((a, b) => a - b);
@@ -75,51 +80,66 @@ function moved(raw: RawJson): { json: RawJson; refused: number; withTime: number
   return { json: { ...raw, transcription }, refused, withTime, tokens };
 }
 
-describe.skipIf(files.length === 0)("the engine's own word times over long recordings, read by the app's parser", () => {
-  const lines: string[] = [];
-  const say = (s = ""): void => void lines.push(s);
+describe.skipIf(files.length === 0)(
+  "the engine's own word times over long recordings, read by the app's parser",
+  () => {
+    const lines: string[] = [];
+    const say = (s = ""): void => void lines.push(s);
 
-  for (const name of files) {
-    it(`${name}: the two readings have the same words, and the moves are reported`, () => {
-      const rawText = fs.readFileSync(path.join(DIR, name), "utf8");
-      const raw = JSON.parse(rawText) as RawJson;
-      const stored = parseWhisperCppJson(rawText, { wordTimes: false });
-      const aligned = parseWhisperCppJson(rawText, { wordTimes: true });
-      expect(aligned.words.map((w) => w.word)).toStrictEqual(stored.words.map((w) => w.word));
+    for (const name of files) {
+      it(`${name}: the two readings have the same words, and the moves are reported`, () => {
+        const rawText = fs.readFileSync(path.join(DIR, name), "utf8");
+        const raw = JSON.parse(rawText) as RawJson;
+        const stored = parseWhisperCppJson(rawText, { wordTimes: false });
+        const aligned = parseWhisperCppJson(rawText, { wordTimes: true });
+        expect(aligned.words.map((w) => w.word)).toStrictEqual(stored.words.map((w) => w.word));
 
-      const shifts = aligned.words.map((w, i) => w.start_seconds - stored.words[i].start_seconds);
-      const after60 = shifts.filter((_, i) => stored.words[i].start_seconds >= 60);
-      const byWindow = new Map<number, number[]>();
-      stored.words.forEach((w, i) => {
-        const k = Math.floor(w.start_seconds / 30);
-        byWindow.set(k, [...(byWindow.get(k) ?? []), shifts[i]]);
+        const shifts = aligned.words.map((w, i) => w.start_seconds - stored.words[i].start_seconds);
+        const after60 = shifts.filter((_, i) => stored.words[i].start_seconds >= 60);
+        const byWindow = new Map<number, number[]>();
+        stored.words.forEach((w, i) => {
+          const k = Math.floor(w.start_seconds / 30);
+          byWindow.set(k, [...(byWindow.get(k) ?? []), shifts[i]]);
+        });
+        const { json, refused, withTime, tokens } = moved(raw);
+        const preSettle = parseWhisperCppJson(JSON.stringify(json), { wordTimes: false });
+        expect(preSettle.words).toHaveLength(aligned.words.length);
+        const changes = aligned.words
+          .map((w, i) =>
+            Math.max(
+              Math.abs(w.start_seconds - preSettle.words[i].start_seconds),
+              Math.abs(w.end_seconds - preSettle.words[i].end_seconds),
+            ),
+          )
+          .filter((d) => d > 1e-9);
+
+        say(
+          `${name}: ${stored.words.length} words, ${tokens} tokens, ${withTime} with an engine time`,
+        );
+        say(
+          `  tokens refused as not the file's clock (more than ${WINDOW_MS / 1000} s from where they were stored): ${refused}`,
+        );
+        say(
+          `  words moved by the alignment: median ${f(median(shifts))} s, largest forward ${f(Math.max(...shifts))} s, largest back ${f(Math.min(...shifts))} s; ${shifts.filter((s) => Math.abs(s) >= 0.5).length} of ${shifts.length} moved 0.5 s or more`,
+        );
+        say(
+          `  after 60 s: ${after60.length} words; median ${f(median(after60))} s, 10th / 90th percentile ${f(quantile(after60, 0.1))} / ${f(quantile(after60, 0.9))} s, largest forward ${f(after60.length ? Math.max(...after60) : null)} s, largest back ${f(after60.length ? Math.min(...after60) : null)} s`,
+        );
+        say(
+          `  words changed by settleWords after the tokens moved: ${changes.length} of ${aligned.words.length}; largest change ${f(changes.length ? Math.max(...changes) : null, 3)} s`,
+        );
+        say("  by 30 s window of the file (words, median move, smallest, largest):");
+        for (const [k, xs] of [...byWindow.entries()].sort((a, b) => a[0] - b[0]))
+          say(
+            `    window ${String(k).padStart(2)} (${String(k * 30).padStart(3)} s): ${String(xs.length).padStart(4)} words, median ${f(median(xs)).padStart(6)}, min ${f(Math.min(...xs)).padStart(6)}, max ${f(Math.max(...xs)).padStart(6)}`,
+          );
+        say();
       });
-      const { json, refused, withTime, tokens } = moved(raw);
-      const preSettle = parseWhisperCppJson(JSON.stringify(json), { wordTimes: false });
-      expect(preSettle.words).toHaveLength(aligned.words.length);
-      const changes = aligned.words
-        .map((w, i) =>
-          Math.max(
-            Math.abs(w.start_seconds - preSettle.words[i].start_seconds),
-            Math.abs(w.end_seconds - preSettle.words[i].end_seconds),
-          ),
-        )
-        .filter((d) => d > 1e-9);
+    }
 
-      say(`${name}: ${stored.words.length} words, ${tokens} tokens, ${withTime} with an engine time`);
-      say(`  tokens refused as not the file's clock (more than ${WINDOW_MS / 1000} s from where they were stored): ${refused}`);
-      say(`  words moved by the alignment: median ${f(median(shifts))} s, largest forward ${f(Math.max(...shifts))} s, largest back ${f(Math.min(...shifts))} s; ${shifts.filter((s) => Math.abs(s) >= 0.5).length} of ${shifts.length} moved 0.5 s or more`);
-      say(`  after 60 s: ${after60.length} words; median ${f(median(after60))} s, 10th / 90th percentile ${f(quantile(after60, 0.1))} / ${f(quantile(after60, 0.9))} s, largest forward ${f(after60.length ? Math.max(...after60) : null)} s, largest back ${f(after60.length ? Math.min(...after60) : null)} s`);
-      say(`  words changed by settleWords after the tokens moved: ${changes.length} of ${aligned.words.length}; largest change ${f(changes.length ? Math.max(...changes) : null, 3)} s`);
-      say("  by 30 s window of the file (words, median move, smallest, largest):");
-      for (const [k, xs] of [...byWindow.entries()].sort((a, b) => a[0] - b[0]))
-        say(`    window ${String(k).padStart(2)} (${String(k * 30).padStart(3)} s): ${String(xs.length).padStart(4)} words, median ${f(median(xs)).padStart(6)}, min ${f(Math.min(...xs)).padStart(6)}, max ${f(Math.max(...xs)).padStart(6)}`);
-      say();
+    it("writes the report", () => {
+      fs.writeFileSync(OUT, `${lines.join("\n")}\n`);
+      expect(fs.existsSync(OUT)).toBe(true);
     });
-  }
-
-  it("writes the report", () => {
-    fs.writeFileSync(OUT, `${lines.join("\n")}\n`);
-    expect(fs.existsSync(OUT)).toBe(true);
-  });
-});
+  },
+);
