@@ -24,8 +24,9 @@
 // them), never give it.
 //
 // Not covered, each named so nobody assumes it:
-//   * the graphics-chip path, until its constant is on and a model is in WORD_TIMES_CHIP_MODELS: with a chip `-dtw` needs
-//     flash attention off, which has to be measured on its own;
+//   * the graphics-chip path off Windows (WORD_TIMES_CHIP_HOSTS: Metal and every host the app cannot name keep 0.27.0's
+//     launch), and on Windows every graphics device but the one it was measured on: with a chip `-dtw` needs flash
+//     attention off, which was measured on its own, on one integrated AMD device through Vulkan;
 //   * any model file that is not in the list for its path (another size needs another alignment preset; a squeezed copy
 //     of "small" has other weights);
 //   * a launch over several files: it never carries the arguments, and a file whose voice starts late is run alone;
@@ -36,15 +37,18 @@
 //     change to the audio the engine hears, any telemetry or privacy text, and the pace model (a run with the
 //     alignment is about a tenth slower and the pace is measured from runs).
 import { exportFlag } from "../api/exportFlags";
+import { hostInfo, type HostOs } from "../platform/host";
 import { WINDOWS_LOAD_FAILURES } from "./speechBackend";
 import { voiceStartsLate, type VoiceStart } from "./speechLeadingQuiet";
 
 /** Whether this build uses the alignment on the processor path. Off in every commit but the one that turns it on. */
 export const WORD_TIMES_SHIPPED = false;
 
-/** Whether this build also uses it on the graphics-chip path (a launch without `-ng`). Off until that path has been
- *  measured and the owner has agreed; independent of {@link WORD_TIMES_SHIPPED} so the processor path can ship alone. */
-export const WORD_TIMES_CHIP_SHIPPED = false;
+/** Whether this build also uses it on the graphics-chip path (a launch without `-ng`), on the hosts of
+ *  {@link WORD_TIMES_CHIP_HOSTS} only. On, because the path was measured on one Windows device (Vulkan, an integrated AMD
+ *  chip: the same words and times as the processor's, about a tenth longer); independent of {@link WORD_TIMES_SHIPPED},
+ *  which still decides whether the build uses the alignment at all. */
+export const WORD_TIMES_CHIP_SHIPPED = true;
 
 let shipped: boolean = WORD_TIMES_SHIPPED;
 let chipShipped: boolean = WORD_TIMES_CHIP_SHIPPED;
@@ -73,9 +77,17 @@ export function __resetWordTimesShipped(): void {
  *  engine the key of the file it launches). "small": the speech study and the sweep over 240 real outputs. */
 export const WORD_TIMES_MODELS: readonly string[] = ["small"];
 
-/** The same for the GRAPHICS-CHIP path (a launch without `-ng`), which also needs {@link WORD_TIMES_CHIP_SHIPPED}. The
- *  smaller file is never launched there (the launch boundary converts it to the processor's). */
-export const WORD_TIMES_CHIP_MODELS: readonly string[] = [];
+/** The same for the GRAPHICS-CHIP path (a launch without `-ng`), which also needs {@link WORD_TIMES_CHIP_SHIPPED} and a
+ *  host of {@link WORD_TIMES_CHIP_HOSTS}. The smaller file is never launched there (the launch boundary converts it to
+ *  the processor's). */
+export const WORD_TIMES_CHIP_MODELS: readonly string[] = ["small"];
+
+/** The hosts the GRAPHICS-CHIP path was measured on: Windows (Vulkan, one integrated AMD device). Metal (macOS) and a host
+ *  the app cannot name keep 0.27.0's launch. This only keeps launches out and proves nothing for the hosts it lets in: on
+ *  Windows the app does not know the chip's maker before a launch, so a PC with another maker's chip is let in too, on one
+ *  device's evidence. `hostInfo()` is the app's best answer (Rust's, or the user agent before it has answered); "unknown"
+ *  is never in the list. */
+export const WORD_TIMES_CHIP_HOSTS: readonly HostOs[] = ["windows"];
 
 /** What the engine is given: `-dtw small` aligns each token with the audio (the alignment heads of the "small"
  *  model), and `-nfa` turns flash attention off, which that alignment needs. */
@@ -87,12 +99,16 @@ export function wordTimesOn(): boolean {
 }
 
 /** Could a launch with these facts carry the arguments at all, before any audio is looked at? The build and the server
- *  allow it, the model file was measured, and so was this engine path (the chip also needs its own constant). A caller
- *  asks this first so that nothing is read from the audio while the rule cannot apply. */
+ *  allow it, the model file was measured, and so was this engine path (the chip also needs its own constant and a host
+ *  it was measured on). A caller asks this first so that nothing is read from the audio while the rule cannot apply. */
 export function wordTimesPossible(input: { size: string; cpuOnly: boolean }): boolean {
   if (!wordTimesOn()) return false;
   if (input.cpuOnly) return WORD_TIMES_MODELS.includes(input.size);
-  return chipShipped && WORD_TIMES_CHIP_MODELS.includes(input.size);
+  return (
+    chipShipped &&
+    WORD_TIMES_CHIP_MODELS.includes(input.size) &&
+    WORD_TIMES_CHIP_HOSTS.includes(hostInfo().os)
+  );
 }
 
 /** What a launch of the engine adds to its arguments. `voice` is where the voice starts in the one file the launch
