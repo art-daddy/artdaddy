@@ -50,6 +50,7 @@ import {
   WORD_TIMES_MODELS,
 } from "./speechWordTimes";
 import {
+  __resetSmallerFileFailure,
   clipWordFrames,
   ensureTranscripts,
   parseWhisperCppJson,
@@ -160,6 +161,7 @@ beforeEach(() => {
   __resetExportFlags();
   __resetWordTimesShipped();
   __resetSpeechSession();
+  __resetSmallerFileFailure();
   __resetSpeechJobs();
   __resetWorkGate();
   reportAppError.mockClear();
@@ -865,6 +867,75 @@ describe("a launch that carried the arguments and failed is made once more witho
       ).catch((e: unknown) => e);
       expect(t.whisper()).toHaveLength(1);
       expect(outcome).toBeInstanceOf(Error);
+    });
+  });
+});
+
+// Lane L12's net under the smaller model file: when the engine itself fails on it, the request is run once more with the
+// full-size file. That second run is a whole run of its own, so the rule's decision and its one retry sit inside each of
+// the two, and what one file can cost is bounded by two launches per run.
+describe("under the net that runs the request on the full-size file when the engine fails on the smaller one", () => {
+  const LOAD_FAILURE: Behaviour = { code: 1, output: "none", stderr: "failed to load model" };
+  const modelOf = (s: JobSpec): "smaller" | "full" =>
+    /ggml-small-q8_0\.bin$/.test(s.args[s.args.indexOf("-m") + 1]) ? "smaller" : "full";
+  /** The smaller file is listed as one a later release has measured (its one line), or not (as built). */
+  async function whenSmallerIs(listed: boolean, body: () => Promise<void>): Promise<void> {
+    const list = WORD_TIMES_MODELS as string[];
+    if (listed) list.push(SMALLER);
+    try {
+      await body();
+    } finally {
+      if (listed) list.splice(list.indexOf(SMALLER), 1);
+    }
+  }
+
+  it("the smaller file listed: its alignment launch and its retry fail, the full-size file's launch is decided again and carries the arguments, and the words are the aligned ones", async () => {
+    await whenSmallerIs(true, async () => {
+      processor();
+      configure(true, true);
+      const t = setup({ installed: [FULL, SMALLER], script: (n) => (n < 2 ? LOAD_FAILURE : {}) });
+      const kept = await runWhisper(t.rig.ctx(), freshSource(), FULL, "en");
+      const specs = t.whisper();
+      expect(specs.map(modelOf)).toEqual(["smaller", "smaller", "full"]);
+      expect(specs.map((s) => s.args.includes("-dtw"))).toEqual([true, false, true]);
+      expect(specs.every((s) => s.args.includes("-ng"))).toBe(true);
+      expect(starts(kept)).toStrictEqual(starts(ON_SOUND));
+      expect(t.rig.leftovers()).toEqual([]);
+      expect(t.jobs.forgotten.slice().sort()).toEqual(specs.map((s) => s.id).sort());
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+  });
+
+  it("the smaller file not listed (as built): its launch is today's, and the full-size file's launch after its failure carries the arguments", async () => {
+    await whenSmallerIs(false, async () => {
+      processor();
+      configure(true, true);
+      const t = setup({ installed: [FULL, SMALLER], script: (n) => (n === 0 ? LOAD_FAILURE : {}) });
+      const kept = await runWhisper(t.rig.ctx(), freshSource(), FULL, "en");
+      const specs = t.whisper();
+      expect(specs.map(modelOf)).toEqual(["smaller", "full"]);
+      expect(specs.map((s) => s.args.includes("-dtw"))).toEqual([false, true]);
+      expect(specs[0].meta).not.toHaveProperty("wordTimes");
+      expect(starts(kept)).toStrictEqual(starts(ON_SOUND));
+      expect(t.rig.leftovers()).toEqual([]);
+    });
+  });
+
+  it("is four launches at most for one file when every launch fails, then the engine's own failure, and nothing is kept or left behind", async () => {
+    await whenSmallerIs(true, async () => {
+      processor();
+      configure(true, true);
+      const t = setup({ installed: [FULL, SMALLER], script: () => LOAD_FAILURE });
+      const failure = await runWhisper(t.rig.ctx(), freshSource(), FULL, "en").catch(
+        (e: unknown) => e,
+      );
+      const specs = t.whisper();
+      expect(failure).toBeInstanceOf(TranscriptionFailure);
+      expect((failure as TranscriptionFailure).reason).toBe("engine_failed");
+      expect(specs.map(modelOf)).toEqual(["smaller", "smaller", "full", "full"]);
+      expect(specs.map((s) => s.args.includes("-dtw"))).toEqual([true, false, true, false]);
+      expect(t.rig.leftovers()).toEqual([]);
+      expect(t.jobs.forgotten.slice().sort()).toEqual(specs.map((s) => s.id).sort());
     });
   });
 });
