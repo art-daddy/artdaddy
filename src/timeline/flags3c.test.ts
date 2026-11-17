@@ -15,6 +15,7 @@ import { FLAGS_3C, flags3cAllOn } from "./exportTypes3c";
 afterEach(() => {
   vi.restoreAllMocks();
   __resetExportFlags();
+  exportFlags.__setHeldOffByBuild(null);
 });
 
 describe("flags3cNow", () => {
@@ -59,5 +60,19 @@ describe("flags3cNow", () => {
   it("reads a value that is not a boolean as off, so a damaged store can only withhold a behaviour", () => {
     vi.spyOn(exportFlags, "exportFlag").mockImplementation(() => "yes" as unknown as boolean);
     for (const name of FLAGS_3C) expect(flags3cNow()[name], name).toBe(false);
+  });
+
+  it("keeps what the build holds off, off, when a switch cannot be read: the compiled default does not undo the hold", () => {
+    exportFlags.__setHeldOffByBuild(true);
+    vi.spyOn(exportFlags, "exportFlag").mockImplementation(() => {
+      throw new Error("the store broke");
+    });
+    const got = flags3cNow();
+    for (const name of FLAGS_3C)
+      expect(got[name], name).toBe(
+        exportFlags.OFF_IN_THIS_BUILD.has(name) ? false : COMPILED_FLAG_DEFAULTS[name],
+      );
+    expect(got.estimate_v2).toBe(false);
+    expect(got.pc_check).toBe(false);
   });
 });

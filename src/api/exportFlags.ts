@@ -98,6 +98,11 @@
 //               build decides whether any launch does: this switch only takes it away) (off: 0.27.0: whisper's own
 //               word times, the engine started as before)
 //
+// THIS BUILD SHIPS `estimate_v2` AND `pc_check` OFF (OFF_IN_THIS_BUILD below), whatever the server says: the honest estimate did not meet the bar it was built against (E1, lane L11's
+// fit n1-202611170115: 24 % of the judged cells within 2 times against 90 %, 0 of 11 weak-profile cells, 85 % of the measured times inside the shown range against 90 %, five cells 4 times or
+// more under-estimated without "could take much longer"), and the speed check did not meet its (P1: the class and the reading against the reference export; P2: the disturbance of a running
+// export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs.
+//
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
 // failing server, a damaged answer, a name or value it does not know. It never throws, never blocks an
@@ -178,6 +183,23 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   speech_word_times: true,
 };
 
+/** Behaviours that are in this build and NOT shipped: they stay off whatever the server says, whatever the compiled default says and whatever a stored answer holds, because the proof they were
+ *  built against was not met (see the top of this file). The server's "back on" cannot reach them. A later build that meets its bars removes the name here, in one line, with the test that pins this. */
+export const OFF_IN_THIS_BUILD: ReadonlySet<ExportFlagName> = new Set<ExportFlagName>([
+  "estimate_v2",
+  "pc_check",
+]);
+
+/** Tests only: forces the hold on (true) or off (false); null leaves it to the build's mode. */
+let holdOverride: boolean | null = null;
+
+/** Whether the build itself holds this behaviour off (so no answer, stored or fresh, can switch it on). A shipped or a development build holds it. The unit suite's mode is "test", which runs every behaviour, so the suite needs no
+ *  setup of its own and a copy of this module that is loaded again (vi.resetModules()) is lifted too; the tests of the hold itself force it with `__setHeldOffByBuild`. */
+export function isOffInThisBuild(name: ExportFlagName): boolean {
+  if (!OFF_IN_THIS_BUILD.has(name)) return false;
+  return holdOverride ?? import.meta.env.MODE !== "test";
+}
+
 /** The two cut-offs that turn this PC's speed-test score into fast / OK / weak (`ok_over` and `weak_over` on the
  *  wire). Unlike a flag, a number can move a threshold both ways, so a pair is only ever used as a whole. */
 export interface PcClassCutoffs {
@@ -250,8 +272,9 @@ let waitMs = REFRESH_MS;
 let misses = 0;
 let inflight: Promise<void> | null = null;
 
-/** Whether a behaviour is on right now. A name this client does not know is never on. */
+/** Whether a behaviour is on right now. A name this client does not know is never on, and neither is one the build holds off ({@link OFF_IN_THIS_BUILD}). */
 export function exportFlag(name: ExportFlagName): boolean {
+  if (isOffInThisBuild(name)) return false;
   return current[name] ?? false;
 }
 
@@ -382,6 +405,11 @@ async function hear(options: RefreshOptions, signal: AbortSignal): Promise<Outco
 /** Tests only. */
 export function __setExportFlag(name: ExportFlagName, value: boolean): void {
   current = { ...current, [name]: value };
+}
+
+/** Tests only: force the hold on (true) or off (false); null goes back to the build mode's own answer (held in a shipped or development build, lifted under the unit suite). */
+export function __setHeldOffByBuild(held: boolean | null): void {
+  holdOverride = held;
 }
 
 /** Tests only. */

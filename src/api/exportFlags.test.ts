@@ -4,9 +4,13 @@ import {
   COMPILED_FLAG_DEFAULTS,
   COMPILED_PC_CLASS,
   EXPORT_FLAG_NAMES,
+  OFF_IN_THIS_BUILD,
   PC_CLASS_BANDS,
   __resetExportFlags,
+  __setExportFlag,
+  __setHeldOffByBuild,
   exportFlag,
+  isOffInThisBuild,
   pcClass,
   refreshExportFlags,
   speechModelSources,
@@ -538,5 +542,102 @@ describe("the extra places for the speech model", () => {
       expect(localStorage.getItem(localStorage.key(i) ?? "") ?? "").not.toContain("huggingface");
     __resetExportFlags({ keepStorage: true });
     expect(speechModelSources()).toEqual([]);
+  });
+});
+
+// This build ships the estimate and the PC speed check off (the top of exportFlags.ts): the proof they were built against was not met, so no answer can switch them on.
+describe("what this build holds off", () => {
+  beforeEach(() => __setHeldOffByBuild(true));
+  afterEach(() => {
+    __setHeldOffByBuild(null);
+    vi.unstubAllEnvs();
+  });
+
+  const allOn = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, true]));
+  const allOff = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, false]));
+
+  it("is exactly the estimate and the speed check, each a name the switches know (the decision this release is shipped on: change it only with a bar that was met)", () => {
+    expect([...OFF_IN_THIS_BUILD].sort()).toEqual(["estimate_v2", "pc_check"]);
+    for (const name of OFF_IN_THIS_BUILD) expect(EXPORT_FLAG_NAMES).toContain(name);
+  });
+
+  it("keeps them off from the first moment, whatever the compiled defaults say", () => {
+    for (const name of OFF_IN_THIS_BUILD) {
+      expect(COMPILED_FLAG_DEFAULTS[name], `${name}: the compiled default is the way back`).toBe(
+        true,
+      );
+      expect(exportFlag(name), name).toBe(false);
+      expect(isOffInThisBuild(name), name).toBe(true);
+    }
+  });
+
+  it("is not moved by a server that says every switch is on, nor by a switch a test turns on, nor by a stored answer", async () => {
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOn }),
+      signedIn,
+      force: true,
+    });
+    for (const name of OFF_IN_THIS_BUILD)
+      expect(exportFlag(name), `${name} after the answer`).toBe(false);
+    expect(JSON.parse(localStorage.getItem("artdaddy.exportFlags.v1") ?? "{}")).toMatchObject({
+      estimate_v2: true,
+      pc_check: true,
+    });
+    // what is stored is the server's word; the build's hold still wins when the app opens again
+    __resetExportFlags({ keepStorage: true });
+    for (const name of OFF_IN_THIS_BUILD)
+      expect(exportFlag(name), `${name} after a restart`).toBe(false);
+    __setExportFlag("estimate_v2", true);
+    expect(exportFlag("estimate_v2")).toBe(false);
+  });
+
+  it("leaves every other switch to the server, both ways (a rule over the whole table)", async () => {
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOn }),
+      signedIn,
+      force: true,
+    });
+    for (const name of EXPORT_FLAG_NAMES)
+      expect(exportFlag(name), `${name} told on`).toBe(!OFF_IN_THIS_BUILD.has(name));
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOff }),
+      signedIn,
+      force: true,
+    });
+    for (const name of EXPORT_FLAG_NAMES) expect(exportFlag(name), `${name} told off`).toBe(false);
+  });
+
+  it("is lifted only by the tests' own switch, which puts every behaviour back on", async () => {
+    __setHeldOffByBuild(false);
+    for (const name of OFF_IN_THIS_BUILD) {
+      expect(isOffInThisBuild(name), name).toBe(false);
+      expect(exportFlag(name), name).toBe(true);
+    }
+  });
+
+  // The one thing that ships the decision is that a build NOT run by the unit suite holds the two off with nothing set up: the mode is the whole of it. A suite that lifted the hold by a call in its own setup, or by a
+  // module-level flag, would stay green if that default were flipped, and a copy of the module loaded again after vi.resetModules() would start held (the first version of this hold broke two other files that way).
+  it("is held in a shipped build with nothing of the tests set: the mode alone holds the two off though the server says every switch is on, and a module loaded again behaves the same", async () => {
+    __setHeldOffByBuild(null);
+    vi.stubEnv("MODE", "production");
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOn }),
+      signedIn,
+      force: true,
+    });
+    for (const name of OFF_IN_THIS_BUILD) {
+      expect(isOffInThisBuild(name), `${name} in a production build`).toBe(true);
+      expect(exportFlag(name), `${name} in a production build`).toBe(false);
+    }
+    vi.resetModules();
+    const again = await import("./exportFlags");
+    for (const name of OFF_IN_THIS_BUILD)
+      expect(again.isOffInThisBuild(name), `${name} in a reloaded module`).toBe(true);
+    // the unit suite's own mode runs every behaviour, with no setup and in a reloaded module as well
+    vi.stubEnv("MODE", "test");
+    for (const name of OFF_IN_THIS_BUILD) {
+      expect(exportFlag(name), `${name} in the suite's mode`).toBe(true);
+      expect(again.isOffInThisBuild(name), `${name} in the suite's mode, reloaded`).toBe(false);
+    }
   });
 });

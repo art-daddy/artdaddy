@@ -4,7 +4,7 @@
 // turn after it, and is gone when stopped.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { __resetExportFlags, __setExportFlag, __setHeldOffByBuild } from "../api/exportFlags";
 import type { ProbeOutcome } from "../platform/host";
 import { IDLE_BEFORE_RUN_MS, type PcCheckDeps } from "../platform/pcCheck";
 import { EXPORT_SPEED_PROBE_ID } from "../platform/pcCheckProbe";
@@ -276,6 +276,23 @@ describe("the check in the app: when it starts", () => {
     // nothing else moved and the editor has long been quiet: the check starts at the next beat, and is under way (its box is twenty seconds)
     await advance(3_000);
     expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+  });
+
+  it("starts nothing while the build holds the check off, whatever the server says, and starts at the next beat once the hold is lifted", async () => {
+    const world = begin();
+    __setExportFlag("pc_check", true);
+    __setHeldOffByBuild(true);
+    try {
+      await advance(10 * 60_000);
+      expect(world.checks()).toHaveLength(0);
+      expect(runningNow()).toBeNull();
+      expect(pcCheckService()!.pcClass()).toBe("unknown");
+      __setHeldOffByBuild(false);
+      await advance(3_000);
+      expect(runningNow()).toBe(EXPORT_SPEED_PROBE_ID);
+    } finally {
+      __setHeldOffByBuild(false);
+    }
   });
 });
 

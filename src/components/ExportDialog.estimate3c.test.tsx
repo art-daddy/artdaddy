@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { __resetExportFlags, __setExportFlag, __setHeldOffByBuild } from "../api/exportFlags";
 import { createPcCheckService, type PcCheckService } from "../platform/pcCheck";
 import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
@@ -386,6 +386,31 @@ describe("with the new estimate off the dialog says what 0.27.0 said", () => {
     show();
     expect(screen.queryByTestId("speed-check")).not.toBeInTheDocument();
     expect(line()).toHaveTextContent("A rough guess: this PC's speed has not been checked yet.");
+  });
+
+  it("is what this build shows whatever the server says: held off by the build, with every switch on and a finished check on file, the dialog reads 0.27.0's line and has no speed-check line", async () => {
+    const world = checkWorld();
+    setPcCheckService(world.service);
+    world.service.requestRun({ reason: "dialog", force: true });
+    await act(async () => undefined);
+    world.runs[0].resolve({ record: done({ rHat: 9, cls: "weak" }), stored: false });
+    await act(async () => undefined);
+    __setExportFlag("estimate_v2", true);
+    __setExportFlag("pc_check", true);
+    __setHeldOffByBuild(true);
+    try {
+      show();
+      expect(line().textContent).toBe(legacyLine([]));
+      expect(screen.queryByTestId("speed-check")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("estimate-much-longer")).not.toBeInTheDocument();
+      // the hold is all that stands between the person and the new line: lifted, the check on file speaks
+      cleanup();
+      __setHeldOffByBuild(false);
+      show();
+      expect(line()).toHaveTextContent("from a quick check of this PC's speed.");
+    } finally {
+      __setHeldOffByBuild(false);
+    }
   });
 
   it("a speed check that is running does not replace 0.27.0's sentence with the checking line", async () => {
