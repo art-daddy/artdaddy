@@ -104,6 +104,12 @@ describe.skipIf(files.length === 0)(
         const { json, refused, withTime, tokens } = moved(raw);
         const preSettle = parseWhisperCppJson(JSON.stringify(json), { wordTimes: false });
         expect(preSettle.words).toHaveLength(aligned.words.length);
+        const startMoves = aligned.words
+          .map((w, i) => Math.abs(w.start_seconds - preSettle.words[i].start_seconds))
+          .filter((d) => d > 1e-9);
+        const endMoves = aligned.words
+          .map((w, i) => Math.abs(w.end_seconds - preSettle.words[i].end_seconds))
+          .filter((d) => d > 1e-9);
         const changes = aligned.words
           .map((w, i) =>
             Math.max(
@@ -126,7 +132,7 @@ describe.skipIf(files.length === 0)(
           `  after 60 s: ${after60.length} words; median ${f(median(after60))} s, 10th / 90th percentile ${f(quantile(after60, 0.1))} / ${f(quantile(after60, 0.9))} s, largest forward ${f(after60.length ? Math.max(...after60) : null)} s, largest back ${f(after60.length ? Math.min(...after60) : null)} s`,
         );
         say(
-          `  words changed by settleWords after the tokens moved: ${changes.length} of ${aligned.words.length}; largest change ${f(changes.length ? Math.max(...changes) : null, 3)} s`,
+          `  words changed by settleWords after the tokens moved: ${changes.length} of ${aligned.words.length}; largest change ${f(changes.length ? Math.max(...changes) : null, 3)} s; of those, START times changed on ${startMoves.length} (largest ${f(startMoves.length ? Math.max(...startMoves) : null, 3)} s) and END times on ${endMoves.length} (largest ${f(endMoves.length ? Math.max(...endMoves) : null, 3)} s)`,
         );
         say("  by 30 s window of the file (words, median move, smallest, largest):");
         for (const [k, xs] of [...byWindow.entries()].sort((a, b) => a[0] - b[0]))
