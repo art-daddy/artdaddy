@@ -11,6 +11,8 @@
 
 [Download](https://github.com/art-daddy/artdaddy/releases/latest) · [artdaddy.app](https://artdaddy.app)
 
+[![Downloads](https://img.shields.io/github/downloads/art-daddy/artdaddy/total?label=downloads&color=c98a3e)](https://artdaddy.app/open)
+
 ![ArtDaddy](assets/hero.jpg)
 
 </div>
