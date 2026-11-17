@@ -8,7 +8,7 @@ const shell = vi.hoisted(() => ({ name: "tauri" }));
 vi.mock("./index", () => ({ platform: shell }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { __resetProcessorName, processorName } from "./host";
+import { PROCESSOR_NAME_RETRY_MS, __resetProcessorName, processorName } from "./host";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -61,6 +61,29 @@ describe("the processor's name", () => {
     const waited = Date.now() - started;
     expect(waited).toBeGreaterThanOrEqual(1_900);
     expect(waited).toBeLessThan(10_000);
+  });
+
+  it("is asked for again after a first answer that came too late or failed, once the short cool-down has passed: a busy app at start-up does not lose the hint for the whole run", async () => {
+    vi.useFakeTimers({ now: 1_700_000_000_000 });
+    try {
+      invoke.mockReturnValueOnce(new Promise(() => undefined));
+      const first = processorName();
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(await first).toBeNull();
+      // inside the cool-down no name stands and the command is not asked at every look
+      invoke.mockResolvedValue("Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz");
+      expect(await processorName()).toBeNull();
+      expect(invoke).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(PROCESSOR_NAME_RETRY_MS);
+      expect(await processorName()).toBe("Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz");
+      expect(invoke).toHaveBeenCalledTimes(2);
+      // a name that was read is kept for the run
+      await vi.advanceTimersByTimeAsync(10 * PROCESSOR_NAME_RETRY_MS);
+      expect(await processorName()).toBe("Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz");
+      expect(invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

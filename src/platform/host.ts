@@ -206,32 +206,49 @@ export async function resolveExportResources(
 
 /** The processor's model name as the app process reads it (`processor_name`, its own native command), for the one hint that needs it (chipAdvice.ts:
  *  Intel graphics that may be switched off in the BIOS). It stays on this PC: it is in no report, event, log or request, and is never read through
- *  the command that gives the sendable hardware bands. Asked once per run of the app and kept; null when it cannot be read (not the app, not
- *  Windows, a command that fails or hangs): no name is no hint. Never throws. */
+ *  the command that gives the sendable hardware bands. A name is asked for once per run of the app and kept; null when it cannot be read (not the app, not
+ *  Windows, a command that fails or hangs). A null is kept only for {@link PROCESSOR_NAME_RETRY_MS}: an app that was busy at start-up (the first ask ran past its
+ *  two seconds) must not lose the hint for the whole run, and a command that always fails is not asked again at every look. Never throws. */
+export const PROCESSOR_NAME_RETRY_MS = 30_000;
 let processorNameAsked: Promise<string | null> | null = null;
+let processorNameMissedAt: number | null = null;
 export function processorName(): Promise<string | null> {
+  if (
+    processorNameMissedAt !== null &&
+    Date.now() - processorNameMissedAt >= PROCESSOR_NAME_RETRY_MS
+  ) {
+    processorNameAsked = null;
+    processorNameMissedAt = null;
+  }
   processorNameAsked ??= (async (): Promise<string | null> => {
-    try {
-      if (platform.name !== "tauri") return null;
-      const { invoke } = await import("@tauri-apps/api/core");
-      const answer = await settledWithin(invoke<unknown>("processor_name"), 2000);
-      if (typeof answer !== "string") return null;
-      // eslint-disable-next-line no-control-regex
-      const name = answer
-        .replace(/[\u0000-\u001f\u007f]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      return name.length > 0 && name.length <= 128 ? name : null;
-    } catch {
-      return null;
-    }
+    const name = await readProcessorName();
+    if (name === null) processorNameMissedAt = Date.now();
+    return name;
   })();
   return processorNameAsked;
+}
+
+async function readProcessorName(): Promise<string | null> {
+  try {
+    if (platform.name !== "tauri") return null;
+    const { invoke } = await import("@tauri-apps/api/core");
+    const answer = await settledWithin(invoke<unknown>("processor_name"), 2000);
+    if (typeof answer !== "string") return null;
+    // eslint-disable-next-line no-control-regex
+    const name = answer
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return name.length > 0 && name.length <= 128 ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Tests only. */
 export function __resetProcessorName(): void {
   processorNameAsked = null;
+  processorNameMissedAt = null;
 }
 
 /** How a probe came out. `ran` says what the command did (its exit code, its output, how long it took); the rest say
