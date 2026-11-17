@@ -212,7 +212,7 @@ export const KEEP_GOING_NOTE =
   "Keeping going. ArtDaddy will tell you again if it gets much slower.";
 /** The same line once the second slow banner has been answered: no third can come, so nothing is promised. */
 export const KEEP_GOING_LAST_NOTE =
-  "Keeping going. ArtDaddy will not say again that this export is slower than expected.";
+  "Keeping going. The slow-export notice will not come back for this export.";
 export const SWITCHING_NOTE = "Switching to Quick export. The export starts again.";
 export const ASSISTANT_SLOW_NOTE =
   "This export is running slower than expected. Tell the person how long is left and, if quick_available is true, that Switch to Quick export is on the card. Do not cancel it and start another.";

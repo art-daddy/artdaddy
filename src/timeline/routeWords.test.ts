@@ -280,7 +280,7 @@ describe("the slow banner: the owner's copy", () => {
     );
     // once the second slow banner has been answered no third can come: the line must not promise one
     expect(KEEP_GOING_LAST_NOTE).toBe(
-      "Keeping going. ArtDaddy will not say again that this export is slower than expected.",
+      "Keeping going. The slow-export notice will not come back for this export.",
     );
     expect(KEEP_GOING_LAST_NOTE).not.toMatch(/will tell you again/);
     expect(SWITCHING_NOTE).toBe("Switching to Quick export. The export starts again.");
