@@ -41,8 +41,9 @@ export interface ChipRowModel {
  *  row's: they have their own module.) */
 export const CHIP_ROW_NOTES: Readonly<Record<Exclude<ChipRowState, "none">, string>> = {
   checking: "Checking this PC's graphics chip…",
+  // The cost of the chip is said here, before the start, because the Export dialog no longer shows the old Mode row (which said it) where this row is drawn.
   auto_passed:
-    "Auto: used for long exports where it saves time. It passed ArtDaddy's test on this PC.",
+    "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
   auto_not_passed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
   set_aside:

@@ -2,7 +2,9 @@
 // an export and is set aside for a day), one switch, and where it applies a hint a person can act on. Drawn where the app finds a chip of a
 // known maker and the picture is one the chip serves; the person's own Off is drawn wherever a chip is found, so it can always be undone.
 // Off is the person's own switch (artdaddy.chipPref.v1): the chip is then never tested, offered or used (`findChip` reads it).
-import { useEffect, useState } from "react";
+// Where this row is drawn the dialog leaves out the old Mode row (Full quality / Fast), which says the same about the same chip: `onDrawn` is how the
+// dialog knows.
+import { useEffect, useLayoutEffect, useState } from "react";
 
 import { exportFlag } from "../api/exportFlags";
 import { processorName } from "../platform/host";
@@ -44,6 +46,7 @@ export default function ChipRow({
   resolution = "source",
   fps = null,
   onChange,
+  onDrawn,
 }: {
   /** The project's picture, which with the settings below says the size the chip is tested at. Absent: 1080p. */
   workload?: { width: number; height: number; fps: number } | null;
@@ -52,6 +55,9 @@ export default function ChipRow({
   /** The person changed what the app will do about the chip (the switch, or Try it again now): whatever decided the encoder from it
    *  asks again. */
   onChange?: () => void;
+  /** Whether the row is on screen, told once its first look has answered (never before: until then nothing is known, and "not drawn yet" must not be
+   *  taken for "not drawn") and again whenever that changes. Told before the browser paints, so the dialog never shows this row and the old Mode row together. */
+  onDrawn?: (drawn: boolean) => void;
 }): JSX.Element | null {
   const sizeClass = sizeClassFor(workload, resolution, fps);
   const [pref, setPref] = useState<ChipPref>(() => readChipPref(storage()));
@@ -109,6 +115,12 @@ export default function ChipRow({
     quickFlagOn: exportFlag("quick_export"),
     sizeServed: sizeClass !== null,
   });
+  const drawn = model.visible && model.note !== null;
+  // Answered: the first look has put the chip's status in, or has ended without one.
+  const answered = status !== null || !testing;
+  useLayoutEffect(() => {
+    if (answered) onDrawn?.(drawn);
+  }, [answered, drawn, onDrawn]);
   if (!model.visible || model.note === null) return null;
 
   const choose = (next: ChipPref): void => {

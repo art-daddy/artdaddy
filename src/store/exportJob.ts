@@ -183,6 +183,10 @@ interface ExportState extends ExportJob {
   finishing: Readonly<Record<string, ExportLive>>;
   calibrations: readonly ExportCalibration[];
   rememberCalibration: (sample: ExportCalibration) => void;
+  /** Whether the Export dialog had its Mode row on screen when Export was last pressed there; null until it has said. What `mode_shown` may claim of an
+   *  export started from the menu (timeline/render.ts): the dialog leaves the row out where the Graphics chip row is drawn, and a row nobody saw is not reported as shown. */
+  modeRowOnScreen: boolean | null;
+  setModeRowOnScreen: (onScreen: boolean) => void;
   engine: ExportEngine;
   setEngine: (engine: ExportEngine) => void;
   /** Set while a render is in flight, so the dialog can offer Cancel. */
@@ -218,6 +222,8 @@ export const useExportJob = create<ExportState>((set, get) => ({
     } catch {}
     set({ calibrations });
   },
+  modeRowOnScreen: null,
+  setModeRowOnScreen: (onScreen) => set({ modeRowOnScreen: onScreen }),
   engine: savedEngine(),
   setEngine: (engine) => {
     const selected =

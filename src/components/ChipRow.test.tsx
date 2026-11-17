@@ -38,6 +38,16 @@ const probe = vi.mocked(runCapabilityProbe);
 const OLD_DRIVER = "32.0.15.6094"; // NVIDIA 560.94
 const NEW_DRIVER = "32.0.16.1012"; // NVIDIA 610.12
 
+type Resources = Awaited<ReturnType<typeof resolveExportResources>>;
+const resourcesWith = (adapters: GraphicsAdapter[]): Resources => ({
+  total_memory_bytes: null,
+  available_memory_bytes: null,
+  scratch_free_bytes: null,
+  destination_free_bytes: null,
+  budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+  adapters,
+});
+
 /** A PC with these chips, an ffmpeg that behaves as told, and (optionally) the processor's name. `gate` holds the chip's test until opened. */
 function pc(
   adapters: GraphicsAdapter[],
@@ -283,6 +293,60 @@ describe("the chip row", () => {
         }
         unmount();
       }
+  });
+
+  // The Export dialog draws the old Mode row only where this row is not drawn, so it has to be told, and told the truth: "not drawn" only once the first look has answered.
+  it("tells the dialog it is drawn once its first look has found a chip, and not a moment before", async () => {
+    pc([amd]);
+    let answer!: (resources: Resources) => void;
+    const gate = new Promise<Resources>((resolve) => (answer = resolve));
+    vi.mocked(resolveExportResources).mockImplementation(() => gate);
+    const drawn = vi.fn();
+    render(<ChipRow onDrawn={drawn} />);
+    await settled();
+    await settled();
+    expect(drawn).not.toHaveBeenCalled(); // the look is still out: nothing is known, so nothing is said
+    await act(async () => answer(resourcesWith([amd])));
+    await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(true));
+    expect(drawn).not.toHaveBeenCalledWith(false);
+  });
+
+  it.each([
+    ["a PC with no chip of a known maker", () => pc([])],
+    [
+      "the server's switch for Quick export off",
+      () => {
+        pc([amd]);
+        __setExportFlag("quick_export", false);
+      },
+    ],
+    [
+      "a PC that cannot be asked",
+      () => {
+        pc([amd]);
+        vi.mocked(resolveExportResources).mockRejectedValue(new Error("no PC"));
+      },
+    ],
+  ] as const)("tells the dialog it is not drawn, once it knows, with %s", async (_why, arrange) => {
+    arrange();
+    const drawn = vi.fn();
+    const { container } = render(<ChipRow onDrawn={drawn} />);
+    await waitFor(() => expect(drawn).toHaveBeenCalledWith(false));
+    expect(drawn).not.toHaveBeenCalledWith(true);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("tells the dialog when it goes and when it is back: the picture changes to a size the chip does not serve, and back", async () => {
+    pc([amd]);
+    const drawn = vi.fn();
+    const uhd = { width: 3840, height: 2160, fps: 30 };
+    const view = render(<ChipRow workload={uhd} onDrawn={drawn} />);
+    await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(true));
+    view.rerender(<ChipRow workload={{ ...uhd, fps: 60 }} onDrawn={drawn} />);
+    await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(false));
+    expect(view.container).toBeEmptyDOMElement();
+    view.rerender(<ChipRow workload={uhd} onDrawn={drawn} />);
+    await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(true));
   });
 });
 

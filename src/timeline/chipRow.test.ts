@@ -70,7 +70,7 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     expect(model({ verdict: "passed" })).toEqual({
       state: "auto_passed",
       visible: true,
-      note: "Auto: used for long exports where it saves time. It passed ArtDaddy's test on this PC.",
+      note: "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
       action: "turn_off",
     });
   });
@@ -118,6 +118,27 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     // The hints about a driver or the BIOS are not the row's: no brand, driver or BIOS in any of its words.
     for (const note of Object.values(CHIP_ROW_NOTES))
       expect(note).not.toMatch(/nvidia|intel|amd|driver|bios|update/i);
+  });
+
+  // The Export dialog leaves the old Mode row out where this row is drawn, and that row is where the person was told, before the start, what the chip costs.
+  it("says what the chip costs, the file usually larger and the picture able to differ slightly, in the one state where the chip is used and in no other", () => {
+    const COST = "the file is usually larger and the picture can differ slightly";
+    const states = new Set<string>();
+    for (const input of everyInput()) {
+      const row = chipRowModel(input);
+      if (row.note === null) continue;
+      expect(row.note.includes(COST), `${row.state}: ${JSON.stringify(input)}`).toBe(
+        row.state === "auto_passed",
+      );
+      states.add(row.state);
+    }
+    expect([...states].sort()).toEqual([
+      "auto_not_passed",
+      "auto_passed",
+      "checking",
+      "off",
+      "set_aside",
+    ]);
   });
 });
 

@@ -3,7 +3,7 @@
 // Non-blocking by design (Premiere's Media Encoder, not a modal): dismissing it leaves the render
 // running and the menu bar keeps a live percentage, so a long export does not hold the editor
 // hostage. Re-opening rejoins the job already in progress rather than starting a second one.
-import { useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
 import { attempts } from "../timeline/exportAttempts";
@@ -63,6 +63,10 @@ const QUALITIES: { value: ExportQuality; label: string; hint: string }[] = [
 
 const FPS_CHOICES = [null, 24, 25, 30, 50, 60];
 
+/** What the dialog knows of the Graphics chip row, which the old Mode row gives way to: nothing yet (the row's first look has not answered), drawn, not drawn since the
+ *  settings were shown, or drawn and gone since (the person moved to a picture size the chip does not serve). */
+type ChipRowSeen = "unknown" | "drawn" | "absent" | "left";
+
 export default function ExportDialog({
   open,
   onCancel,
@@ -81,6 +85,15 @@ export default function ExportDialog({
   const [fps, setFps] = useState<number | null>(null);
   // What the person picked in the Mode row; null until they touch it (the app's own choice shows then).
   const [picked, setPicked] = useState<ExportMode | null>(null);
+  // Whether the Graphics chip row is on screen, as the row itself says (its `onDrawn`). The old Mode row is drawn only where the chip row is not: both
+  // speak for the same chip, and the chip row is the one the person can switch Off for good. While the chip row has not answered nothing is known of it,
+  // and neither row is drawn for the chip: the Mode row waits (it comes back the moment the chip row says it is not there).
+  const [chipRow, setChipRow] = useState<ChipRowSeen>("unknown");
+  const onChipRowDrawn = useCallback((drawn: boolean) => {
+    setChipRow((before) =>
+      drawn ? "drawn" : before === "drawn" || before === "left" ? "left" : "absent",
+    );
+  }, []);
   // Counts what the person changes about the graphics chip (its switch, Try it again now): the app's answer below is asked again.
   const [chipEpoch, bumpChip] = useReducer((n: number) => n + 1, 0);
   // What the app decided about the encoder (exportChoice.ts): whether the Mode row is shown and what it starts on. Kept with
@@ -109,7 +122,19 @@ export default function ExportDialog({
       }
     : null;
   const lines = describeModeLines(view, picked);
-  const mode = lines.selected;
+  // In the gap (the app's answer wants a row and the chip row has not answered) neither row is drawn and Export sends Full quality, so the estimate is priced for Full too:
+  // the line says what the export will do. Once the chip row answers, it is the app's own pick again.
+  const mode: ExportMode =
+    decision?.showRow === true && chipRow === "unknown" ? "quality" : lines.selected;
+  // The Mode row, with its hint, its amber note and its "would take" line, is on screen only where the app's answer wants it and the chip row is not
+  // there. A chip row that was drawn and has gone does not bring the row back for an answer that is not for what is on screen now (the picture size
+  // changed under it); for one that is, it does (the server's switch for the chip row went off: the dialog is then the old one). What the estimate is priced for
+  // follows the app's own pick (`mode`) whether or not the row is drawn: that is what the export will do.
+  const modeRowShown =
+    decision?.showRow === true && (chipRow === "absent" || (chipRow === "left" && answered));
+  // The answer on screen is one the person has been offered, unless it wants a row and neither row is there yet (the chip row's first look is still out): then it is
+  // treated like an answer that has not come, and the app does not choose for them.
+  const offered = answered && decision !== null && !(decision.showRow && chipRow === "unknown");
 
   // Read-only information: what this PC has measured for settings like these, else the honest estimate or a rough guess. For the way that is
   // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it). While the PC's speed check runs
@@ -195,6 +220,13 @@ export default function ExportDialog({
     if (open && phase === "idle") setPicked(null);
   }, [open, phase]);
 
+  // The chip row is drawn anew each time the settings are shown (it is not there while an export runs, nor without a project) and its first look starts
+  // over: until it has answered, nothing is known of it.
+  const settingsShown = open && phase === "idle" && !!workload;
+  useEffect(() => {
+    if (!settingsShown) setChipRow("unknown");
+  }, [settingsShown]);
+
   // Escape dismisses, and only dismisses. It maps to the same door as Hide/Cancel/Close, so a
   // stray keypress during a render hides the dialog instead of killing the render.
   useEffect(() => {
@@ -278,9 +310,15 @@ export default function ExportDialog({
               </select>
             </Field>
             {workload && (
-              <ChipRow workload={workload} resolution={resolution} fps={fps} onChange={bumpChip} />
+              <ChipRow
+                workload={workload}
+                resolution={resolution}
+                fps={fps}
+                onChange={bumpChip}
+                onDrawn={onChipRowDrawn}
+              />
             )}
-            {decision?.showRow && (
+            {modeRowShown && (
               <div className="text-xs text-neutral-400">
                 <div className="flex items-center gap-3">
                   <span className="w-20 shrink-0">Mode</span>
@@ -316,7 +354,9 @@ export default function ExportDialog({
                 {lines.hint && <p className="mt-0.5 pl-[5.75rem] leading-snug">{lines.hint}</p>}
               </div>
             )}
-            {lines.note && <p className="text-xs leading-snug text-amber-300">{lines.note}</p>}
+            {modeRowShown && lines.note && (
+              <p className="text-xs leading-snug text-amber-300">{lines.note}</p>
+            )}
             {expected && (
               <p aria-label="export estimate" className="text-xs leading-snug text-neutral-300">
                 {expected}
@@ -328,7 +368,7 @@ export default function ExportDialog({
               </p>
             )}
             <SpeedCheckLine check={check} />
-            {lines.alternative && (
+            {modeRowShown && lines.alternative && (
               <p className="text-xs leading-snug text-neutral-400">{lines.alternative}</p>
             )}
             {lines.faster && (
@@ -379,21 +419,20 @@ export default function ExportDialog({
                 onClick={() => {
                   // The request is on its way: a speed check in progress stops now and the export starts on a labelled rough guess.
                   holdExportAsk();
+                  // What the dialog showed: the export's record of the Mode row says "shown" only if it was (timeline/render.ts).
+                  useExportJob.getState().setModeRowOnScreen(modeRowShown);
                   onStart({
                     resolution,
                     quality,
                     fps,
                     // What the person chose, never more. Only an answer that is in, for exactly what is on screen, is
-                    // one the person has seen: then the row's pick if the row is shown, else nothing (the app decides,
-                    // and said so under the settings). Without one (no project to ask about, the look failed, it has
-                    // not come back, or the history changed under it) the person has been offered nothing, so the app
-                    // does not choose for them: Full quality, or what they had picked.
+                    // one the person has seen: then the row's pick if the row is on screen, else nothing (the app
+                    // decides, and said so under the settings: the Mode row, or the chip row in its place). Without one
+                    // (no project to ask about, the look failed, it has not come back, or the history changed under it)
+                    // the person has been offered nothing, so the app does not choose for them: Full quality, or what
+                    // they had picked.
                     mode:
-                      workload && answered && decision
-                        ? decision.showRow
-                          ? picked
-                          : null
-                        : (picked ?? "quality"),
+                      workload && offered ? (modeRowShown ? picked : null) : (picked ?? "quality"),
                   });
                 }}
                 className={primaryCls}

@@ -3172,9 +3172,13 @@ export async function encoderOptions(
     history: useExportJob.getState().calibrations,
     signal: ctx.signal,
   });
-  // The row is shown only in the Export dialog: an export from the chat or MCP never saw it.
+  // The row is shown only in the Export dialog, and only where the dialog drew it: an export from the chat or MCP never saw it, and the dialog leaves it out
+  // where the Graphics chip row is drawn (ExportDialog.tsx tells the store which it was when Export is pressed). An export that did not start in the dialog
+  // has nothing from it, and claims as it always did.
   const shown =
-    exportVia(ctx) === "menu" && decision.showRow
+    exportVia(ctx) === "menu" &&
+    decision.showRow &&
+    useExportJob.getState().modeRowOnScreen !== false
       ? decision.defaultMode === "fast"
         ? ("fast" as const)
         : ("full" as const)
