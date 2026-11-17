@@ -214,7 +214,8 @@ export function estimatesForRoutes(
       resolution: settings.resolution,
       fps: settings.fps ?? null,
     });
-    const shape = shapeOf(workload, deps);
+    // The project's cost shape is read only for the model that prices from it: with the estimate switched off the figure is 0.27.0's and nothing reads the timeline (and nothing keeps it).
+    const shape = gathered.flags.estimate_v2 ? shapeOf(workload, deps) : null;
     const maker: ChipMaker | null = request.chipMaker ?? null;
     const processor = (faster: boolean): EstimateRequest["route"] => ({
       family: "processor",
@@ -332,7 +333,7 @@ export function admissionEstimate(
       engine: input.engine,
       ...(input.rung === 1 || input.rung === 2 ? { rung: input.rung } : {}),
     };
-    const shape = shapeOf(input.workload, deps);
+    const shape = gathered.flags.estimate_v2 ? shapeOf(input.workload, deps) : null;
     const shown = price(gathered, input.workload, shape, way, true);
     if (!shown) return null;
     const uncorrected = gathered.flags.estimate_v2
