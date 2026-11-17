@@ -13,7 +13,12 @@ import { CHECKING_LINE } from "../timeline/estimateWords";
 import { holdExportAsk } from "../timeline/exportAsk";
 import { lowerAdvice3c } from "../timeline/exportHelpWatch";
 import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
-import { cancelExport, listExportRecords, subscribeExports } from "../timeline/exportQueue";
+import {
+  cancelExport,
+  listExportRecords,
+  restartWords,
+  subscribeExports,
+} from "../timeline/exportQueue";
 import {
   describeDialogProgress,
   describeModeLines,
@@ -463,6 +468,13 @@ function Progress({
         .filter(Boolean)
         .join(" · ")
     : "";
+  // When the app started the export again by itself the bar goes back to the start: the card says why (its reason's own words) and so does the dialog, for the attempt that is live now.
+  const liveRow =
+    running && jobId ? rows.find((row) => row.job_id === attempts.current(jobId)) : undefined;
+  const again =
+    liveRow?.attempt && liveRow.attempt > 1
+      ? (restartWords(liveRow.restartReason)?.after ?? null)
+      : null;
   // What to lower, under the error the dialog has always shown, where there is something true to say.
   const failedRow =
     phase === "failed" && jobId
@@ -494,6 +506,11 @@ function Progress({
           {pace}
         </span>
       </div>
+      {again && (
+        <p data-testid="export-dialog-restarted" className="mt-1 text-[11px] text-neutral-500">
+          {again}
+        </p>
+      )}
       {running && jobId && (
         <ExportHelpBanner
           jobId={jobId}
