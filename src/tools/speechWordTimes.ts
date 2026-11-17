@@ -42,7 +42,7 @@ import { WINDOWS_LOAD_FAILURES } from "./speechBackend";
 import { voiceStartsLate, type VoiceStart } from "./speechLeadingQuiet";
 
 /** Whether this build uses the alignment on the processor path. Off in every commit but the one that turns it on. */
-export const WORD_TIMES_SHIPPED = false;
+export const WORD_TIMES_SHIPPED = true;
 
 /** Whether this build also uses it on the graphics-chip path (a launch without `-ng`), on the hosts of
  *  {@link WORD_TIMES_CHIP_HOSTS} only. On, because the path was measured on one Windows device (Vulkan, an integrated AMD

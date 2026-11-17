@@ -74,19 +74,18 @@ const arguments_ = (
 };
 
 describe("which launches carry word times", () => {
-  // The release decision: this commit arms the graphics chip (its constant and list, on Windows only) and still ships the
-  // behaviour dark: the build's own gate is off. A release that turns it on changes that line on purpose, after the owner
-  // has looked at real captions.
-  it("ships dark: the build's own gate is off, so nothing carries them, on the chip's host too", () => {
-    expect(WORD_TIMES_SHIPPED).toBe(false);
+  // The release decision: this build ships the processor path (the owner's rule R: a voice that starts more than a
+  // second in) and the graphics chip on a Windows host, where its own constant, list and host gate say it was measured.
+  it("ships the processor path and the graphics chip on Windows: the build's own gates are on", () => {
+    expect(WORD_TIMES_SHIPPED).toBe(true);
     expect(WORD_TIMES_CHIP_SHIPPED).toBe(true);
-    expect(wordTimesOn()).toBe(false);
+    expect(wordTimesOn()).toBe(true); // the server's switch starts on
     for (const os of HOSTS) {
       hostIs(os);
       for (const size of SIZES)
         for (const cpuOnly of [true, false])
           expect(wordTimesArgs({ size, cpuOnly, voice: LATE }), `${os} ${size} ${cpuOnly}`).toEqual(
-            [],
+            size === "small" && (cpuOnly || os === "windows") ? [...DTW_ARGS] : [],
           );
     }
   });
