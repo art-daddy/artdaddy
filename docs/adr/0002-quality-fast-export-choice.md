@@ -143,7 +143,7 @@ project without a chip.
 - **Light compression only inside Fast.** Moving it out of Quality's policy would slow Quality for
   everyone (1.27 to 1.38 times on plain projects) and break the byte-identity pin.
 
-## How to turn it off
+## How to reverse (turn it off)
 
 1. **Server, no release:** set `"quick_route": false` in `config/export_flags.json` and deploy the
    server. The next opening of the dialog is the 0.28.0 dialog (the app reads the switch once per
