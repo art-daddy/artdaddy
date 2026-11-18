@@ -22,8 +22,11 @@ export const D2_WORDS = {
   resolutionName: "resolution",
   /** S10 the door. */
   door: "Advanced settings",
-  /** S14 the line for the faster setting, behind the door, Quality only: the 0.28.0 constant itself (OD-6). */
+  /** S14 the line for the faster setting, behind the door, Quality only: the 0.28.0 constant itself (OD-6). It still says "a faster setting": that is 0.28.0's name for what the owner calls
+   *  "light compression" since 18 Nov, and the sentence is shared with the 0.28.0 dialog and the export card, whose tests pin it (see the lane's REPORT: where the old name is still wanted). */
   fasterSetting: FASTER_SETTING_LINE,
+  /** S12, S13 the processor's lighter setting as the summary line names it, in the owner's words of 18 Nov. */
+  lightCompression: "light compression",
   /** S15 the frame rate row. */
   rateLabel: "Frame rate",
   rateName: "frame rate",
@@ -118,7 +121,7 @@ export function sameAsProjectRate(fps: number): string {
 }
 
 /** S11, S12, S13 the line under the door. Quality: the project's own size and rate and the quality it starts on. Fast: one size smaller where the project has a smaller size, up to
- *  the rate cap, the quality Fast starts on and the faster compression. Built from the figures it is given, so the lab's bundle is the only place a number lives. */
+ *  the rate cap, the quality Fast starts on and the light compression (`D2_WORDS.lightCompression`). Built from the figures it is given, so the lab's bundle is the only place a number lives. */
 export function summaryWords(
   choice: "quality" | "fast",
   figures: { smallerSize: boolean; maxFps: number; quality: ExportQuality },
@@ -129,7 +132,7 @@ export function summaryWords(
     ...(figures.smallerSize ? ["One size smaller"] : []),
     `${figures.smallerSize ? "up" : "Up"} to ${formatRate(figures.maxFps)} frames a second`,
     quality,
-    "faster compression",
+    D2_WORDS.lightCompression,
   ];
   return `${parts.join(", ")}.`;
 }

@@ -33,6 +33,7 @@ describe("D2_WORDS: the owner's copy, word for word (the spec's strings table)",
       resolutionName: "resolution",
       door: "Advanced settings",
       fasterSetting: "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
+      lightCompression: "light compression",
       rateLabel: "Frame rate",
       rateName: "frame rate",
       qualityLabel: "Quality",
@@ -168,21 +169,21 @@ describe("summaryWords: the line under the door (S11, S12, S13)", () => {
     );
   });
 
-  it("says one size smaller where there is one, the cap, the quality and the faster compression, for Fast", () => {
+  it("says one size smaller where there is one, the cap, the quality and the light compression, for Fast", () => {
     expect(summaryWords("fast", { smallerSize: true, maxFps: 30, quality: "medium" })).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
     );
     expect(summaryWords("fast", { smallerSize: false, maxFps: 30, quality: "medium" })).toBe(
-      "Up to 30 frames a second, Medium quality, faster compression.",
+      "Up to 30 frames a second, Medium quality, light compression.",
     );
   });
 
   it("writes the numbers it is given, not 30 and Medium", () => {
     expect(summaryWords("fast", { smallerSize: true, maxFps: 24, quality: "low" })).toBe(
-      "One size smaller, up to 24 frames a second, Low quality, faster compression.",
+      "One size smaller, up to 24 frames a second, Low quality, light compression.",
     );
     expect(summaryWords("fast", { smallerSize: false, maxFps: 29.97, quality: "high" })).toBe(
-      "Up to 29.97 frames a second, High quality, faster compression.",
+      "Up to 29.97 frames a second, High quality, light compression.",
     );
   });
 });

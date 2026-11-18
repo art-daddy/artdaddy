@@ -896,17 +896,17 @@ describe("summaryFor: the line under the door is built from the choice and the b
     }
   });
 
-  it("says one size smaller, up to 30 frames a second, Medium and faster compression for Fast", () => {
+  it("says one size smaller, up to 30 frames a second, Medium and light compression for Fast", () => {
     expect(summaryFor("fast", A)).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
     );
     expect(summaryFor("fast", B)).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
     );
   });
 
   it("leaves out one size smaller where the project has no smaller size (480p and under, no project)", () => {
-    const plain = "Up to 30 frames a second, Medium quality, faster compression.";
+    const plain = "Up to 30 frames a second, Medium quality, light compression.";
     expect(summaryFor("fast", facts(854, 480, 30))).toBe(plain);
     expect(summaryFor("fast", facts(640, 360, 25))).toBe(plain);
     expect(summaryFor("fast", null)).toBe(plain);
@@ -914,7 +914,7 @@ describe("summaryFor: the line under the door is built from the choice and the b
 
   it("still says up to 30 for a project that runs at 24: the line is for the choice, not for the values", () => {
     expect(summaryFor("fast", facts(1920, 1080, 24))).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
     );
   });
 
@@ -927,17 +927,17 @@ describe("summaryFor: the line under the door is built from the choice and the b
     };
     // 1280 x 720 has no rung below it in this ladder, 1920 x 1080 has none either (1080p is not below 1080)
     expect(summaryFor("fast", facts(1280, 720, 25), other)).toBe(
-      "Up to 24 frames a second, Low quality, faster compression.",
+      "Up to 24 frames a second, Low quality, light compression.",
     );
     expect(summaryFor("fast", facts(3840, 2160, 60), other)).toBe(
-      "One size smaller, up to 24 frames a second, Low quality, faster compression.",
+      "One size smaller, up to 24 frames a second, Low quality, light compression.",
     );
     expect(summaryFor("fast", facts(1280, 720, 25))).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
     );
     expect(
       summaryFor("fast", facts(1920, 1080, 30), { ...other, quality: "high", maxFps: 60 }),
-    ).toBe("Up to 60 frames a second, High quality, faster compression.");
+    ).toBe("Up to 60 frames a second, High quality, light compression.");
   });
 });
 

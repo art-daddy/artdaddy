@@ -525,7 +525,7 @@ describe("T15 (h) summaryFor is built from the bundle", () => {
         const smaller =
           f !== null && b.ladder.some((rung) => PRESET_SHORT_SIDE[rung] < shortSideOf(f));
         expect(summaryFor("fast", f, b)).toBe(
-          `${smaller ? "One size smaller, up to" : "Up to"} ${b.maxFps} frames a second, ${QUALITY_NAME[b.quality]} quality, faster compression.`,
+          `${smaller ? "One size smaller, up to" : "Up to"} ${b.maxFps} frames a second, ${QUALITY_NAME[b.quality]} quality, light compression.`,
         );
         expect(summaryFor("quality", f, b)).toBe("Project size and frame rate, Medium quality.");
       }),

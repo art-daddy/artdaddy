@@ -193,13 +193,13 @@ const FRAGMENTS: { fragment: string; literals: number; probe: string; builds: st
     fragment: "One size smaller",
     literals: 1,
     probe: summaryWords("fast", { smallerSize: true, maxFps: 30, quality: "medium" }),
-    builds: "One size smaller, up to 30 frames a second, Medium quality, faster compression.",
+    builds: "One size smaller, up to 30 frames a second, Medium quality, light compression.",
   },
   {
-    fragment: "faster compression",
+    fragment: "light compression",
     literals: 1,
     probe: summaryWords("fast", { smallerSize: false, maxFps: 30, quality: "medium" }),
-    builds: "Up to 30 frames a second, Medium quality, faster compression.",
+    builds: "Up to 30 frames a second, Medium quality, light compression.",
   },
   {
     fragment: "This is a big export. Fast would be about ",
