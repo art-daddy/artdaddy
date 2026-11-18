@@ -39,7 +39,11 @@ describe("a Fast pick is Fast only while the switch is on", () => {
     ["held off by the build, as shipped", () => __setHeldOffByBuild(true)],
   ])("is Quality, and says the switch is off, whatever was picked: %s", (_name, turnOff) => {
     turnOff();
-    for (const slot of [{ route: "quick", explicit: NOTHING_SET }, { route: "standard" }, undefined])
+    for (const slot of [
+      { route: "quick", explicit: NOTHING_SET },
+      { route: "standard" },
+      undefined,
+    ])
       expect(decideRoute(withSlot(slot), {})).toEqual({
         route: "standard",
         offer: "off",
@@ -93,16 +97,19 @@ describe("what the person set", () => {
     ["an array", [true, true]],
     ["null", null],
     ["nothing", undefined],
-  ])("falls back to the call's arguments when the dialog's word is unusable: %s", (_n, explicit) => {
-    expect(fast(explicit, {})).toEqual({ size: false, fps: false, quality: false });
-    expect(fast(explicit, { resolution: "1440p" })?.size).toBe(true);
-    expect(fast(explicit, { resolution: "source" })?.size).toBe(false);
-    expect(fast(explicit, { resolution: "  " })?.size).toBe(false);
-    expect(fast(explicit, { fps: 24 })?.fps).toBe(true);
-    expect(fast(explicit, { fps: "24" })?.fps).toBe(false);
-    expect(fast(explicit, { quality: "high" })?.quality).toBe(true);
-    expect(fast(explicit, { quality: "" })?.quality).toBe(false);
-  });
+  ])(
+    "falls back to the call's arguments when the dialog's word is unusable: %s",
+    (_n, explicit) => {
+      expect(fast(explicit, {})).toEqual({ size: false, fps: false, quality: false });
+      expect(fast(explicit, { resolution: "1440p" })?.size).toBe(true);
+      expect(fast(explicit, { resolution: "source" })?.size).toBe(false);
+      expect(fast(explicit, { resolution: "  " })?.size).toBe(false);
+      expect(fast(explicit, { fps: 24 })?.fps).toBe(true);
+      expect(fast(explicit, { fps: "24" })?.fps).toBe(false);
+      expect(fast(explicit, { quality: "high" })?.quality).toBe(true);
+      expect(fast(explicit, { quality: "" })?.quality).toBe(false);
+    },
+  );
 });
 
 describe("whatever it is given", () => {

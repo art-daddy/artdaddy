@@ -230,7 +230,10 @@ const CONTEXT = { surface: "app" } as unknown as ClientToolContext;
 
 // The owner's table for the canvases here: Fast's own size (the preset one rung below by the short side), the short side that gives, its rate; then a size a person may set (and the
 // short side that gives), a rate and a quality they may set.
-type Row = [Canvas, { preset: string; short: number; rate: number; size: string; sizeShort: number }];
+type Row = [
+  Canvas,
+  { preset: string; short: number; rate: number; size: string; sizeShort: number },
+];
 const ROWS: Row[] = [
   [
     { w: 1920, h: 1080, fps: 30 },
@@ -333,9 +336,10 @@ describe("a Fast pick is the typed settings and the encoder, and nothing else of
               const { fast, typed, short, rate } = await pair(shape, row, variant, engine, chip);
               expect(withoutChoice(fast), where).toEqual(withoutChoice(typed));
               // The picture is the owner's table, not whatever both sides agree on.
-              expect([Math.min(fast.output.width, fast.output.height), fast.output.fps], where).toEqual(
-                [short, rate],
-              );
+              expect(
+                [Math.min(fast.output.width, fast.output.height), fast.output.fps],
+                where,
+              ).toEqual([short, rate]);
               // Equal is no proof if both are empty: the command names the encoder that goes with the chip or without it.
               const command = JSON.stringify([fast.args, fast.steps ?? []]);
               expect(command, where).toContain(chip ? "h264_amf" : "veryfast");
@@ -365,9 +369,10 @@ describe("a Fast pick is the typed settings and the encoder, and nothing else of
                   branding,
                 );
                 expect(withoutChoice(fast), where).toEqual(withoutChoice(typed));
-                expect([Math.min(fast.output.width, fast.output.height), fast.output.fps], where).toEqual(
-                  [short, rate],
-                );
+                expect(
+                  [Math.min(fast.output.width, fast.output.height), fast.output.fps],
+                  where,
+                ).toEqual([short, rate]);
                 // The branding is really in the command (equal plans of two unbranded builds would prove nothing).
                 const command = JSON.stringify([fast.args, fast.steps ?? []]);
                 if (brand !== "card") expect(command, where).toContain("watermark-16x9.png");
