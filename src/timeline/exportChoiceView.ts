@@ -118,7 +118,8 @@ export function rateOptions(
 ): (number | null)[] {
   if (facts === null) return [null];
   const rates = RATE_LADDER.filter((rate) => rate < facts.fps);
-  if (extra !== null && extra < facts.fps && extra >= 1 && !rates.includes(extra)) rates.push(extra);
+  if (extra !== null && extra < facts.fps && extra >= 1 && !rates.includes(extra))
+    rates.push(extra);
   return [null, ...rates.sort((a, b) => b - a)];
 }
 
@@ -152,12 +153,7 @@ export function rateEntries(
 ): { value: number | null; label: string }[] {
   return rateOptions(facts, extra).map((value) => ({
     value,
-    label:
-      value === null
-        ? facts
-          ? sameAsProjectRate(facts.fps)
-          : ""
-        : rateEntry(value),
+    label: value === null ? (facts ? sameAsProjectRate(facts.fps) : "") : rateEntry(value),
   }));
 }
 
@@ -213,7 +209,11 @@ export function leversShown(
 
 /** Which of the size, the rate and the quality the person set: exactly the levers present in the overrides (a "same as the project" that was picked is a setting too). */
 export function explicitOf(o: Overrides): Required<ExplicitSettings> {
-  return { size: o.resolution !== undefined, fps: o.fps !== undefined, quality: o.quality !== undefined };
+  return {
+    size: o.resolution !== undefined,
+    fps: o.fps !== undefined,
+    quality: o.quality !== undefined,
+  };
 }
 
 /** The figure that may follow the word Fast, or null for the plain word. It is the lab's number for this project (`fastSpeedupLabel`: none while the table has no row) and it is claimed only
@@ -243,7 +243,12 @@ export function askFor(
 ): Ask | null {
   if (facts === null) return null;
   const heavy = needsSlowConfirm(
-    { route: routeOf(choice), resolution: shown.resolution, fps: shown.fps, explicit: explicitOf(overrides) },
+    {
+      route: routeOf(choice),
+      resolution: shown.resolution,
+      fps: shown.fps,
+      explicit: explicitOf(overrides),
+    },
     facts,
     bundle,
   );
