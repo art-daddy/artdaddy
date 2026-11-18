@@ -8,8 +8,8 @@
   `config/export_flags.json`
 - **Quality guard:** `src/timeline/exportFullGuard.test.ts` with its frozen fixture
   `src/timeline/__fixtures__/exportFullGuard.sha256.json`
-- **Measurements:** one AMD laptop (16 processors, Radeon 780M), lab of 18 Nov 2026, figures as read
-  from the lab's matrix on 19 Nov 2026 at 01:04 (tables are kept outside the repository)
+- **Measurements:** one Windows laptop with an AMD chip (16 processors, Radeon 780M), lab of 18 Nov
+  2026, figures as read from the lab's tables on 19 Nov 2026 at 01:17 (kept outside the repository)
 
 ## Context
 
@@ -46,8 +46,10 @@ rates below the project's, and it starts fresh at every opening. This ADR adds t
    is built. A Fast slot while the switch is off (or held off by the build) is read as no pick.
 4. **Doors.** Only the menu's whole-timeline export can take the Fast route. Chat and MCP exports,
    clip exports and library copies carry no slot and run as Quality (a journey test pins it). Try again
-   and the app's own restart keep the route of the export they continue; after a chip failure the
-   restart of a Fast export runs on the processor's standard encoder.
+   and the app's own restart keep the route of the export they continue. After a chip failure that
+   restart of a Fast export runs on plain x264 (as a Quality restart does), which is slower than the
+   light compression Fast uses on a processor; keeping light compression there is one line in
+   `prepareRender`.
 
 ### What Fast is not
 
@@ -63,43 +65,50 @@ rates below the project's, and it starts fresh at every opening. This ADR adds t
   builder, encoder choice, the real `export` tool); the fixture is never regenerated, and a changed
   hash is a change in what an export does. Quality sends no `route`, and the dialog's Quality object
   equals the 0.28.0 dialog's for the same inputs (`ExportSettingsView.quality.test.tsx`).
-- **Nothing new is reported.** The export record carries `route: "quick"`; the report builder picks
-  named fields and does not read it (a journey test compares the key sets).
+- **Nothing new is reported, so there is no signal.** The export record carries `route: "quick"`, but
+  the report builder picks named fields and does not read it (a journey test compares the key sets):
+  after release nothing says whether Fast is used or helps. The `mode_shown` trace step is no longer
+  written either, because the new dialog tells the store the old Mode row was never on screen.
 
 ## Why Fast is a modest gain
 
 Fast shrinks the picture after every frame is drawn at the project's own size: `render.ts` applies the
 delivery size as one `scale` at the end of the composite and the delivery rate as the `-r` output
 option. Reading and drawing cost what they cost for Quality; Fast shrinks only the compression share,
-and the chip makes that share nearly free. Time ratios (Quality seconds divided by Fast seconds; above 1
-Fast is faster), one laptop, strong profile, every run flagged busy (other programs used 3.5 to 11.3
-cores):
+and the chip makes that share nearly free. Time ratios (Quality seconds divided by Fast seconds; above
+1 the Fast export took less time), one Windows laptop, strong profile, rounded to one decimal because
+every run was made on a PC that other programs were also using (the lab flags all of them as busy,
+3.5 to 11 cores):
 
 | Project (length tested)              | Fast vs Quality, processor | Fast vs Quality's light compression | Fast vs Quality, chip |
 | ------------------------------------ | -------------------------- | ----------------------------------- | --------------------- |
-| Phone reel 1080x1920 at 30 (2 min)   | 1.40                       | 1.08                                | 0.89                  |
-| Talking head, captions (2 min)       | 1.38                       | 1.00                                | 0.88                  |
-| Horizontal HD, crossfades (2 min)    | 1.35                       | 1.04                                | 0.99                  |
-| HD at 60 fps (2 min)                 | 2.10                       | (1.20)                              | 0.98                  |
-| Zoom-heavy real reel (2 min)         | 1.07                       | not measured                        | 0.99                  |
-| 4K at 30, 3 clips, streamed (30 s)   | 1.36                       | 0.98                                | 1.01                  |
-| 4K at 60, 2 clips, streamed (20 s)   | 1.34                       | 1.01                                | not measured          |
-| 36-clip HD edit, streamed (2 min)    | (2.39)                     | (1.11)                              | (0.99)                |
+| Phone reel 1080x1920 at 30 (2 min)   | 1.4                        | 1.1                                 | 0.9                   |
+| Talking head, captions (2 min)       | 1.4                        | 1.0                                 | 0.9                   |
+| Horizontal HD, crossfades (2 min)    | 1.3 to 1.4                 | 1.0                                 | 0.9 to 1.0            |
+| HD at 60 fps (2 min)                 | 1.9 to 2.1                 | (1.2)                               | 1.0                   |
+| Photo slideshow, zoom (2 min)        | (1.05)                     | not measured                        | (0.9)                 |
+| Zoom-heavy real reel (2 min)         | 1.1                        | not measured                        | 0.9 to 1.0            |
+| 4K at 30, 3 clips, streamed (30 s)   | 1.4                        | 1.0                                 | 1.0                   |
+| 4K at 60, 2 clips, streamed (20 s)   | 1.3 to 1.4                 | 1.0                                 | not measured          |
+| 36-clip HD edit, streamed (2 min)    | (2.4)                      | (1.1)                               | (1.0)                 |
 
-Brackets: every run of that figure is in a block the lab flagged or in an unfinished segment. A
-slideshow block was flagged too and is left out. "Processor" is Quality as the app runs it there
-(standard compression); "light compression" is what Quality's own rule already picks on a slow
-project without a chip.
+Brackets: every run of that figure is in a block the lab flagged or in an unfinished segment. A range
+is the lab's two readings (ratio of the means of the valid runs; paired median of two blocks).
+"Processor" is Quality as the app runs it there (standard compression); "light compression" is what
+Quality's own rule already picks on a slow project without a chip. The lab's paired medians for the
+five typical projects (the first five rows) read 1.40, 1.39, 1.33, 1.88 and 1.05 without a chip and
+0.89, 0.90, 0.97, 0.98 and 0.92 with one, all flagged; the two 60 fps blocks are 26 percent apart and
+a third was asked for. So three of the five typical projects sit at 1.3 to 1.4 without a chip, the
+60 fps project at 1.9 to 2.1 and the slideshow at 1.05; with a chip none is above 1.0.
 
-- Light compression alone is 1.27 to 1.38 times faster than standard on plain projects, the chip alone
-  1.42 to 2.15 times (1.11 on the zoom-heavy reel). Fast without a chip is mostly the light
-  compression; the smaller picture adds 0 to 8 percent beyond it on plain projects, and nothing
-  beyond the chip (0.88 to 1.01).
-- On 4K and many-clip projects Fast is no faster than Quality's own light compression (0.98 to 1.11).
-  A second size step on 4K moved the chip time by under 1 percent (118.0 s to 118.1 s).
-- On an emulated weak PC (the same laptop limited to 4 of 16 processors and 4.7 GB free; three valid
-  blocks so far: a talking head, horizontal HD, HD at 60 fps) Fast without a chip was 1.8 to 2.6 times
-  faster than Quality; Fast with the chip was slower than Quality with the chip (ratios 0.79 to 0.89).
+- Light compression alone is 1.3 to 1.4 times faster than standard on plain projects, the chip alone
+  1.4 to 2.15 (1.1 on the zoom-heavy reel). Fast without a chip is mostly the light compression; the
+  smaller picture adds 0 to 8 percent beyond it on plain projects, and nothing beyond the chip.
+- On 4K and many-clip projects Fast took no less time than Quality's own light compression (1.0 to
+  1.1). A second size step on 4K moved the chip time by under 1 percent (118.0 s to 118.1 s).
+- On an emulated weak PC (the same laptop limited to 4 of 16 processors and 4.7 GB free; single runs,
+  and the lab's validity gate for that profile failed on its first block, so indications only) Fast
+  without a chip read 1.8 to 2.6 on four projects and Fast with a chip 0.8 to 1.05, below 1 on three.
 - On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps) on
   the one-pass engine: the lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame
   drawn, a little more than the chip saves by encoding the smaller picture, so Fast took up to about
@@ -113,53 +122,71 @@ project without a chip.
 
 ## Consequences
 
-- **We get:** a named choice for a smaller picture and file; on processor-only PCs, plain projects
-  export 1.3 to 1.4 times faster on the strong laptop (2.1 at 60 fps) and 1.8 to 2.6 times on the
-  emulated weak one; Quality unchanged to the byte; the 0.28.0 dialog as a fallback.
-- **We do not get:** a speed claim. With a working chip Fast takes about as long as Quality on the
-  strong laptop (0.88 to 1.01) and longer on the emulated weak one (0.79 to 0.89), and only delivers
-  a smaller picture and file; on 4K and many-clip projects it adds nothing to Quality's own light
-  compression.
+- **We get:** a named choice for a smaller picture (and with it a smaller file); Quality unchanged to
+  the byte; the 0.28.0 dialog as a fallback.
+- **Time:** where no chip passes its test, the lab measured shorter Fast exports on plain projects
+  (table; 1.8 to 2.6 on the weak emulation, indications only). Where a chip passes, Fast saves no
+  time and can take a little longer (0.9 to 1.0 on the strong laptop, 0.8 to 1.05 on the weak
+  emulation). On 4K and many-clip projects it adds nothing to Quality's own light compression. No
+  speed is claimed.
+- **Not measured or tested:** macOS and Linux; NVIDIA and Intel chips; slower cores; an upgrade from a
+  copied 0.27.0 profile (its flag cache has no `quick_route`, so the compiled "on" applies); a real
+  browser or screen reader (only the test environment's). The lab is one Windows laptop, AMD chip.
 - **Residual:** the unit tests assert the command handed to the app process, not rendered pixels (the
-  real-ffmpeg smoke suite is where output files are checked); one laptop and one chip maker; slower
-  cores, NVIDIA and Intel chips, macOS and Linux are not measured; the figure and the question screens
+  real-ffmpeg smoke suite is where output files are checked); the figure and the question screens
   are not built (only their pure rules).
+
+## Open questions
+
+- The word "Fast" where a chip passes its test: there it changes the picture and the file, not the
+  time. Options: neutral words around the choice (the summary names what changes, never a speed),
+  offering the choice only where no chip passed, or leaving it. Each is a small change at the choice row.
 
 ## Rejected alternatives
 
-- **A speed figure on the label.** No figure holds across the projects and PCs measured (0.79 to 2.6),
-  so none is claimed.
+- **A speed figure on the label.** No figure holds across the projects and PCs measured (0.8 to 2.6);
+  one would need data from more than one machine class.
 - **An "Are you sure?" question before a big Quality export.** It needs that figure and targets the
   projects where Fast adds least (4K, 60 fps, many clips).
 - **A Fast preset in the assistant's `export` tool.** A new parameter changes the tool contract (server
   first, a new catalog snapshot, evals) for a small gain; the tool already accepts a smaller
   `resolution`, a lower `fps` and a lower `quality`.
 - **A "Switch to Fast" button on the slow-export banner.** A restart discards the progress already
-  made, and Fast gains about 1.4 times at best on typical projects (2.1 at 60 fps);
+  made, and Fast's best ratio on typical projects is about 1.4 (1.9 to 2.1 at 60 fps);
   `quickAvailable()` stays false.
 - **Build small** (draw at the delivery size from the start). The one lever that moved 4K, but it
   changes the draw stage (text sizes and pixel-valued effects need care, Quality must stay
   byte-identical): deferred, with its upper-bound measurement recorded.
 - **Light compression only inside Fast.** Moving it out of Quality's policy would slow Quality for
-  everyone (1.27 to 1.38 times on plain projects) and break the byte-identity pin.
+  everyone (1.3 to 1.4 times on plain projects) and break the byte-identity pin.
 
 ## How to reverse (turn it off)
 
-1. **Server, no release:** set `"quick_route": false` in `config/export_flags.json` and deploy the
-   server. The next opening of the dialog is the 0.28.0 dialog (the app reads the switch once per
-   opening), and a Fast slot already on its way is read as no pick, so the export is Quality.
-2. **Client, next release:** revert the one commit that removes `"quick_route"` from
-   `OFF_IN_THIS_BUILD` (with the test that pins the set); the build then holds the choice off
-   whatever the server says.
-3. The Fast pieces are additive: the 0.28.0 dialog stays in `ExportDialog.tsx` and is drawn whenever
-   the switch is off, and Quality's encoder policy (`exportEncoder.ts`) is untouched.
+The switch has two places, and neither is a toggle that reaches every app.
 
-To add the figure or the question later: fill `QUICK_BUNDLE.speedup`, build the question screen first
-(the guard test says so), and re-measure on more than one laptop.
+1. **Server.** `config/export_flags.json` carries `"quick_route": true`. That is one server commit, not
+   part of this repository: it must be deployed before any client that ships the choice, and
+   `GET /client/export-flags` must list the name. The file is part of the server image, so turning the
+   choice off is a server redeploy with the file changed, or a new revision with the server's
+   flags-off lever. An app hears the server only while signed in and online (at start, before an
+   export and about every ten minutes while open; the privacy text says so) and keeps the last answer
+   across restarts, so "off" takes effect from the next opening of the dialog after the app has heard
+   it, up to about ten minutes later. An app that is offline, signed out, or talking to an older
+   server that does not list the name keeps its compiled "on": only a client release reaches it. A
+   Fast pick already on its way when the answer arrives runs as Quality with the values the dialog
+   showed.
+2. **Client.** Revert the one commit that removes `"quick_route"` from `OFF_IN_THIS_BUILD` (with the
+   test edits it carries); the build then holds the choice off whatever the server says.
+3. **What comes back.** Off restores the whole 0.28.0 dialog, not only "no Fast choice": a Mode row
+   ("Full quality / Fast", where Fast means the graphics chip) can still appear in it where no
+   Graphics chip row is drawn. The time-left rule, the plain failure sentence, the Resolution-list
+   rule and the renamed words are not behind the switch and stay. Quality's encoder policy
+   (`exportEncoder.ts`) is untouched.
 
 ## References
 
-- `src/timeline/exportRoute.ts` (bundle and rules), `routeDecide.ts`, `exportEncoder.ts`, `render.ts`
+- `src/timeline/exportRoute.ts`, `routeDecide.ts`, `exportEncoder.ts`, `render.ts`;
+  `src/api/exportFlags.ts`
 - `src/components/ExportSettingsView.tsx`, `ChoiceRow.tsx`, `AdvancedSettings.tsx`, `ExportDialog.tsx`,
   `MenuBar.tsx`; `src/timeline/exportChoiceView.ts`, `exportChoiceWords.ts`
 - Tests: `exportFullGuard.test.ts`, `exportFast.journey.test.ts`, `routeDecide.test.ts`,
