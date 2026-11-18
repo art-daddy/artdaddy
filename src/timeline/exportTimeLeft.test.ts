@@ -157,6 +157,28 @@ function totalRatio(reps: readonly Rep[], from: number): number {
   return worst;
 }
 
+const inPart = (reps: readonly Rep[], step: number, steps: number): Rep[] =>
+  reps.map((r) => ({ ...r, step, steps }));
+
+/** Parts 0 to 2 of 40 s each at 0.005 a second (20 % each), then the final encode from 120 s at 0.004 a second. */
+const threeParts = (): Rep[] => [
+  ...inPart(line(0, 39, 1, 0, 0.005), 0, 4),
+  ...inPart(line(40, 79, 1, 0.2, 0.005), 1, 4),
+  ...inPart(line(80, 119, 1, 0.4, 0.005), 2, 4),
+  ...inPart(line(120, 150, 1, 0.6, 0.004), 3, 4),
+];
+
+/** 0.01 a second for 20 s (the first figure), a stall that turns it into "taking longer", a sprint, then Finishing. */
+const stallSprintFinish = (): Rep[] => [
+  ...steady(0.01, 1, 20),
+  ...line(21, 40, 1, 0.2, 0),
+  { t: 41, f: 0.8 },
+  { t: 42, f: 0.85 },
+  { t: 43, f: 0.9 },
+  { t: 44, f: 0.5 },
+  { t: 45, f: 0.95 },
+];
+
 // ── the written rule as a model, for feeds a real export could produce ──────────────────────────
 
 interface Said {
@@ -604,7 +626,7 @@ describe("R2 before the gate nothing is said", () => {
     );
   });
 
-  it("says no figure before 20 s on the render's clock, nor before 60 s while less than 15 % is made, on any feed", () => {
+  it("says nothing before 20 s on the render's clock, nor before 60 s while less than 15 % is made (Finishing only from 0.9), on any feed", () => {
     let reachedAFigure = 0;
     fc.assert(
       fc.property(feedSpecArb, (spec) => {
@@ -614,11 +636,12 @@ describe("R2 before the gate nothing is said", () => {
         let sawFigure = false;
         reps.forEach((r, i) => {
           best = Math.max(best, r.f);
-          if (!isFigure(vs[i])) return;
-          sawFigure = true;
+          if (isFigure(vs[i])) sawFigure = true;
           const renderedMs = msOf(r.t) - msOf(reps[0].t);
           if (renderedMs < 20_000 || (renderedMs < 60_000 && best < 0.15)) {
-            throw new Error(`${show(vs[i])} at ${renderedMs} ms with ${best} made`);
+            if (vs[i].kind !== (best >= 0.9 ? "finishing" : "none")) {
+              throw new Error(`${show(vs[i])} at ${renderedMs} ms with ${best} made`);
+            }
           }
         });
         if (sawFigure) reachedAFigure += 1;
@@ -1207,17 +1230,6 @@ describe("R7 taking longer", () => {
 // ── R8 ─────────────────────────────────────────────────────────────────────────────────────────
 
 describe("R8 a render in parts", () => {
-  const inPart = (reps: readonly Rep[], step: number, steps: number): Rep[] =>
-    reps.map((r) => ({ ...r, step, steps }));
-
-  /** Parts 0 to 2 of 40 s each at 0.005 a second (20 % each), then the final encode from 120 s at 0.004 a second. */
-  const threeParts = (): Rep[] => [
-    ...inPart(line(0, 39, 1, 0, 0.005), 0, 4),
-    ...inPart(line(40, 79, 1, 0.2, 0.005), 1, 4),
-    ...inPart(line(80, 119, 1, 0.4, 0.005), 2, 4),
-    ...inPart(line(120, 150, 1, 0.6, 0.004), 3, 4),
-  ];
-
   it("says nothing in any part before the last, and the final encode says its first figure only after its own 20 s", () => {
     // the final encode: 68 % at 140 s, 0.004 a second, 0.32 left is 80 s
     expect(shows(threeParts())).toEqual([...Array(140).fill("none"), ...Array(11).fill("left 60")]);
@@ -1520,6 +1532,29 @@ describe("R11 an unchanged answer is the very same object", () => {
       { numRuns: 250 },
     );
     expect(same).toBeGreaterThan(5000);
+  });
+
+  const unchangedButNewObject = (vs: readonly TimeLeft[]): string | null => {
+    for (let i = 1; i < vs.length; i += 1) {
+      if (show(vs[i]) === show(vs[i - 1]) && vs[i] !== vs[i - 1]) {
+        return `report ${i}: ${show(vs[i])} came as a new object`;
+      }
+    }
+    return null;
+  };
+
+  it("hands out one object for each unchanged answer through nothing, a figure, taking longer and Finishing", () => {
+    const vs = valuesOf(stallSprintFinish());
+    expect(new Set(vs.map((v) => v.kind))).toEqual(
+      new Set(["none", "left", "longer", "finishing"]),
+    );
+    expect(unchangedButNewObject(vs)).toBeNull();
+  });
+
+  it("hands out one object for each unchanged answer in a render in parts too", () => {
+    const vs = valuesOf(threeParts());
+    expect(new Set(vs.map((v) => v.kind))).toEqual(new Set(["none", "left"]));
+    expect(unchangedButNewObject(vs)).toBeNull();
   });
 
   it("hands back the identical value for a report that is no report", () => {
