@@ -9,6 +9,7 @@ import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { exportRunning, useExportJob } from "../store/exportJob";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
+import { plainFailure } from "../timeline/exportWords";
 
 vi.mock("../timeline/exportChoice", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../timeline/exportChoice")>()),
@@ -521,13 +522,20 @@ describe("ExportDialog", () => {
     expect(screen.getByText(/my film\.mp4/)).toBeInTheDocument();
   });
 
-  it("shows the reason it failed rather than a bare 'failed'", async () => {
+  it("says why it failed in the card's plain words rather than a bare 'failed', with the text of the failure one click away", async () => {
     useExportJob.getState().begin(null);
     open();
     await act(async () => {
       useExportJob.getState().finish({ phase: "failed", error: "no clips to render" });
     });
-    expect(screen.getByText(/no clips to render/)).toBeInTheDocument();
+    // "render" in the text reads as a render that failed: the card's sentence for it
+    const said = screen.getByTestId("export-error");
+    expect(said).toBeVisible();
+    expect(said.textContent).toBe(plainFailure("render_failed"));
+    // the text itself is under a Show details that is closed, and is not what the line says
+    const text = screen.getByText("no clips to render");
+    expect(text.closest("details")).toBe(screen.getByTestId("export-error-details"));
+    expect(text).not.toBeVisible();
   });
 
   it("offers the settings again when re-opened after a finished render", () => {

@@ -17,6 +17,7 @@ import {
   type ExportRecord,
 } from "../timeline/exportQueue";
 import { useExportJob } from "../store/exportJob";
+import { describeFailureHere } from "../timeline/exportWords";
 import { cn } from "./ui";
 
 const LABEL: Record<ExportRecord["state"], string> = {
@@ -37,6 +38,24 @@ const DOT: Record<ExportRecord["state"], string> = {
 
 function timeOf(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** What a row that is not running says on its right: how it ended and, for a failure that left a text to read, the card's plain
+ *  sentence for why (it wraps, where a label does not need to). The failure's own text is on the row's hover text, not on its face. */
+function Outcome({ r }: { r: ExportRecord }): JSX.Element {
+  const why =
+    r.state === "failed" && r.error ? describeFailureHere(r.error, r.chipFailed === true) : null;
+  return (
+    <span
+      className={cn(
+        "shrink-0 text-right",
+        why ? "w-56 max-w-[60%] leading-snug" : "w-24 truncate",
+        r.state === "failed" ? "text-red-400" : "text-neutral-500",
+      )}
+    >
+      {why ?? LABEL[r.state]}
+    </span>
+  );
 }
 
 export default function ExportQueuePane(): JSX.Element | null {
@@ -95,16 +114,7 @@ export default function ExportQueuePane(): JSX.Element | null {
                 </span>
               </span>
             )}
-            {r.state !== "running" && (
-              <span
-                className={cn(
-                  "w-24 shrink-0 truncate text-right",
-                  r.state === "failed" ? "text-red-400" : "text-neutral-500",
-                )}
-              >
-                {r.state === "failed" && r.error ? r.error : LABEL[r.state]}
-              </span>
-            )}
+            {r.state !== "running" && <Outcome r={r} />}
 
             {r.state === "running" || r.state === "queued" ? (
               <button

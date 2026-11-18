@@ -663,6 +663,40 @@ export function outputSize(
   return w === canvasW && h === canvasH ? null : { w, h };
 }
 
+/** A project's picture size when it can be read: both sides finite numbers above 0. The ONE reading of "can be read" for the size the Export
+ *  dialog goes by, shared with `resolutionChoices`, so the two cannot disagree about which size there is. */
+export function usableCanvas(
+  width: unknown,
+  height: unknown,
+): { width: number; height: number } | null {
+  return typeof width === "number" &&
+    typeof height === "number" &&
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0
+    ? { width, height }
+    : null;
+}
+
+/** The picture sizes the Export dialog lists for a project: "source" (Same as project) first, then every preset that would make the picture
+ *  smaller, largest first (the order `SHORT_SIDE` is written in). The rule is `outputSize`'s and no other: a preset is on offer exactly when
+ *  `outputSize` would resize to it, so nothing as large as the project, and nothing larger, is listed. A canvas that cannot be read (none,
+ *  or a side that is not a finite number above 0) offers "source" alone: nothing is said to be smaller than a project whose size is not
+ *  known. Only the dialog's list is held to this: the `export` tool still takes every preset, and `outputSize` leaves a picture it would not
+ *  shrink as it is. */
+export function resolutionChoices(
+  canvas: { width: number; height: number } | null | undefined,
+): ExportResolution[] {
+  const size = canvas ? usableCanvas(canvas.width, canvas.height) : null;
+  if (!size) return ["source"];
+  const presets = Object.keys(SHORT_SIDE) as Exclude<ExportResolution, "source">[];
+  return [
+    "source",
+    ...presets.filter((preset) => outputSize(size.width, size.height, preset) !== null),
+  ];
+}
+
 /** The `-crf` value, or null to leave libx264 on its own default. */
 export function crfFor(quality: ExportQuality | undefined): number | null {
   return quality ? CRF[quality] : null;

@@ -1,7 +1,14 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { EXPORT_REASON_CODES } from "../api/exportReason";
+import { EXPORT_REASON_CODES, reasonOfError } from "../api/exportReason";
+import {
+  ENCODER_FAILURE_LOG,
+  ENCODER_FAILURE_PIECES,
+  FAILURE_TEXT_ROWS,
+  FAILURE_TEXTS,
+  REASONS_WITHOUT_TEXT,
+} from "../test/failureTexts";
 import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
   canSaveElsewhere,
@@ -9,6 +16,7 @@ import {
   describeDialogProgress,
   describeEncoder,
   describeExpected,
+  describeFailureHere,
   describeLiveStatus,
   describeModeLines,
   describeQuietNote,
@@ -497,6 +505,72 @@ describe("the reason an export stopped, in plain words", () => {
   it("tells the person what to do about the ones they can fix", () => {
     expect(plainFailure("memory_limit")).toMatch(/close other programs/i);
     expect(plainFailure("storage_full")).toMatch(/free up/i);
+  });
+});
+
+// The Export dialog and its queue have no Try again button. They say the card's sentence for why an export stopped, and the card's
+// sentence for a stop by the graphics chip that says what to do instead of pointing at a button; the text of the failure is not for them to say.
+describe("what a place with no Try again button says about a failed export", () => {
+  it("is the card's own sentence for every reason a text can be read as, and never the text", () => {
+    // the table is every way a text can be read: the states that carry no text are the only reasons it does not have
+    expect(EXPORT_REASON_CODES.filter((code) => !(code in FAILURE_TEXTS))).toEqual(
+      REASONS_WITHOUT_TEXT,
+    );
+    for (const [code, text] of FAILURE_TEXT_ROWS) {
+      expect(reasonOfError(text), `the text for ${code}`).toBe(code);
+      const said = describeFailureHere(text, false);
+      expect(said, code).toBe(plainFailure(code));
+      // the line the card prints for the same failure
+      expect(said, code).toBe(
+        describeResult({ state: "failed", filename: "movie.mp4", elapsedMs: 1_000, error: text })
+          .detail,
+      );
+      expect(said, code).not.toContain(text);
+    }
+    expect(describeFailureHere(undefined, false)).toBe(plainFailure("unknown"));
+  });
+
+  it("says nothing of a long log: its own sentence, with none of the log's pieces in it", () => {
+    expect(reasonOfError(ENCODER_FAILURE_LOG)).toBe("render_failed");
+    expect(ENCODER_FAILURE_LOG.length).toBeGreaterThan(1_000);
+    const said = describeFailureHere(ENCODER_FAILURE_LOG, false);
+    expect(said).toBe(plainFailure("render_failed"));
+    for (const piece of ENCODER_FAILURE_PIECES) expect(said).not.toContain(piece);
+  });
+
+  it("is the card's sentence for a place with no Try again once the graphics chip stopped the export, whatever the text says", () => {
+    const chip = describeChipFailure("again");
+    for (const [code, text] of FAILURE_TEXT_ROWS)
+      expect(describeFailureHere(text, true), code).toBe(chip);
+    expect(describeFailureHere(undefined, true)).toBe(chip);
+    // not the card's own chip sentence, which points at a Try again button this place does not have
+    expect(chip).not.toBe(describeChipFailure("card"));
+    expect(chip).not.toMatch(/try again/i);
+  });
+
+  it("is one of a closed list of sentences for any text at all, with the chip or without it", () => {
+    const sentences = new Set<string>([
+      ...EXPORT_REASON_CODES.map((code) => plainFailure(code)),
+      describeChipFailure("again"),
+    ]);
+    // noise with the trigger words of every reason inside it, so each way of reading a text is met
+    const texts = FAILURE_TEXT_ROWS.map(([, text]) => text);
+    const failureText = fc.oneof(
+      fc.string({ maxLength: 300 }),
+      fc.constantFrom(...texts),
+      fc
+        .tuple(
+          fc.string({ maxLength: 80 }),
+          fc.constantFrom(...texts),
+          fc.string({ maxLength: 80 }),
+        )
+        .map((parts) => parts.join("\n")),
+    );
+    fc.assert(
+      fc.property(failureText, fc.boolean(), (text, chipFailed) => {
+        expect(sentences.has(describeFailureHere(text, chipFailed))).toBe(true);
+      }),
+    );
   });
 });
 

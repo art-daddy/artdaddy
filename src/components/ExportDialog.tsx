@@ -12,7 +12,13 @@ import { dialogEstimate } from "../timeline/dialogEstimate";
 import { CHECKING_LINE } from "../timeline/estimateWords";
 import { holdExportAsk } from "../timeline/exportAsk";
 import { lowerAdvice3c } from "../timeline/exportHelpWatch";
-import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
+import {
+  resolutionChoices,
+  usableCanvas,
+  type ExportMode,
+  type ExportQuality,
+  type ExportResolution,
+} from "../timeline/exportOptions";
 import {
   cancelExport,
   listExportRecords,
@@ -21,6 +27,7 @@ import {
 } from "../timeline/exportQueue";
 import {
   describeDialogProgress,
+  describeFailureHere,
   describeModeLines,
   failureOf,
   STATUS_REFRESH_MS,
@@ -46,6 +53,7 @@ export interface ExportSettings {
   mode: ExportMode | null;
 }
 
+/** The words for every preset, in the order the list shows them. Which of them a project is offered is `resolutionChoices`' to say (exportOptions.ts). */
 const RESOLUTIONS: { value: ExportResolution; label: string }[] = [
   { value: "source", label: "Same as project" },
   { value: "2160p", label: "2160p (4K)" },
@@ -80,7 +88,24 @@ export default function ExportDialog({
    *  the file will be before the person clicks. Absent: the dialog says nothing about either. */
   workload?: RenderWorkload | null;
 }): JSX.Element | null {
-  const [resolution, setResolution] = useState<ExportResolution>("source");
+  // What the person picked in the Resolution list, which the list may no longer hold: it follows the project's size.
+  const [pickedResolution, setPickedResolution] = useState<ExportResolution>("source");
+  // The project's size NOW. The assistant or an MCP client can change it while this dialog is open, so the live canvas is read here and the `workload` taken when the dialog
+  // opened is only the fallback. Each side is its own number, so the dialog draws again only when the width or the height changes. With no size to go by (no project open and
+  // no workload) the list is Same as project alone.
+  const liveWidth = useEditor((s) => s.timeline?.canvas?.width);
+  const liveHeight = useEditor((s) => s.timeline?.canvas?.height);
+  const canvas =
+    usableCanvas(liveWidth, liveHeight) ?? usableCanvas(workload?.width, workload?.height);
+  const sizes = resolutionChoices(canvas);
+  // What is shown, asked about, estimated and sent is never a size the list does not hold: such a pick reads as Same as project in every render.
+  const resolution: ExportResolution = sizes.includes(pickedResolution)
+    ? pickedResolution
+    : "source";
+  // And it is forgotten, so a project that grows again does not bring the old pick back.
+  useEffect(() => {
+    if (pickedResolution !== resolution) setPickedResolution(resolution);
+  }, [pickedResolution, resolution]);
   const [quality, setQuality] = useState<ExportQuality>("medium");
   const [fps, setFps] = useState<number | null>(null);
   // What the person picked in the Mode row; null until they touch it (the app's own choice shows then).
@@ -271,10 +296,10 @@ export default function ExportDialog({
               <select
                 aria-label="resolution"
                 value={resolution}
-                onChange={(e) => setResolution(e.target.value as ExportResolution)}
+                onChange={(e) => setPickedResolution(e.target.value as ExportResolution)}
                 className={selectCls}
               >
-                {RESOLUTIONS.map((r) => (
+                {RESOLUTIONS.filter((r) => sizes.includes(r.value)).map((r) => (
                   <option key={r.value} value={r.value}>
                     {r.label}
                   </option>
@@ -374,10 +399,6 @@ export default function ExportDialog({
             {lines.faster && (
               <p className="text-xs leading-snug text-neutral-400">{lines.faster}</p>
             )}
-            <p className="text-[11px] leading-snug text-neutral-500">
-              Never upscales: a preset larger than the project is left at the project&apos;s own
-              size.
-            </p>
           </div>
         )}
 
@@ -514,7 +535,7 @@ function Progress({
     liveRow?.attempt && liveRow.attempt > 1
       ? (restartWords(liveRow.restartReason)?.after ?? null)
       : null;
-  // What to lower, under the error the dialog has always shown, where there is something true to say.
+  // What to lower, under the sentence the dialog says for the failure, where there is something true to say.
   const failedRow =
     phase === "failed" && jobId
       ? rows.find((row) => row.job_id === attempts.current(jobId))
@@ -563,7 +584,23 @@ function Progress({
           {/[\\/]/.test(savedTo) ? `Saved to ${savedTo}` : `Saved ${savedTo} to Downloads.`}
         </p>
       )}
-      {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+      {error && (
+        <>
+          {/* The card's sentence for why it stopped. The failure's own text (the encoder's log, the app's diagnostics) is not for the face of
+              the dialog: it is one click away, for a report. */}
+          <p data-testid="export-error" className="mt-2 text-xs text-red-300">
+            {describeFailureHere(error, failedRow?.chipFailed === true)}
+          </p>
+          <details data-testid="export-error-details" className="mt-1">
+            <summary className="cursor-pointer text-[11px] text-neutral-500 hover:text-neutral-300">
+              Show details
+            </summary>
+            <pre className="mt-1 max-h-40 select-text overflow-auto whitespace-pre-wrap break-words text-[11px] text-neutral-400">
+              {error}
+            </pre>
+          </details>
+        </>
+      )}
       {lower && (
         <p data-testid="export-lower" className="mt-1 text-xs text-neutral-400">
           {lower}

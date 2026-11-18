@@ -8,7 +8,7 @@ const ed = {
   dirty: false as boolean,
   zoom: 40,
   playhead: 2,
-  timeline: { canvas: { fps: 30 } },
+  timeline: { canvas: { width: 1920, height: 1080, fps: 30 } },
   undo: vi.fn(),
   redo: vi.fn(),
   copyClip: vi.fn(),
@@ -66,6 +66,7 @@ import { useExportJob } from "../store/exportJob";
 import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
 import { useMcpPanel } from "../store/mcpPanel";
 import { unknownParams } from "../contract/params";
+import { plainFailure } from "../timeline/exportWords";
 
 type ToolReply = {
   ok: boolean;
@@ -366,6 +367,22 @@ describe("MenuBar", () => {
     );
   });
 
+  // The Resolution list is for the open project: Same as project and only the sizes smaller than it (here the editor is the mock above, read through the dialog's own selectors).
+  it("File → Export Video lists Same as project and only the sizes smaller than the open project", () => {
+    const before = ed.timeline;
+    ed.timeline = { canvas: { width: 1280, height: 720, fps: 30 } };
+    try {
+      renderBar("/p/test");
+      fireEvent.click(screen.getByRole("button", { name: "File" }));
+      fireEvent.click(screen.getByText("Export Video (.mp4)…"));
+      const listed = Array.from((screen.getByLabelText("resolution") as HTMLSelectElement).options);
+      expect(listed.map((option) => option.value)).toEqual(["source", "480p"]);
+      expect(screen.queryByText(/never upscales/i)).not.toBeInTheDocument();
+    } finally {
+      ed.timeline = before;
+    }
+  });
+
   it("omits fps entirely when the project's own rate is kept", async () => {
     // Sending `fps: null` would fail the contract's integer type; the option must be absent.
     renderBar("/p/test");
@@ -387,7 +404,13 @@ describe("MenuBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "File" }));
     fireEvent.click(screen.getByText("Export Video (.mp4)…"));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    await waitFor(() => expect(screen.getByText(/no clips to render/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("export-error").textContent).toBe(plainFailure("render_failed")),
+    );
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    // the text the tool answered with is one click away, under Show details, and not on the face of the dialog
+    expect(screen.getByText("no clips to render")).not.toBeVisible();
+    expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
   });
 
   // Pressing Cancel on a question (not enough memory, say) is the person's own choice: the export

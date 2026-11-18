@@ -1,11 +1,12 @@
 // The slow banner and the failure advice in the Export dialog's panel: the same state as the chat card's (answering in either place closes both), the same words, and, once the export has failed,
-// the one sentence of what to lower under the error the dialog has always shown. Driven through the real queue and the real live feed.
+// the card's plain sentence for why (the text of the failure is one click away) and the one sentence of what to lower under it. Driven through the real queue and the real live feed.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportCard from "./ExportCard";
 import ExportDialog from "./ExportDialog";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { reasonOfError } from "../api/exportReason";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import * as host from "../platform/host";
 import { useEditor } from "../store/editor";
@@ -17,6 +18,12 @@ import {
   whenExportsSettle,
   type ExportSubmission,
 } from "../timeline/exportQueue";
+import { describeChipFailure, plainFailure } from "../timeline/exportWords";
+import {
+  ENCODER_FAILURE_LOG,
+  ENCODER_FAILURE_PIECES,
+  FAILURE_TEXT_ROWS,
+} from "../test/failureTexts";
 import { ExportMemFs } from "../test/timelineKit";
 import { ProjectStoreAccess } from "../tools/store";
 
@@ -258,31 +265,33 @@ describe("the slow banner in the dialog's panel", () => {
   });
 });
 
+const MEMORY = "ffmpeg render failed (code=1): Error while filtering: Cannot allocate memory";
+const DRIVER =
+  "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder";
+
+/** An export that fails with `error` while the dialog is open, as it does for a person who watches it. */
+async function failed(error: string, over: { encoder?: "amd" } = {}) {
+  useExportJob.getState().begin(null);
+  const sub = await startFromMenu(
+    "film.mp4",
+    async () => {
+      throw new Error(error);
+    },
+    over,
+  );
+  act(() => useExportJob.getState().attach(sub.job_id));
+  // the dialog is open while the export runs and fails, as it is for a person who watches it
+  open();
+  await whenExportsSettle();
+  act(() => useExportJob.getState().finish({ phase: "failed", error }));
+  return sub;
+}
+
 describe("what to lower, under the error the dialog shows (A1)", () => {
-  const MEMORY = "ffmpeg render failed (code=1): Error while filtering: Cannot allocate memory";
-  const DRIVER =
-    "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder";
-
-  async function failed(error: string, over: { encoder?: "amd" } = {}) {
-    useExportJob.getState().begin(null);
-    const sub = await startFromMenu(
-      "film.mp4",
-      async () => {
-        throw new Error(error);
-      },
-      over,
-    );
-    act(() => useExportJob.getState().attach(sub.job_id));
-    // the dialog is open while the export runs and fails, as it is for a person who watches it
-    open();
-    await whenExportsSettle();
-    act(() => useExportJob.getState().finish({ phase: "failed", error }));
-    return sub;
-  }
-
-  it("keeps the error as it was and adds the sentence for a memory failure under it", async () => {
+  it("adds the sentence for a memory failure under the card's sentence for it", async () => {
     await failed(MEMORY);
-    expect(screen.getAllByText(MEMORY)[0]).toBeVisible();
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    expect(screen.getByTestId("export-error")).toHaveTextContent(plainFailure("memory_limit"));
     expect(screen.getByTestId("export-lower")).toHaveTextContent(
       "To use less memory, lower the picture size or frame rate, or export a shorter section.",
     );
@@ -290,7 +299,8 @@ describe("what to lower, under the error the dialog shows (A1)", () => {
 
   it("adds the sentence for a failure of time, without Quick", async () => {
     await failed("export deadline exceeded");
-    expect(screen.getAllByText("export deadline exceeded")[0]).toBeVisible();
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    expect(screen.getByTestId("export-error")).toHaveTextContent(plainFailure("time_limit"));
     expect(screen.getByTestId("export-lower")).toHaveTextContent(
       "On this PC a lower picture size or frame rate, or a shorter section, is faster.",
     );
@@ -299,31 +309,135 @@ describe("what to lower, under the error the dialog shows (A1)", () => {
   it("adds what makes it shorter when the graphics chip stopped it", async () => {
     __setExportFlag("chip_restart", false);
     await failed(DRIVER, { encoder: "amd" });
-    expect(screen.getAllByText(DRIVER)[0]).toBeVisible();
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    expect(screen.getByTestId("export-error")).toHaveTextContent(describeChipFailure("again"));
     expect(screen.getByTestId("export-lower")).toHaveTextContent(
       "To make that shorter, lower the picture size or frame rate.",
     );
   });
 
   it.each([
-    "ENOSPC: no space left on device",
-    "ENOENT: no such file or directory",
-    "ffmpeg render failed (code=1)",
-    "something odd",
-  ])("adds nothing for %s: when the cause is not known no advice is given", async (error) => {
-    await failed(error);
-    expect(screen.getAllByText(error)[0]).toBeVisible();
-    expect(screen.queryByTestId("export-lower")).toBeNull();
-    expect(screen.getByRole("dialog").textContent).not.toMatch(
-      /lower the picture size|a lower picture size|shorter section|quick/i,
-    );
-  });
+    ["ENOSPC: no space left on device", "storage_full"],
+    ["ENOENT: no such file or directory", "source_unavailable"],
+    ["ffmpeg render failed (code=1)", "render_failed"],
+    ["something odd", "unknown"],
+  ] as const)(
+    "adds nothing for %s: when the cause is not known no advice is given",
+    async (error, code) => {
+      await failed(error);
+      expect(screen.getByTestId("export-error")).toBeVisible();
+      expect(screen.getByTestId("export-error")).toHaveTextContent(plainFailure(code));
+      expect(screen.queryByTestId("export-lower")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).not.toMatch(
+        /lower the picture size|a lower picture size|shorter section|quick/i,
+      );
+    },
+  );
 
-  it("shows the error alone, as 0.27.0 did, with the switch off", async () => {
+  it("shows the plain sentence alone, with no sentence of what to lower, with the switch off", async () => {
     __setExportFlag("export_help", false);
     await failed(MEMORY);
-    expect(screen.getAllByText(MEMORY)[0]).toBeVisible();
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    expect(screen.getByTestId("export-error")).toHaveTextContent(plainFailure("memory_limit"));
     expect(screen.queryByTestId("export-lower")).toBeNull();
     expect(screen.getByRole("dialog").textContent).not.toMatch(/lower the picture size/);
+  });
+});
+
+// R-1: a failed export speaks plainly. The dialog's red line and the queue row's right-hand column say the card's sentence for why it
+// stopped (the card's sentence for the graphics chip, in the form for a place with no Try again, where the chip stopped it); the text of the
+// failure (the encoder's log and the app's own diagnostics) is one click away, under Show details, and is on no other face of the dialog.
+describe("a failed export, in the Export dialog and in its queue row", () => {
+  /** What the dialog says on its face: all of it but what a closed Show details holds. */
+  const face = (): string => {
+    const copy = screen.getByRole("dialog").cloneNode(true) as HTMLElement;
+    copy.querySelectorAll("details").forEach((fold) => fold.remove());
+    return copy.textContent ?? "";
+  };
+  /** The queue's row for the export `failed` starts. */
+  const row = (): HTMLElement => screen.getByText("film.mp4").closest("li")!;
+
+  it("shows none of the encoder's log on the face of the dialog or in the queue row", async () => {
+    await failed(ENCODER_FAILURE_LOG);
+    for (const piece of ENCODER_FAILURE_PIECES) {
+      expect(face(), piece).not.toContain(piece);
+      expect(row().textContent, piece).not.toContain(piece);
+    }
+  });
+
+  it("says the card's plain sentence for the failure in red, then Show details, then what to lower", async () => {
+    await failed(MEMORY);
+    const said = screen.getByTestId("export-error");
+    expect(said).toBeVisible();
+    expect(said.textContent).toBe(plainFailure("memory_limit"));
+    const fold = screen.getByTestId("export-error-details");
+    const lower = screen.getByTestId("export-lower");
+    // in that order, down the dialog
+    expect(said.compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(fold.compareDocumentPosition(lower) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps the whole log under a Show details that is closed, where nothing of it can be seen", async () => {
+    await failed(ENCODER_FAILURE_LOG);
+    const fold = screen.getByTestId("export-error-details") as HTMLDetailsElement;
+    expect(fold.tagName).toBe("DETAILS");
+    expect(fold.open).toBe(false);
+    expect(within(fold).getByText("Show details").tagName).toBe("SUMMARY");
+    // every element that holds a piece of the log is inside that closed fold
+    for (const piece of ENCODER_FAILURE_PIECES) {
+      const holders = within(screen.getByRole("dialog")).getAllByText(piece, { exact: false });
+      for (const holder of holders) {
+        expect(holder.closest("details"), piece).toBe(fold);
+        expect(holder, piece).not.toBeVisible();
+      }
+    }
+  });
+
+  it("opens on a click on Show details, and then shows the log as it came, in a box of bounded height", async () => {
+    await failed(ENCODER_FAILURE_LOG);
+    const fold = screen.getByTestId("export-error-details") as HTMLDetailsElement;
+    fireEvent.click(within(fold).getByText("Show details"));
+    expect(fold.open).toBe(true);
+    const body = Array.from(fold.children).filter((child) => child.tagName !== "SUMMARY");
+    expect(body).toHaveLength(1);
+    expect(body[0]).toBeVisible();
+    expect(body[0].textContent).toBe(ENCODER_FAILURE_LOG);
+    // a long log scrolls inside the dialog instead of pushing it off the screen (there is no layout here, so the classes are what can be read)
+    expect(body[0].className).toMatch(/\bmax-h-/);
+    expect(body[0].className).toMatch(/\boverflow-(?:y-)?auto\b/);
+    // the sentence is still the one above it
+    expect(screen.getByTestId("export-error").textContent).toBe(plainFailure("render_failed"));
+  });
+
+  it.each(FAILURE_TEXT_ROWS)(
+    "says the card's sentence for %s in the dialog and in the queue row, and not the text of the failure",
+    async (code, text) => {
+      // the table cannot drift from the rule
+      expect(reasonOfError(text)).toBe(code);
+      await failed(text);
+      const sentence = plainFailure(code);
+      expect(screen.getByTestId("export-error").textContent).toBe(sentence);
+      expect(within(row()).getByText(sentence)).toBeVisible();
+      expect(row().textContent).not.toContain(text);
+      expect(face()).not.toContain(text);
+    },
+  );
+
+  it("says the card's sentence for a place with no Try again where the graphics chip stopped it, in the dialog and in the queue row", async () => {
+    __setExportFlag("chip_restart", false); // nothing starts it again, so the person is told what to do
+    await failed(DRIVER, { encoder: "amd" });
+    const chip = describeChipFailure("again");
+    expect(screen.getByTestId("export-error").textContent).toBe(chip);
+    expect(within(row()).getByText(chip)).toBeVisible();
+    // neither the generic sentence, nor the card's own, which points at a Try again button the dialog does not have
+    expect(face()).not.toContain(plainFailure("render_failed"));
+    expect(face()).not.toContain(describeChipFailure("card"));
+  });
+
+  it("says the generic sentence for the very same text where the graphics chip did not run it", async () => {
+    await failed(DRIVER);
+    expect(screen.getByTestId("export-error").textContent).toBe(plainFailure("render_failed"));
+    expect(within(row()).getByText(plainFailure("render_failed"))).toBeVisible();
+    expect(face()).not.toContain(describeChipFailure("again"));
   });
 });

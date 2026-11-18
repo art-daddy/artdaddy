@@ -381,6 +381,14 @@ export function failureOf(error: string | undefined): { code: ExportReasonCode; 
   return { code, plain: plainFailure(code) };
 }
 
+/** The one sentence a place with no Try again button says about a failed export (the Export dialog and its queue list): the card's
+ *  sentence for why it stopped, or, where the graphics chip stopped it and nothing started it again (`chipFailed`), the card's
+ *  sentence for that in the form that tells the person what to do instead of pointing at a button. The failure's own text (the
+ *  encoder's log, the app's diagnostics) is never part of it: a place that keeps it keeps it apart, for a report. */
+export function describeFailureHere(error: string | undefined, chipFailed: boolean): string {
+  return chipFailed ? describeChipFailure("again") : failureOf(error).plain;
+}
+
 /** "4 min 12 s", "45 s", "1 h 3 min": how long something took, the way a person says it. */
 export function describeTook(ms: number): string {
   const seconds = Math.floor(whole(ms) / 1000);

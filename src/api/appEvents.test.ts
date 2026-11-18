@@ -35,6 +35,7 @@ import { apiBase } from "./config";
 import { startupTimings } from "../observability/startupTiming";
 import { useAuth } from "../store/auth";
 import { resolveHostInfo } from "../platform/host";
+import { __resetSpeechFactsShipped, __setSpeechFactsShipped } from "../tools/speechFacts";
 
 function captureFetch() {
   const calls: Record<string, unknown>[] = [];
@@ -966,6 +967,64 @@ describe("the transcription sample", () => {
     reportTranscription(run, T0, {});
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].reason).toBe("audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8");
+  });
+
+  // How the run was made (speechFacts.ts): what leaves the PC is only words of closed lists, and only for a build that tells
+  // them. The build's own state is dark, so the first test is the shipped one.
+  describe("the facts about how the run was made", () => {
+    const made = {
+      ng: true,
+      held: true,
+      mf: "small_q8_0",
+      net: true,
+      dtw: "r",
+      lead: "gt1",
+      lang: "en",
+    } as const;
+    afterEach(() => __resetSpeechFactsShipped());
+
+    // This test pins the state the build ships in. It fails when SPEECH_FACTS_SHIPPED is turned on, which needs the owner's yes
+    // and both privacy documents (the app's PRIVACY.txt and the website's privacy page) changed in the same commit; that commit
+    // changes this test to say the lit state. Every other test sets the state it needs through the setter.
+    it("adds nothing in the build as shipped, whatever the run knows: the sample is what it always was", async () => {
+      const calls = captureFetch();
+      reportTranscription({ ...run, gpu: "amd" }, T0, { beam: 1, rerun: true, notes: made });
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(calls[0].reason).toBe(
+        "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 beam=1 rerun=1",
+      );
+    });
+
+    it("adds them after the older figures once the build tells them, the chip's maker from the run's own log", async () => {
+      __setSpeechFactsShipped(true);
+      const calls = captureFetch();
+      reportTranscription({ ...run, gpu: "amd" }, T0, { beam: 1, rerun: true, notes: made });
+      reportTranscription(run, T0 + 60_000, { files: 4, notes: { mf: "small", lang: "auto" } });
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls.map((c) => c.reason)).toEqual([
+        "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 beam=1 rerun=1 ng=1 held=1 mf=small_q8_0 net=1 dtw=r lead=gt1 gpu=amd lang=en",
+        "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 files=4 mf=small lang=auto",
+      ]);
+      expect(calls[0].via).toBe("vulkan");
+    });
+
+    it("sends only words of the lists: a device name, a file name or a path handed in by mistake never leaves", async () => {
+      __setSpeechFactsShipped(true);
+      const calls = captureFetch();
+      reportTranscription({ ...run, gpu: "NVIDIA GeForce RTX 4090 (driver 551.23)" as never }, T0, {
+        notes: { mf: "C:\\Users\\bob\\ggml-small.bin", lang: "bob@example.com", ng: true },
+      });
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(calls[0].reason).toBe("audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 ng=1");
+    });
+
+    it("still sends none for a run too short to say how fast, however much it knows about itself", async () => {
+      __setSpeechFactsShipped(true);
+      const calls = captureFetch();
+      reportTranscription({ ...run, audioSeconds: 29.9, gpu: "amd" }, T0, { notes: made });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(calls).toHaveLength(0);
+    });
   });
 
   // A batch is clips that were waiting together, each a few seconds: its whole audio is under the floor that

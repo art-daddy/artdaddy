@@ -17,6 +17,7 @@ import {
   type StartupTimings,
 } from "../observability/startupTiming";
 import type { WhisperRunFacts } from "../tools/whisperFacts";
+import { speechFactTokens, type SpeechRunNotes } from "../tools/speechFacts";
 import { closedWord, IMPORT_DOORS, IMPORT_REASONS } from "./editorEvents";
 
 /** The start-up readings as the launch marker carries them, each a whole number inside what the server accepts (a number
@@ -322,8 +323,9 @@ export function reportTranscription(
   now = Date.now(),
   /** How it was decoded: the beam (1 is the faster setting), whether it replaced a run refused for being
    *  narrower than its language needs, and how many files one run covered (more than one is a batch,
-   *  whose wall time includes ONE start-up for them all). Numbers and a flag, never what was said. */
-  decoding?: { beam?: number; rerun?: boolean; files?: number },
+   *  whose wall time includes ONE start-up for them all). Numbers and a flag, never what was said.
+   *  `notes` is how the run was made (speechFacts.ts): words of closed lists, and only for a build that tells them. */
+  decoding?: { beam?: number; rerun?: boolean; files?: number; notes?: SpeechRunNotes },
 ): void {
   const audio = facts.audioSeconds;
   // A batch (one run over several clips) is short by design: clips waiting together are a few seconds each, so
@@ -342,6 +344,7 @@ export function reportTranscription(
     decoding?.beam !== undefined ? `beam=${decoding.beam}` : "",
     decoding?.rerun ? "rerun=1" : "",
     decoding?.files !== undefined && decoding.files > 1 ? `files=${decoding.files}` : "",
+    ...speechFactTokens(decoding?.notes, facts.gpu),
   ];
   void reportAppEvent("transcription", {
     via: facts.backend ?? "unknown",
