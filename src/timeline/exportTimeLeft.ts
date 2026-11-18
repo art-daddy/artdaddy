@@ -186,7 +186,9 @@ function leftFromPace(samples: readonly Sample[], at: number, fraction: number):
   const next = samples[1];
   if (oldest.at < start && next) {
     from = start;
-    made = oldest.fraction + ((next.fraction - oldest.fraction) * (start - oldest.at)) / (next.at - oldest.at);
+    made =
+      oldest.fraction +
+      ((next.fraction - oldest.fraction) * (start - oldest.at)) / (next.at - oldest.at);
   }
   const span = (at - from) / 1000;
   const gained = fraction - made;
@@ -196,9 +198,7 @@ function leftFromPace(samples: readonly Sample[], at: number, fraction: number):
 }
 
 const figureOf = (previous: TimeLeft, seconds: number): TimeLeft =>
-  previous.kind === "left" && previous.seconds === seconds
-    ? previous
-    : { kind: "left", seconds };
+  previous.kind === "left" && previous.seconds === seconds ? previous : { kind: "left", seconds };
 
 function advance(state: PaceState, report: PaceReport): PaceState {
   if (!Number.isFinite(report.at) || !Number.isFinite(report.fraction)) return state;
@@ -214,7 +214,16 @@ function advance(state: PaceState, report: PaceReport): PaceState {
   const samples = fraction > 0 ? withSample(run.samples, at, fraction) : run.samples;
   const parts = inParts(part);
   const finishing = run.finishing || (!parts && fraction >= FINISHING_FROM);
-  const seen: PaceState = { ...run, part, origin, floor, best: fraction, last: at, samples, finishing };
+  const seen: PaceState = {
+    ...run,
+    part,
+    origin,
+    floor,
+    best: fraction,
+    last: at,
+    samples,
+    finishing,
+  };
 
   if (parts) return { ...seen, value: NO_TIME_LEFT };
   if (finishing) return { ...seen, value: FINISHING };
