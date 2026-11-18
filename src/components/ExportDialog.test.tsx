@@ -500,15 +500,13 @@ describe("ExportDialog", () => {
       // A render of 100 s in all that is 42 s in: 58 s are left, said as the nearest minute. The raw guess the producer publishes (90 s) would read "1m 30s".
       playSteady(
         (r) =>
-          useExportJob
-            .getState()
-            .update({
-              phase: "rendering",
-              fraction: r.fraction,
-              etaSec: 90,
-              speed: 2,
-              frame: r.frame,
-            }),
+          useExportJob.getState().update({
+            phase: "rendering",
+            fraction: r.fraction,
+            etaSec: 90,
+            speed: 2,
+            frame: r.frame,
+          }),
         { total: 100, from: 1, to: 42, origin: 5_000_000 },
       );
       open();
