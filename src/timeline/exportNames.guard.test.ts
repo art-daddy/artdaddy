@@ -72,7 +72,9 @@ function factsOf(file: string, text: string): Facts {
     else if (isExported) exported.set(name, name);
   };
   for (const statement of source.statements) {
-    const modifiers = ts.canHaveModifiers(statement) ? (ts.getModifiers(statement) ?? []) : [];
+    const modifiers: readonly ts.Modifier[] = ts.canHaveModifiers(statement)
+      ? (ts.getModifiers(statement) ?? [])
+      : [];
     const has = (kind: ts.SyntaxKind): boolean => modifiers.some((m) => m.kind === kind);
     const isExported = has(ts.SyntaxKind.ExportKeyword);
     const byDefault = has(ts.SyntaxKind.DefaultKeyword);
@@ -304,7 +306,9 @@ function scan(sources: ReadonlyMap<string, string>): Scan {
 
 /** The files that import `name` from `file` (a star import or a dynamic import takes every name). */
 function importersOf(result: Scan, file: string, name: string): string[] {
-  return [...(result.uses.get(file) ?? [])]
+  const takers = result.uses.get(file);
+  if (!takers) return [];
+  return [...takers]
     .filter(([, use]) => use.star || use.names.has(name))
     .map(([importer]) => importer)
     .sort();
