@@ -736,9 +736,9 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
 // ---------------------------------------------------------------------------------------------------------------------
 
 // The project: two real clips of one and a half seconds, of different colour and each with its own sound, a crossfade across the cut and a text over both, on a 1280x720 canvas at 60 frames a
-// second (three seconds, 180 frames). The sound is pink noise, which does not compress: it keeps every finished file well over 32 KB. With a two second project of flat colours and a sine tone the
-// whole Fast file on the processor (x264 veryfast) was 29 KB, and its final encode, which had made all of its 60 frames, never exited (the app process's output sink did not finish; two runs,
-// the same stop, see the report); the files of 37 KB and more ended as they should.
+// second (three seconds, 180 frames). The sound is pink noise, which does not compress, so every finished file is well over 32 KB. With a two second project of flat colours and a sine tone, the Fast
+// file made on the processor (x264 veryfast) was 29 KB and its final encode never exited although it had made all 60 frames (two runs; the native program's wait ran out each time), while the files
+// of 37 KB and more ended as they should. The cause is not established, and this file does not cover a finished file that small.
 async function streamedProject(): Promise<Project> {
   const dir = joinPath(ROOT, "stream-1280x720-60");
   await nodeFs.mkdir(dir);
