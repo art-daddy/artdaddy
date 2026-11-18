@@ -12,7 +12,13 @@ import { dialogEstimate } from "../timeline/dialogEstimate";
 import { CHECKING_LINE } from "../timeline/estimateWords";
 import { holdExportAsk } from "../timeline/exportAsk";
 import { lowerAdvice3c } from "../timeline/exportHelpWatch";
-import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
+import {
+  resolutionChoices,
+  usableCanvas,
+  type ExportMode,
+  type ExportQuality,
+  type ExportResolution,
+} from "../timeline/exportOptions";
 import {
   cancelExport,
   listExportRecords,
@@ -47,6 +53,7 @@ export interface ExportSettings {
   mode: ExportMode | null;
 }
 
+/** The words for every preset, in the order the list shows them. Which of them a project is offered is `resolutionChoices`' to say (exportOptions.ts). */
 const RESOLUTIONS: { value: ExportResolution; label: string }[] = [
   { value: "source", label: "Same as project" },
   { value: "2160p", label: "2160p (4K)" },
@@ -81,7 +88,24 @@ export default function ExportDialog({
    *  the file will be before the person clicks. Absent: the dialog says nothing about either. */
   workload?: RenderWorkload | null;
 }): JSX.Element | null {
-  const [resolution, setResolution] = useState<ExportResolution>("source");
+  // What the person picked in the Resolution list, which the list may no longer hold: it follows the project's size.
+  const [pickedResolution, setPickedResolution] = useState<ExportResolution>("source");
+  // The project's size NOW. The assistant or an MCP client can change it while this dialog is open, so the live canvas is read here and the `workload` taken when the dialog
+  // opened is only the fallback. Each side is its own number, so the dialog draws again only when the width or the height changes. With no size to go by (no project open and
+  // no workload) the list is Same as project alone.
+  const liveWidth = useEditor((s) => s.timeline?.canvas?.width);
+  const liveHeight = useEditor((s) => s.timeline?.canvas?.height);
+  const canvas =
+    usableCanvas(liveWidth, liveHeight) ?? usableCanvas(workload?.width, workload?.height);
+  const sizes = resolutionChoices(canvas);
+  // What is shown, asked about, estimated and sent is never a size the list does not hold: such a pick reads as Same as project in every render.
+  const resolution: ExportResolution = sizes.includes(pickedResolution)
+    ? pickedResolution
+    : "source";
+  // And it is forgotten, so a project that grows again does not bring the old pick back.
+  useEffect(() => {
+    if (pickedResolution !== resolution) setPickedResolution(resolution);
+  }, [pickedResolution, resolution]);
   const [quality, setQuality] = useState<ExportQuality>("medium");
   const [fps, setFps] = useState<number | null>(null);
   // What the person picked in the Mode row; null until they touch it (the app's own choice shows then).
@@ -272,10 +296,10 @@ export default function ExportDialog({
               <select
                 aria-label="resolution"
                 value={resolution}
-                onChange={(e) => setResolution(e.target.value as ExportResolution)}
+                onChange={(e) => setPickedResolution(e.target.value as ExportResolution)}
                 className={selectCls}
               >
-                {RESOLUTIONS.map((r) => (
+                {RESOLUTIONS.filter((r) => sizes.includes(r.value)).map((r) => (
                   <option key={r.value} value={r.value}>
                     {r.label}
                   </option>
@@ -375,10 +399,6 @@ export default function ExportDialog({
             {lines.faster && (
               <p className="text-xs leading-snug text-neutral-400">{lines.faster}</p>
             )}
-            <p className="text-[11px] leading-snug text-neutral-500">
-              Never upscales: a preset larger than the project is left at the project&apos;s own
-              size.
-            </p>
           </div>
         )}
 

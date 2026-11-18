@@ -8,7 +8,7 @@ const ed = {
   dirty: false as boolean,
   zoom: 40,
   playhead: 2,
-  timeline: { canvas: { fps: 30 } },
+  timeline: { canvas: { width: 1920, height: 1080, fps: 30 } },
   undo: vi.fn(),
   redo: vi.fn(),
   copyClip: vi.fn(),
@@ -365,6 +365,22 @@ describe("MenuBar", () => {
         expect.anything(),
       ),
     );
+  });
+
+  // The Resolution list is for the open project: Same as project and only the sizes smaller than it (here the editor is the mock above, read through the dialog's own selectors).
+  it("File → Export Video lists Same as project and only the sizes smaller than the open project", () => {
+    const before = ed.timeline;
+    ed.timeline = { canvas: { width: 1280, height: 720, fps: 30 } };
+    try {
+      renderBar("/p/test");
+      fireEvent.click(screen.getByRole("button", { name: "File" }));
+      fireEvent.click(screen.getByText("Export Video (.mp4)…"));
+      const listed = Array.from((screen.getByLabelText("resolution") as HTMLSelectElement).options);
+      expect(listed.map((option) => option.value)).toEqual(["source", "480p"]);
+      expect(screen.queryByText(/never upscales/i)).not.toBeInTheDocument();
+    } finally {
+      ed.timeline = before;
+    }
   });
 
   it("omits fps entirely when the project's own rate is kept", async () => {

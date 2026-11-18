@@ -29,11 +29,14 @@ import {
   peakSamples,
   promiseLineOf,
   promiseMultipleOf,
+  resolutionChoices,
   totalExpectation,
+  usableCanvas,
   type ExportCalibration,
   type ExportEncoder,
   type ExportEstimates,
   type ExportPreflightReason,
+  type ExportResolution,
 } from "./exportOptions";
 import { CHIP_CAUTIOUS_GAIN, FASTER_X264_GAIN } from "./exportEncoder";
 import { UNMEASURED_RESERVE_BYTES, planRung } from "./exportPlan";
@@ -1313,6 +1316,156 @@ describe("outputSize", () => {
   it("shrugs off a degenerate canvas instead of emitting a broken filter", () => {
     expect(outputSize(0, 1080, "720p")).toBeNull();
     expect(outputSize(1920, 0, "720p")).toBeNull();
+  });
+});
+
+// What the Export dialog's Resolution list holds for a project: Same as project, and then only the presets smaller than it. The rule is outputSize's (a preset is on offer exactly
+// when outputSize would shrink the picture to it). The expected lists come from an oracle written out here, and one test holds the two together: a preset is named by its short side
+// and is smaller than the project exactly when that number is below the project's short side; the five numbers are the five presets.
+describe("resolutionChoices", () => {
+  const PRESET_SIDES = [2160, 1440, 1080, 720, 480];
+  const ALL_PRESETS = PRESET_SIDES.map((side) => `${side}p` as ExportResolution);
+  const oracle = (width: number, height: number): ExportResolution[] => [
+    "source",
+    ...PRESET_SIDES.filter((side) => side < Math.min(width, height)).map(
+      (side) => `${side}p` as ExportResolution,
+    ),
+  ];
+
+  it("lists Same as project first and then only the presets smaller than the project, largest first", () => {
+    const rows: [string, { width: number; height: number }, ExportResolution[]][] = [
+      ["a vertical 1080x1920", { width: 1080, height: 1920 }, ["source", "720p", "480p"]],
+      ["4K", { width: 3840, height: 2160 }, ["source", "1440p", "1080p", "720p", "480p"]],
+      ["8K", { width: 7680, height: 4320 }, ["source", ...ALL_PRESETS]],
+      ["1280x720", { width: 1280, height: 720 }, ["source", "480p"]],
+      ["854x480", { width: 854, height: 480 }, ["source"]],
+      ["smaller than that", { width: 640, height: 360 }, ["source"]],
+      ["1366x768", { width: 1366, height: 768 }, ["source", "720p", "480p"]],
+      ["a canvas equal to a preset", { width: 1920, height: 1080 }, ["source", "720p", "480p"]],
+      [
+        "an ultrawide: its short side counts",
+        { width: 2560, height: 1080 },
+        ["source", "720p", "480p"],
+      ],
+      [
+        "an odd canvas whose short side is 1081",
+        { width: 1081, height: 1921 },
+        ["source", "1080p", "720p", "480p"],
+      ],
+      [
+        "an odd canvas whose short side is 1079",
+        { width: 1079, height: 1919 },
+        ["source", "720p", "480p"],
+      ],
+    ];
+    for (const [name, canvas, expected] of rows)
+      expect(resolutionChoices(canvas), name).toEqual(expected);
+  });
+
+  it("offers Same as project alone where the project's size cannot be read: it never claims a size is smaller than one it does not know", () => {
+    const unreadable: ({ width: number; height: number } | null | undefined)[] = [
+      null,
+      undefined,
+      { width: 0, height: 0 },
+      { width: 1920, height: 0 },
+      { width: 0, height: 1080 },
+      { width: -1920, height: -1080 },
+      { width: Number.NaN, height: Number.NaN },
+      { width: Number.NaN, height: 1080 },
+      { width: 1920, height: Number.NaN },
+      { width: Number.POSITIVE_INFINITY, height: Number.POSITIVE_INFINITY },
+      { width: Number.POSITIVE_INFINITY, height: 1080 },
+    ];
+    for (const canvas of unreadable)
+      expect(resolutionChoices(canvas), JSON.stringify(canvas)).toEqual(["source"]);
+  });
+
+  // Edges at every preset (one under, at, one over), in both orientations and for squares, besides sizes anywhere.
+  const canvases = fc.oneof(
+    fc.record({
+      width: fc.integer({ min: 1, max: 9000 }),
+      height: fc.integer({ min: 1, max: 9000 }),
+    }),
+    fc
+      .tuple(
+        fc.constantFrom(...PRESET_SIDES),
+        fc.integer({ min: -2, max: 2 }),
+        fc.nat(4000),
+        fc.boolean(),
+      )
+      .map(([side, step, extra, tall]) => {
+        const short = side + step;
+        return tall
+          ? { width: short, height: short + extra }
+          : { width: short + extra, height: short };
+      }),
+  );
+
+  it("is exactly the presets whose own number is below the project's short side, in descending order (property)", () => {
+    fc.assert(
+      fc.property(canvases, (canvas) => {
+        expect(resolutionChoices(canvas)).toEqual(oracle(canvas.width, canvas.height));
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  it("never lists a size as large as the project or larger, whichever way round the project is (property)", () => {
+    fc.assert(
+      fc.property(canvases, (canvas) => {
+        const [first, ...sizes] = resolutionChoices(canvas);
+        expect(first).toBe("source");
+        for (const size of sizes)
+          expect(Number.parseInt(size, 10)).toBeLessThan(Math.min(canvas.width, canvas.height));
+        expect(resolutionChoices({ width: canvas.height, height: canvas.width })).toEqual(
+          resolutionChoices(canvas),
+        );
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("agrees with outputSize: a preset is on offer exactly when outputSize would resize to it, for whole and fractional sizes (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.double({ min: 0.5, max: 9000, noNaN: true }),
+        fc.double({ min: 0.5, max: 9000, noNaN: true }),
+        (width, height) => {
+          const offered = resolutionChoices({ width, height });
+          for (const preset of ALL_PRESETS)
+            expect(offered.includes(preset), `${preset} for ${width}x${height}`).toBe(
+              outputSize(width, height, preset) !== null,
+            );
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+});
+
+// Which size of the project the dialog goes by: the live canvas where it can be read, else the snapshot it was opened with, else none (usableCanvas is the one reading of "can be read").
+describe("usableCanvas", () => {
+  it("is the size when both sides are finite numbers above 0, and nothing otherwise", () => {
+    expect(usableCanvas(1920, 1080)).toEqual({ width: 1920, height: 1080 });
+    expect(usableCanvas(1081, 1921)).toEqual({ width: 1081, height: 1921 });
+    expect(usableCanvas(1, 1)).toEqual({ width: 1, height: 1 });
+    const unusable: [unknown, unknown][] = [
+      [0, 1080],
+      [1920, 0],
+      [-1, 1080],
+      [1920, -1],
+      [Number.NaN, 1080],
+      [1920, Number.NaN],
+      [Number.POSITIVE_INFINITY, 1080],
+      [1920, Number.NEGATIVE_INFINITY],
+      [undefined, 1080],
+      [1920, undefined],
+      [null, null],
+      ["1920", "1080"],
+      [{}, []],
+    ];
+    for (const [width, height] of unusable)
+      expect(usableCanvas(width, height), `${String(width)}x${String(height)}`).toBeNull();
   });
 });
 
