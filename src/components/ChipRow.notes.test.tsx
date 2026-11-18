@@ -165,7 +165,6 @@ describe("the chip row's notes prop", () => {
     expect(localStorage.getItem(CHIP_PREF_KEY)).toBeNull();
   });
 
-
   it.each([
     ["no prop", undefined],
     ["an empty prop", {}],

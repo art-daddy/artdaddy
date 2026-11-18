@@ -61,7 +61,8 @@ const NOTES = {
   off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
 } as const;
 const SUMMARY = "Project size and frame rate, Medium quality.";
-const FASTER = "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+const FASTER =
+  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
 
 const RATES_60: AdvancedSettingsProps["rates"] = [
   { value: null, label: "Same as project (60 fps)" },
@@ -94,7 +95,11 @@ function props(over: Partial<AdvancedSettingsProps> = {}): AdvancedSettingsProps
 
 /** The chip row's basis as the view hands it over, with spies for what the row tells the view. */
 function chipProps(
-  over: { workload?: { width: number; height: number; fps: number }; resolution?: ExportResolution; fps?: number | null } = {},
+  over: {
+    workload?: { width: number; height: number; fps: number };
+    resolution?: ExportResolution;
+    fps?: number | null;
+  } = {},
 ) {
   return {
     workload: over.workload ?? { width: 1920, height: 1080, fps: 30 },
@@ -311,9 +316,7 @@ describe("the region behind a closed door", () => {
     const user = userEvent.setup();
     render(<Live chip={chipProps()} />);
     await waitFor(() => expect(screen.getByTestId("chip-row")).toBeInTheDocument());
-    const controls = [
-      ...region().querySelectorAll<HTMLElement>("select, input, button"),
-    ];
+    const controls = [...region().querySelectorAll<HTMLElement>("select, input, button")];
     expect(controls).toHaveLength(4); // Frame rate, Quality, and the chip's Auto and Off
     for (const control of controls) {
       act(() => control.focus());
@@ -331,13 +334,27 @@ describe("the rows", () => {
   it("draws the summary, the faster-setting line, Frame rate, Quality and the chip row in that order", async () => {
     pc([amd]);
     render(
-      <AdvancedSettings {...props({ open: true, summary: SUMMARY, fasterLine: FASTER, chip: chipProps() })} />,
+      <AdvancedSettings
+        {...props({ open: true, summary: SUMMARY, fasterLine: FASTER, chip: chipProps() })}
+      />,
     );
     const chipRow = await screen.findByTestId("chip-row");
     expect(
-      inOrder(screen.getByText(SUMMARY), screen.getByText(FASTER), rateBox(), qualityBox(), chipRow),
+      inOrder(
+        screen.getByText(SUMMARY),
+        screen.getByText(FASTER),
+        rateBox(),
+        qualityBox(),
+        chipRow,
+      ),
     ).toBe(true);
-    for (const el of [screen.getByText(SUMMARY), screen.getByText(FASTER), rateBox(), qualityBox(), chipRow])
+    for (const el of [
+      screen.getByText(SUMMARY),
+      screen.getByText(FASTER),
+      rateBox(),
+      qualityBox(),
+      chipRow,
+    ])
       expect(el).toBeVisible();
   });
 
@@ -352,7 +369,10 @@ describe("the rows", () => {
       ["the door", door()],
       ["Frame rate", rateBox()],
       ["Quality", qualityBox()],
-      ["the chip row (Auto is checked, so Off is not a stop)", screen.getByRole("radio", { name: "Auto" })],
+      [
+        "the chip row (Auto is checked, so Off is not a stop)",
+        screen.getByRole("radio", { name: "Auto" }),
+      ],
       ["what follows", screen.getByRole("button", { name: "after" })],
     ];
     expected.forEach(([what, el], i) => expect(stops[i], what).toBe(el));
@@ -407,9 +427,7 @@ describe("the rows", () => {
         const onFps = vi.fn();
         const user = userEvent.setup();
         render(
-          <AdvancedSettings
-            {...props({ open: true, onFps, fps: value === null ? 24 : null })}
-          />,
+          <AdvancedSettings {...props({ open: true, onFps, fps: value === null ? 24 : null })} />,
         );
         await user.selectOptions(rateBox(), label);
         expect(onFps).toHaveBeenCalledTimes(1);
@@ -626,7 +644,9 @@ describe("the Graphics chip row", () => {
     it("follows the shown size: 1080p on a 4K project is tested as 1080p, and the project's own size as 4K", async () => {
       pc([amd]);
       const shown = render(
-        <AdvancedSettings {...props({ chip: chipProps({ workload: uhd, resolution: "1080p" }) })} />,
+        <AdvancedSettings
+          {...props({ chip: chipProps({ workload: uhd, resolution: "1080p" }) })}
+        />,
       );
       await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
       expect(sizesTested().length).toBeGreaterThan(0);
@@ -636,7 +656,9 @@ describe("the Graphics chip row", () => {
       __resetChipTests();
       pc([amd]);
       render(
-        <AdvancedSettings {...props({ chip: chipProps({ workload: uhd, resolution: "source" }) })} />,
+        <AdvancedSettings
+          {...props({ chip: chipProps({ workload: uhd, resolution: "source" }) })}
+        />,
       );
       await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
       expect(sizesTested().length).toBeGreaterThan(0);
