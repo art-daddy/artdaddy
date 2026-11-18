@@ -748,6 +748,20 @@ describe("R2 before the gate nothing is said", () => {
       { t: 40, f: 0.34 },
     ];
     expect(shows(reps)).toEqual(["none", "none", "none", "left 30"]);
+
+    // The same reading with numbers that tell the right denominator from a wrong one (the example above says "under a minute" with either). The window at
+    // 40 s starts at 20 s, between the reports at 0 s and 21 s: the report at 21 s is the SECOND of the three kept, not the newest one.
+    //   right: the share at 20 s is 0.01 + 0.2 * 20 / 21 = 0.2005, so 0.30 - 0.2005 = 0.0995 is made over 20 s and the 0.7 left is 141 s: the figure 120
+    //   dividing the 20 s by the 40 s between the oldest and the newest report: 0.11 at 20 s, 0.19 made, 74 s left: stays on the first figure, 60
+    //   the oldest report taken as the start of the window, with no interpolation: 0.29 made over 40 s, 97 s left: stays on 60
+    // (the first figure, said at 21 s, is 60: 0.79 left at the pace of the last 20 s is 83 s; the figure moves only when the time left leaves its cell by a quarter,
+    // which 74 s and 97 s do not and 141 s does.)
+    const sharp: Rep[] = [
+      { t: 0, f: 0.01 },
+      { t: 21, f: 0.21 },
+      { t: 40, f: 0.3 },
+    ];
+    expect(shows(sharp)).toEqual(["none", "left 60", "left 120"]);
   });
 
   it("keeps the one report at or before the start of the window, so that the start can be interpolated", () => {
@@ -1207,6 +1221,25 @@ describe("R7 taking longer", () => {
       ),
       { numRuns: 200 },
     );
+  });
+
+  it("is not yet taking longer when the total is exactly 1.5 times the first one, and is a millisecond later", () => {
+    // A feed whose numbers are all exact in binary, so that no rounding decides the equality. 0.0125 a second is a pace of 1/80 of the render: at 20 s a
+    // quarter is made, the gate opens and the implied total is 20 / 0.25 = 80 s. Then the render stands still at a quarter, so the total at t is t / 0.25:
+    // exactly 120 s = 1.5 x 80 s at 30 s (the equality, not yet "grown past 1.5 times"), 120.004 s at 30.001 s.
+    const reps: Rep[] = [
+      ...steady(0.0125, 1, 20),
+      ...line(21, 30, 1, 0.25, 0),
+      { t: 30.001, f: 0.25 },
+    ];
+    const vs = valuesOf(reps);
+    const at = (t: number): TimeLeft => vs[reps.findIndex((r) => r.t === t)];
+    expect(at(19).kind).toBe("none"); // 19 s rendered: the gate is not open yet
+    expect(at(20).kind).toBe("left"); // the first figure, and the total it is measured from
+    expect(at(29).kind).toBe("left"); // total 116 s
+    expect(at(30).kind).toBe("left"); // total 120 s: exactly 1.5 times
+    expect(at(30.001).kind).toBe("longer");
+    expect(vs.slice(0, -1).some((v) => v.kind === "longer")).toBe(false);
   });
 
   it("stays 'taking longer' after a sprint, until Finishing replaces it at 0.9, and Finishing then stays", () => {
