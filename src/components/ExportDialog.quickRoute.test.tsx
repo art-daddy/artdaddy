@@ -302,6 +302,19 @@ describe("a render, with the new view", () => {
 
 // Owner's decision OD-12: 0.28.0 kept the size, the quality and the frame rate until the app closed; the new view keeps nothing from one opening to the next.
 describe("nothing is remembered from one opening to the next", () => {
+  it("is a change from 0.28.0 on purpose: the 0.28.0 settings, drawn by the same dialog without the prop, keep the three picks from one opening to the next", () => {
+    const view = render(dialog({ quickRoute: false }));
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });
+    fireEvent.change(screen.getByLabelText("quality"), { target: { value: "low" } });
+    fireEvent.change(screen.getByLabelText("frame rate"), { target: { value: "24" } });
+    view.rerender(dialog({ quickRoute: false, open: false }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(dialog({ quickRoute: false }));
+    expect(screen.getByLabelText("resolution")).toHaveValue("720p");
+    expect(screen.getByLabelText("quality")).toHaveValue("low");
+    expect(screen.getByLabelText("frame rate")).toHaveValue("24");
+  });
+
   it("opens again on the project's own settings, with the door closed, after the dialog was closed", async () => {
     const user = userEvent.setup();
     const view = render(dialog());
