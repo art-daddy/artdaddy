@@ -416,11 +416,7 @@ async function happen(user: User, side: Side, what: Between): Promise<void> {
 }
 
 /** One side of a scenario from a clean PC and clean stores: shown, settled, picked, then Export pressed once (twice in the gap scenario). `state` is how the new view is drawn (ignored for the 0.28.0 dialog). */
-async function play(
-  side: Side,
-  scenario: Scenario,
-  state: ViewState = "row",
-): Promise<Played[]> {
+async function play(side: Side, scenario: Scenario, state: ViewState = "row"): Promise<Played[]> {
   cleanup();
   localStorage.clear();
   __resetChipTests();

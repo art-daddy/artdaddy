@@ -150,40 +150,49 @@ const SHAPES: Shape[] = [
 ];
 
 describe("without the choice row (fastChoice false): what is not drawn", () => {
-  it.each(SHAPES)("$name: no group, no radio, no line under the door, door closed or open", async (shape) => {
-    setCanvas(shape.width, shape.height, shape.fps);
-    render(
-      <ExportSettingsView
-        workload={workloadOf(shape.width, shape.height, shape.fps)}
-        onCancel={noop}
-        onStart={noop}
-        fastChoice={false}
-      />,
-    );
-    await settle();
-    const expectNone = () => {
-      expect(screen.queryByRole("radiogroup", { name: "export choice", hidden: true })).toBeNull();
-      expect(screen.queryAllByRole("radio", { hidden: true })).toHaveLength(0);
-      expect(screen.queryByTestId("export-choice")).toBeNull();
-      // the region holds the rows and nothing written under the door
-      expect(region().querySelector("p")).toBeNull();
-      expect(document.body.textContent).not.toMatch(/\bFast\b|quality\.$|frame rate, |One size smaller/);
-    };
-    expectNone();
-    fireEvent.click(door());
-    await settle();
-    expectNone();
-    for (const change of ["720p", "480p"]) {
-      if (shape.sizes.length > 0)
-        fireEvent.change(screen.getByRole("combobox", { name: "resolution" }), {
-          target: { value: change },
-        });
+  it.each(SHAPES)(
+    "$name: no group, no radio, no line under the door, door closed or open",
+    async (shape) => {
+      setCanvas(shape.width, shape.height, shape.fps);
+      render(
+        <ExportSettingsView
+          workload={workloadOf(shape.width, shape.height, shape.fps)}
+          onCancel={noop}
+          onStart={noop}
+          fastChoice={false}
+        />,
+      );
+      await settle();
+      const expectNone = () => {
+        expect(
+          screen.queryByRole("radiogroup", { name: "export choice", hidden: true }),
+        ).toBeNull();
+        expect(screen.queryAllByRole("radio", { hidden: true })).toHaveLength(0);
+        expect(screen.queryByTestId("export-choice")).toBeNull();
+        // the region holds the rows and nothing written under the door
+        expect(region().querySelector("p")).toBeNull();
+        expect(document.body.textContent).not.toMatch(
+          /\bFast\b|quality\.$|frame rate, |One size smaller/,
+        );
+      };
       expectNone();
-    }
-  });
+      fireEvent.click(door());
+      await settle();
+      expectNone();
+      for (const size of ["720p", "480p"]) {
+        if (shape.sizes.length > 0)
+          fireEvent.change(screen.getByRole("combobox", { name: "resolution" }), {
+            target: { value: size },
+          });
+        expectNone();
+      }
+    },
+  );
 
   it("no project: the same", async () => {
-    render(<ExportSettingsView workload={null} onCancel={noop} onStart={noop} fastChoice={false} />);
+    render(
+      <ExportSettingsView workload={null} onCancel={noop} onStart={noop} fastChoice={false} />,
+    );
     await settle();
     fireEvent.click(door());
     expect(screen.queryAllByRole("radio", { hidden: true })).toHaveLength(0);
@@ -234,38 +243,43 @@ describe("without the choice row: what Export hands over", () => {
     );
   };
 
-  it.each(SHAPES)("$name: whatever is picked, the object is the 0.28.0 one: four keys and no route", (shape) => {
-    for (const picks of every(shape)) {
-      cleanup();
-      setCanvas(shape.width, shape.height, shape.fps);
-      const onStart = vi.fn<(settings: ExportSettings) => void>();
-      render(
-        <ExportSettingsView
-          workload={workloadOf(shape.width, shape.height, shape.fps)}
-          onCancel={noop}
-          onStart={onStart}
-          fastChoice={false}
-        />,
-      );
-      if (picks.size !== undefined) change("resolution", picks.size);
-      if (picks.rate !== undefined) change("frame rate", picks.rate);
-      if (picks.quality !== undefined) change("quality", picks.quality);
-      fireEvent.click(screen.getByRole("button", { name: "Export" }));
-      expect(onStart).toHaveBeenCalledTimes(1);
-      const sent = onStart.mock.calls[0][0];
-      expect(Object.keys(sent).sort(), JSON.stringify(picks)).toEqual([
-        "fps",
-        "mode",
-        "quality",
-        "resolution",
-      ]);
-      expect(sent).not.toHaveProperty("route");
-      // what was picked is what is sent, and what was not is the project's own at Medium
-      expect(sent.resolution).toBe(picks.size ?? "source");
-      expect(sent.fps).toBe(picks.rate === undefined || picks.rate === "" ? null : Number(picks.rate));
-      expect(sent.quality).toBe(picks.quality ?? "medium");
-    }
-  });
+  it.each(SHAPES)(
+    "$name: whatever is picked, the object is the 0.28.0 one: four keys and no route",
+    (shape) => {
+      for (const picks of every(shape)) {
+        cleanup();
+        setCanvas(shape.width, shape.height, shape.fps);
+        const onStart = vi.fn<(settings: ExportSettings) => void>();
+        render(
+          <ExportSettingsView
+            workload={workloadOf(shape.width, shape.height, shape.fps)}
+            onCancel={noop}
+            onStart={onStart}
+            fastChoice={false}
+          />,
+        );
+        if (picks.size !== undefined) change("resolution", picks.size);
+        if (picks.rate !== undefined) change("frame rate", picks.rate);
+        if (picks.quality !== undefined) change("quality", picks.quality);
+        fireEvent.click(screen.getByRole("button", { name: "Export" }));
+        expect(onStart).toHaveBeenCalledTimes(1);
+        const sent = onStart.mock.calls[0][0];
+        expect(Object.keys(sent).sort(), JSON.stringify(picks)).toEqual([
+          "fps",
+          "mode",
+          "quality",
+          "resolution",
+        ]);
+        expect(sent).not.toHaveProperty("route");
+        // what was picked is what is sent, and what was not is the project's own at Medium
+        expect(sent.resolution).toBe(picks.size ?? "source");
+        expect(sent.fps).toBe(
+          picks.rate === undefined || picks.rate === "" ? null : Number(picks.rate),
+        );
+        expect(sent.quality).toBe(picks.quality ?? "medium");
+      }
+    },
+  );
 });
 
 describe("without the choice row: the same object as the 0.28.0 dialog hands over", () => {
@@ -294,7 +308,11 @@ describe("without the choice row: the same object as the 0.28.0 dialog hands ove
     { size: "480p", rate: "25", quality: "low" },
   ];
 
-  async function sentBy(side: "legacy" | "view", shape: Shape, picks: Picks): Promise<ExportSettings> {
+  async function sentBy(
+    side: "legacy" | "view",
+    shape: Shape,
+    picks: Picks,
+  ): Promise<ExportSettings> {
     cleanup();
     localStorage.clear();
     __resetChipTests();

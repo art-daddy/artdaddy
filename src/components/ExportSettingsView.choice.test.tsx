@@ -251,14 +251,7 @@ const MORE_OWN: Shape[] = [
     height: 4320,
     fps: 30,
     own: { resolution: "2160p", fps: null },
-    sizes: [
-      "Same as project (7680 x 4320)",
-      "2160p (4K)",
-      "1440p",
-      "1080p",
-      "720p",
-      "480p",
-    ],
+    sizes: ["Same as project (7680 x 4320)", "2160p (4K)", "1440p", "1080p", "720p", "480p"],
     rates: ["Same as project (30 fps)", "25 fps", "24 fps"],
     size: null,
     rate: null,
@@ -291,7 +284,7 @@ function mount(shape: Shape, options: { workload?: boolean; fastChoice?: boolean
   return { ...view, onStart, onCancel, user };
 }
 
-const radio = (name: "Quality" | "Fast") => screen.getByRole("radio", { name });
+const radio = (name: "Quality" | "Fast") => screen.getByRole<HTMLInputElement>("radio", { name });
 const group = () => screen.getByRole("radiogroup", { name: "export choice" });
 const exportButton = () => screen.getByRole("button", { name: "Export" });
 const resolutionBox = () =>
@@ -301,14 +294,22 @@ const rateBox = () =>
 const qualityBox = () =>
   screen.getByRole("combobox", { name: "quality", hidden: true }) as HTMLSelectElement;
 const optionsOf = (box: HTMLElement | null): string[] | null =>
-  box ? within(box).getAllByRole("option", { hidden: true }).map((o) => o.textContent ?? "") : null;
+  box
+    ? within(box)
+        .getAllByRole("option", { hidden: true })
+        .map((o) => o.textContent ?? "")
+    : null;
 const door = () => screen.getByRole("button", { name: "Advanced settings" });
 const region = () => screen.getByTestId("export-advanced");
 async function openDoor(view: Mounted): Promise<void> {
   if (door().getAttribute("aria-expanded") !== "true") await view.user.click(door());
 }
 /** A pick made the way a person makes it, by the words of the entry (Frame rate and Quality are behind the door). */
-async function pickWords(view: Mounted, name: "resolution" | "frame rate" | "quality", words: string) {
+async function pickWords(
+  view: Mounted,
+  name: "resolution" | "frame rate" | "quality",
+  words: string,
+) {
   if (name !== "resolution") await openDoor(view);
   const box = screen.getByRole("combobox", { name });
   await view.user.selectOptions(box, within(box).getByRole("option", { name: words }));
@@ -499,9 +500,17 @@ const PICKS: Pick[] = [
 ];
 /** Whether a person can make this pick on this shape with this choice: a pick needs its list, a "Same as project" pick needs the list to be showing something else (under Quality it already shows it). */
 function possible(shape: Shape, choice: Choice, pick: Pick): boolean {
-  if (pick.size === "same" && !(choice === "fast" && shape.sizes !== null && shape.own.resolution !== "source")) return false;
+  if (
+    pick.size === "same" &&
+    !(choice === "fast" && shape.sizes !== null && shape.own.resolution !== "source")
+  )
+    return false;
   if (pick.size === "list" && shape.size === null) return false;
-  if (pick.rate === "same" && !(choice === "fast" && shape.rates !== null && shape.own.fps !== null)) return false;
+  if (
+    pick.rate === "same" &&
+    !(choice === "fast" && shape.rates !== null && shape.own.fps !== null)
+  )
+    return false;
   if (pick.rate === "lower" && shape.rate === null) return false;
   return true;
 }
@@ -548,7 +557,8 @@ describe("(c) what Export hands over, over the project shapes and the picks", ()
         const sent = await press(view);
         expect(sent).toStrictEqual(expectedSent(shape, choice, pick));
         // Quality sends no route key at all (not even an undefined one): the 0.28.0 object
-        if (choice === "quality") expect(Object.keys(sent).sort()).toEqual(["fps", "mode", "quality", "resolution"]);
+        if (choice === "quality")
+          expect(Object.keys(sent).sort()).toEqual(["fps", "mode", "quality", "resolution"]);
       });
     });
   });
@@ -571,26 +581,55 @@ describe("(c) what Export hands over, over the project shapes and the picks", ()
   });
 
   it.each<[string, () => void]>([
-    ["the app's look never answers", () => vi.mocked(decideExportEncoder).mockImplementation(() => new Promise(() => undefined))],
-    ["the app's look fails", () => vi.mocked(decideExportEncoder).mockImplementation(() => Promise.reject(new Error("no")))],
-    ["the app's look wants the old Mode row", () => vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ showRow: true, defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }))],
-    ["the app will use its lighter setting", () => vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true }))],
-  ])("Fast leaves `mode` to the app (null) whatever the look says: %s; Quality sends what 0.28.0 sends", async (_name, arrange) => {
-    arrange();
-    const fast = mount(UHD60);
-    await settle();
-    await fast.user.click(radio("Fast"));
-    const sentFast = await press(fast);
-    expect(sentFast.mode).toBeNull();
-    expect(sentFast.route).toEqual({ route: "quick", explicit: { size: false, fps: false, quality: false } });
-    fast.unmount();
-    arrange();
-    const quality = mount(UHD60);
-    await settle();
-    const sentQuality = await press(quality);
-    expect(sentQuality).not.toHaveProperty("route");
-    expect(Object.keys(sentQuality).sort()).toEqual(["fps", "mode", "quality", "resolution"]);
-  });
+    [
+      "the app's look never answers",
+      () => vi.mocked(decideExportEncoder).mockImplementation(() => new Promise(() => undefined)),
+    ],
+    [
+      "the app's look fails",
+      () =>
+        vi.mocked(decideExportEncoder).mockImplementation(() => Promise.reject(new Error("no"))),
+    ],
+    [
+      "the app's look wants the old Mode row",
+      () =>
+        vi.mocked(decideExportEncoder).mockImplementation(async () =>
+          decision({
+            showRow: true,
+            defaultMode: "fast",
+            reason: "over_minute",
+            fullSeconds: 720,
+            fastSeconds: 240,
+          }),
+        ),
+    ],
+    [
+      "the app will use its lighter setting",
+      () =>
+        vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true })),
+    ],
+  ])(
+    "Fast leaves `mode` to the app (null) whatever the look says: %s; Quality sends what 0.28.0 sends",
+    async (_name, arrange) => {
+      arrange();
+      const fast = mount(UHD60);
+      await settle();
+      await fast.user.click(radio("Fast"));
+      const sentFast = await press(fast);
+      expect(sentFast.mode).toBeNull();
+      expect(sentFast.route).toEqual({
+        route: "quick",
+        explicit: { size: false, fps: false, quality: false },
+      });
+      fast.unmount();
+      arrange();
+      const quality = mount(UHD60);
+      await settle();
+      const sentQuality = await press(quality);
+      expect(sentQuality).not.toHaveProperty("route");
+      expect(Object.keys(sentQuality).sort()).toEqual(["fps", "mode", "quality", "resolution"]);
+    },
+  );
 
   it("Fast with no snapshot of the project (only the open canvas) sends Fast's own values and a null mode", async () => {
     const view = mount(UHD60, { workload: false });
@@ -603,6 +642,26 @@ describe("(c) what Export hands over, over the project shapes and the picks", ()
       mode: null,
       route: { route: "quick", explicit: { size: false, fps: false, quality: false } },
     });
+  });
+});
+
+describe("the app's look at the encoder is asked about what is shown, for either choice", () => {
+  const lastAsked = () => vi.mocked(decideExportEncoder).mock.calls.at(-1)?.[0].settings;
+
+  it("Fast on 4K at 60 is asked as 1080p at 30 at Medium, follows a pick, and Quality is asked as the project as it is", async () => {
+    const view = mount(UHD60);
+    await settle();
+    expect(lastAsked()).toEqual({ resolution: "source", quality: "medium", fps: null });
+    await view.user.click(radio("Fast"));
+    await settle();
+    expect(lastAsked()).toEqual({ resolution: "1080p", quality: "medium", fps: 30 });
+    await pickWords(view, "resolution", "720p");
+    await pickWords(view, "quality", "High");
+    await settle();
+    expect(lastAsked()).toEqual({ resolution: "720p", quality: "high", fps: 30 });
+    await view.user.click(radio("Quality"));
+    await settle();
+    expect(lastAsked()).toEqual({ resolution: "source", quality: "medium", fps: null });
   });
 });
 
@@ -711,25 +770,28 @@ describe("(e) nothing is remembered between two openings", () => {
         await pickWords(view, "quality", "Low");
       },
     ],
-  ])("after %s, the next opening is Quality, with no picks and the door closed", async (_name, act) => {
-    const first = mount(UHD60);
-    await settle();
-    await act(first);
-    first.unmount();
-    const second = mount(UHD60);
-    await settle();
-    expect(radio("Quality")).toBeChecked();
-    expect(radio("Fast")).not.toBeChecked();
-    expect(door()).toHaveAttribute("aria-expanded", "false");
-    expect(region()).toHaveAttribute("hidden");
-    expect(shownNow()).toEqual({ resolution: "source", rate: "", quality: "medium" });
-    expect(await press(second)).toStrictEqual({
-      resolution: "source",
-      quality: "medium",
-      fps: null,
-      mode: null,
-    });
-  });
+  ])(
+    "after %s, the next opening is Quality, with no picks and the door closed",
+    async (_name, act) => {
+      const first = mount(UHD60);
+      await settle();
+      await act(first);
+      first.unmount();
+      const second = mount(UHD60);
+      await settle();
+      expect(radio("Quality")).toBeChecked();
+      expect(radio("Fast")).not.toBeChecked();
+      expect(door()).toHaveAttribute("aria-expanded", "false");
+      expect(region()).toHaveAttribute("hidden");
+      expect(shownNow()).toEqual({ resolution: "source", rate: "", quality: "medium" });
+      expect(await press(second)).toStrictEqual({
+        resolution: "source",
+        quality: "medium",
+        fps: null,
+        mode: null,
+      });
+    },
+  );
 });
 
 describe("(f) the click works everything out again from the project at that moment", () => {
@@ -851,7 +913,13 @@ describe("(g) the click's own moves, for Fast as for Quality, and Cancel", () =>
     "%s: it says so even where the app wanted the old Mode row (which is never drawn)",
     async (choice) => {
       vi.mocked(decideExportEncoder).mockImplementation(async () =>
-        decision({ showRow: true, defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+        decision({
+          showRow: true,
+          defaultMode: "fast",
+          reason: "over_minute",
+          fullSeconds: 720,
+          fastSeconds: 240,
+        }),
       );
       const view = mount(UHD60);
       await settle();
@@ -862,19 +930,22 @@ describe("(g) the click's own moves, for Fast as for Quality, and Cancel", () =>
     },
   );
 
-  it.each<Choice>(["quality", "fast"])("%s: Cancel hands over nothing, asks nothing and leaves the job's record alone", async (choice) => {
-    const hold = vi.spyOn(exportAsk, "holdExportAsk");
-    const view = mount(UHD60);
-    await settle();
-    if (choice === "fast") await view.user.click(radio("Fast"));
-    await pickWords(view, "resolution", "720p");
-    await view.user.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(view.onCancel).toHaveBeenCalledTimes(1);
-    expect(view.onStart).not.toHaveBeenCalled();
-    expect(hold).not.toHaveBeenCalled();
-    expect(useExportJob.getState().modeRowOnScreen).toBeNull();
-    expect(exportAsk.exportAskedNow()).toBe(false);
-  });
+  it.each<Choice>(["quality", "fast"])(
+    "%s: Cancel hands over nothing, asks nothing and leaves the job's record alone",
+    async (choice) => {
+      const hold = vi.spyOn(exportAsk, "holdExportAsk");
+      const view = mount(UHD60);
+      await settle();
+      if (choice === "fast") await view.user.click(radio("Fast"));
+      await pickWords(view, "resolution", "720p");
+      await view.user.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(view.onCancel).toHaveBeenCalledTimes(1);
+      expect(view.onStart).not.toHaveBeenCalled();
+      expect(hold).not.toHaveBeenCalled();
+      expect(useExportJob.getState().modeRowOnScreen).toBeNull();
+      expect(exportAsk.exportAskedNow()).toBe(false);
+    },
+  );
 
   it("a second click sends a second, identical object (the view does not guard it; the dialog does)", async () => {
     const view = mount(UHD60);
@@ -889,24 +960,26 @@ describe("(g) the click's own moves, for Fast as for Quality, and Cancel", () =>
 
 describe("(h) the Graphics chip row stays mounted behind the closed door, in both choices, and is told the shown values", () => {
   const chipRow = () => screen.queryByTestId("chip-row");
-  const chipGroup = () =>
-    screen.queryByRole("radiogroup", { name: "Graphics chip", hidden: true });
+  const chipGroup = () => screen.queryByRole("radiogroup", { name: "Graphics chip", hidden: true });
 
-  it.each<Choice>(["quality", "fast"])("%s: it is in the page behind the closed door and tested before anybody opens it", async (choice) => {
-    pcWith([amd]);
-    const view = mount(VERTICAL);
-    if (choice === "fast") await view.user.click(radio("Fast"));
-    await waitFor(() => expect(screen.getByTestId("chip-row-note")).toBeInTheDocument());
-    expect(door()).toHaveAttribute("aria-expanded", "false");
-    expect(region()).toHaveAttribute("hidden");
-    expect(within(region()).getByTestId("chip-row")).toBeInTheDocument();
-    expect(chipRow()).not.toBeVisible();
-    const row = chipRow();
-    // choosing again does not take it out and put it back
-    await view.user.click(radio(choice === "fast" ? "Fast" : "Quality"));
-    expect(chipRow()).toBe(row);
-    expect(vi.mocked(runCapabilityProbe).mock.calls.length).toBeGreaterThan(0);
-  });
+  it.each<Choice>(["quality", "fast"])(
+    "%s: it is in the page behind the closed door and tested before anybody opens it",
+    async (choice) => {
+      pcWith([amd]);
+      const view = mount(VERTICAL);
+      if (choice === "fast") await view.user.click(radio("Fast"));
+      await waitFor(() => expect(screen.getByTestId("chip-row-note")).toBeInTheDocument());
+      expect(door()).toHaveAttribute("aria-expanded", "false");
+      expect(region()).toHaveAttribute("hidden");
+      expect(within(region()).getByTestId("chip-row")).toBeInTheDocument();
+      expect(chipRow()).not.toBeVisible();
+      const row = chipRow();
+      // choosing again does not take it out and put it back
+      await view.user.click(radio(choice === "fast" ? "Fast" : "Quality"));
+      expect(chipRow()).toBe(row);
+      expect(vi.mocked(runCapabilityProbe).mock.calls.length).toBeGreaterThan(0);
+    },
+  );
 
   it("is told the SHOWN values: Fast on 4K at 60 is tested as 1080p at 30 (a picture the chip serves), Quality on it as 4K at 60 (one it does not)", async () => {
     pcWith([amd]);
@@ -942,7 +1015,8 @@ describe("(h) the Graphics chip row stays mounted behind the closed door, in bot
 });
 
 describe("(i) the light-compression sentence is Quality's only", () => {
-  const SENTENCE = "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+  const SENTENCE =
+    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
 
   it("is drawn for Quality where the app's look says the lighter setting will be used, and never with Fast chosen, in either order", async () => {
     vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true }));
@@ -1053,7 +1127,9 @@ describe("(j) the keyboard", () => {
     await view.user.tab({ shift: true });
     expect(document.activeElement).toBe(radio("Fast"));
     await view.user.tab({ shift: true });
-    expect(document.activeElement === document.body || !group().contains(document.activeElement)).toBe(true);
+    expect(
+      document.activeElement === document.body || !group().contains(document.activeElement),
+    ).toBe(true);
   });
 
   it("opening the door with the keyboard changes nothing of what the row shows", async () => {
@@ -1070,7 +1146,14 @@ describe("(j) the keyboard", () => {
     expect(shownNow()).toEqual({ resolution: "1080p", rate: "30", quality: "medium" });
   });
 
-  it.each(["radio Quality", "radio Fast", "select resolution", "button Advanced settings", "button Cancel", "button Export"])(
+  it.each([
+    "radio Quality",
+    "radio Fast",
+    "select resolution",
+    "button Advanced settings",
+    "button Cancel",
+    "button Export",
+  ])(
     "Escape pressed on %s is the dialog's: the view does not handle it, cancel it or stop it",
     async (where) => {
       const view = mount(UHD60);
@@ -1081,14 +1164,15 @@ describe("(j) the keyboard", () => {
       };
       window.addEventListener("keydown", watch);
       try {
-        const target = {
+        const targets: Record<string, () => HTMLElement> = {
           "radio Quality": () => radio("Quality"),
           "radio Fast": () => radio("Fast"),
           "select resolution": () => resolutionBox()!,
           "button Advanced settings": () => door(),
           "button Cancel": () => screen.getByRole("button", { name: "Cancel" }),
           "button Export": () => exportButton(),
-        }[where]!;
+        };
+        const target = targets[where];
         act(() => target().focus());
         await view.user.keyboard("{Escape}");
       } finally {

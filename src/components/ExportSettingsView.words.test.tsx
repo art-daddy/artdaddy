@@ -152,7 +152,12 @@ const START_LINE = "Project size and frame rate, Medium quality.";
 const closedOf = (words: string[], row: boolean): string[] =>
   row ? [...ROW_WORDS, ...words] : words;
 /** The words with the door open: the line under the door follows the door where the row is drawn and a project can be read, then `extra` (the light-compression line), then the rows. */
-function openOf(words: string[], row: boolean, hasProject: boolean, extra: string[] = []): string[] {
+function openOf(
+  words: string[],
+  row: boolean,
+  hasProject: boolean,
+  extra: string[] = [],
+): string[] {
   const at = words.indexOf("Advanced settings") + 1;
   const behind = row && hasProject ? [START_LINE] : [];
   return closedOf([...words.slice(0, at), ...behind, ...extra, ...words.slice(at)], row);
@@ -314,97 +319,102 @@ const PROJECTS: Project[] = [
   },
 ];
 
-describe.each(STATES)("T3: the visible words of the view are exactly the whitelist, $state", ({ row }) => {
-  describe.each(PROJECTS)("$name", (project) => {
-    it("shows, with the door closed, only the Resolution row, the door, Cancel and Export (and the choice row where it is drawn)", async () => {
-      const { container } = await show(project.workload, decision(), [], row);
-      expect(door()).toHaveAttribute("aria-expanded", "false");
-      expect(visibleWords(container)).toEqual(closedOf(project.closed, row));
+describe.each(STATES)(
+  "T3: the visible words of the view are exactly the whitelist, $state",
+  ({ row }) => {
+    describe.each(PROJECTS)("$name", (project) => {
+      it("shows, with the door closed, only the Resolution row, the door, Cancel and Export (and the choice row where it is drawn)", async () => {
+        const { container } = await show(project.workload, decision(), [], row);
+        expect(door()).toHaveAttribute("aria-expanded", "false");
+        expect(visibleWords(container)).toEqual(closedOf(project.closed, row));
+      });
+
+      it("adds, with the door open, only the line under the door, Frame rate, Quality and their selects", async () => {
+        const { container, user } = await show(project.workload, decision(), [], row);
+        await user.click(door());
+        expect(door()).toHaveAttribute("aria-expanded", "true");
+        expect(visibleWords(container)).toEqual(
+          openOf(project.open, row, project.workload !== null),
+        );
+      });
+
+      it("offers exactly these sizes and rates (never one at or above the project's) and the three qualities by name", async () => {
+        await show(project.workload, decision(), [], row);
+        expect(optionsOf("resolution")).toEqual(project.resolution);
+        expect(optionsOf("frame rate")).toEqual(project.rate);
+        expect(optionsOf("quality")).toEqual(["High", "Medium", "Low"]);
+      });
     });
 
-    it("adds, with the door open, only the line under the door, Frame rate, Quality and their selects", async () => {
-      const { container, user } = await show(project.workload, decision(), [], row);
+    it("shows nothing of what a found chip adds while the door is closed, and the chip row's words once it is open", async () => {
+      const { container, user } = await show(DEFAULT, decision(), [amd], row);
+      await waitFor(() =>
+        expect(screen.getByTestId("chip-row-note").textContent).toBe(CHIP_PASSED_NOTE),
+      );
+      expect(visibleWords(container)).toEqual(closedOf(PROJECTS[0].closed, row));
       await user.click(door());
-      expect(door()).toHaveAttribute("aria-expanded", "true");
-      expect(visibleWords(container)).toEqual(openOf(project.open, row, project.workload !== null));
+      expect(visibleWords(container)).toEqual([
+        ...(row ? ROW_WORDS : []),
+        "Resolution",
+        "Same as project (1080 x 1920)",
+        "Advanced settings",
+        ...(row ? [START_LINE] : []),
+        "Frame rate",
+        "Same as project (30 fps)",
+        "Quality",
+        "Medium",
+        "Graphics chip",
+        "Auto",
+        "Off",
+        CHIP_PASSED_NOTE,
+        "Cancel",
+        "Export",
+      ]);
     });
 
-    it("offers exactly these sizes and rates (never one at or above the project's) and the three qualities by name", async () => {
-      await show(project.workload, decision(), [], row);
-      expect(optionsOf("resolution")).toEqual(project.resolution);
-      expect(optionsOf("frame rate")).toEqual(project.rate);
-      expect(optionsOf("quality")).toEqual(["High", "Medium", "Low"]);
+    it("says nothing of a chip that was not found, and the chip row's words are not in the DOM at all", async () => {
+      const { container, user } = await show(DEFAULT, decision(), [], row);
+      await user.click(door());
+      expect(visibleWords(container)).toEqual(openOf(PROJECTS[0].open, row, true));
+      expect(container.textContent).not.toContain("Graphics chip");
     });
-  });
 
-  it("shows nothing of what a found chip adds while the door is closed, and the chip row's words once it is open", async () => {
-    const { container, user } = await show(DEFAULT, decision(), [amd], row);
-    await waitFor(() =>
-      expect(screen.getByTestId("chip-row-note").textContent).toBe(CHIP_PASSED_NOTE),
-    );
-    expect(visibleWords(container)).toEqual(closedOf(PROJECTS[0].closed, row));
-    await user.click(door());
-    expect(visibleWords(container)).toEqual([
-      ...(row ? ROW_WORDS : []),
-      "Resolution",
-      "Same as project (1080 x 1920)",
-      "Advanced settings",
-      ...(row ? [START_LINE] : []),
-      "Frame rate",
-      "Same as project (30 fps)",
-      "Quality",
-      "Medium",
-      "Graphics chip",
-      "Auto",
-      "Off",
-      CHIP_PASSED_NOTE,
-      "Cancel",
-      "Export",
-    ]);
-  });
+    it("draws the light-compression line, first behind the door (after the line under the door where there is one), only where the app's look says it will use that setting", async () => {
+      const { container, user } = await show(DEFAULT, decision({ faster: true }), [], row);
+      await screen.findByText(LIGHT_LINE);
+      expect(visibleWords(container)).toEqual(closedOf(PROJECTS[0].closed, row));
+      await user.click(door());
+      expect(visibleWords(container)).toEqual([
+        ...(row ? ROW_WORDS : []),
+        "Resolution",
+        "Same as project (1080 x 1920)",
+        "Advanced settings",
+        ...(row ? [START_LINE] : []),
+        LIGHT_LINE,
+        "Frame rate",
+        "Same as project (30 fps)",
+        "Quality",
+        "Medium",
+        "Cancel",
+        "Export",
+      ]);
+    });
 
-  it("says nothing of a chip that was not found, and the chip row's words are not in the DOM at all", async () => {
-    const { container, user } = await show(DEFAULT, decision(), [], row);
-    await user.click(door());
-    expect(visibleWords(container)).toEqual(openOf(PROJECTS[0].open, row, true));
-    expect(container.textContent).not.toContain("Graphics chip");
-  });
-
-  it("draws the light-compression line, first behind the door (after the line under the door where there is one), only where the app's look says it will use that setting", async () => {
-    const { container, user } = await show(DEFAULT, decision({ faster: true }), [], row);
-    await screen.findByText(LIGHT_LINE);
-    expect(visibleWords(container)).toEqual(closedOf(PROJECTS[0].closed, row));
-    await user.click(door());
-    expect(visibleWords(container)).toEqual([
-      ...(row ? ROW_WORDS : []),
-      "Resolution",
-      "Same as project (1080 x 1920)",
-      "Advanced settings",
-      ...(row ? [START_LINE] : []),
-      LIGHT_LINE,
-      "Frame rate",
-      "Same as project (30 fps)",
-      "Quality",
-      "Medium",
-      "Cancel",
-      "Export",
-    ]);
-  });
-
-  it.each<[string, ExportEncoderDecision]>([
-    ["an ordinary answer", decision()],
-    [
-      "an answer that wants the old Mode row (the row is never drawn, so the line has nothing to say either)",
-      wantsRow(),
-    ],
-  ])("draws no light-compression line for %s", async (_name, look) => {
-    const { container, user } = await show(DEFAULT, look, [], row);
-    expect(container.textContent).not.toContain(LIGHT_LINE);
-    await user.click(door());
-    expect(container.textContent).not.toContain(LIGHT_LINE);
-    expect(visibleWords(container)).toEqual(openOf(PROJECTS[0].open, row, true));
-  });
-});
+    it.each<[string, ExportEncoderDecision]>([
+      ["an ordinary answer", decision()],
+      [
+        "an answer that wants the old Mode row (the row is never drawn, so the line has nothing to say either)",
+        wantsRow(),
+      ],
+    ])("draws no light-compression line for %s", async (_name, look) => {
+      const { container, user } = await show(DEFAULT, look, [], row);
+      expect(container.textContent).not.toContain(LIGHT_LINE);
+      await user.click(door());
+      expect(container.textContent).not.toContain(LIGHT_LINE);
+      expect(visibleWords(container)).toEqual(openOf(PROJECTS[0].open, row, true));
+    });
+  },
+);
 
 /** Words and names that must be nowhere in the DOM, hidden or not, in either state and on either choice (the spec's T4 list). The word Fast is the choice row's alone (checked separately). */
 const NEVER_IN_TEXT: RegExp[] = [
@@ -483,7 +493,8 @@ function expectNeverDrawn(row: boolean): void {
     ),
   );
   for (const name of NEVER_AS_NAME) expect(carried).not.toContain(name);
-  if (!row) for (const name of ["export choice", "export-choice"]) expect(carried).not.toContain(name);
+  if (!row)
+    for (const name of ["export choice", "export-choice"]) expect(carried).not.toContain(name);
   expect(retiredIn(carried.filter((name) => name !== null).join("\n"))).toEqual([]);
   // the quality hints are not part of an option's name either
   for (const option of screen.queryAllByRole("option", { hidden: true }))

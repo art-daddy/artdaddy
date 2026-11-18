@@ -234,205 +234,200 @@ describe("the test environment keeps what the browser keeps out of the Tab order
 });
 
 describe.each(STATES)("$state", ({ row }) => {
-beforeEach(() => {
-  withRow = row;
-});
-
-describe("T12: the Tab order of the settings view", () => {
-  it("with the door closed: [the choice radio,] Resolution, the door, Cancel, Export, and nothing inside the closed region", async () => {
-    const { user } = await mount(DEFAULT, [amd]);
-    expect(region()).toHaveAttribute("hidden");
-    expect(await tabThrough(user)).toEqual(
-      lead([
-        "select resolution",
-        "button Advanced settings",
-        "button Cancel",
-        "button Export",
-      ]),
-    );
+  beforeEach(() => {
+    withRow = row;
   });
 
-  it("with the door closed on a 480p project there is no Resolution stop", async () => {
-    const { user } = await mount(sized(854, 480, 30));
-    expect(await tabThrough(user)).toEqual(
-      lead(["button Advanced settings", "button Cancel", "button Export"]),
-    );
-  });
-
-  it("goes back the same way with Shift+Tab", async () => {
-    const { user } = await mount(DEFAULT, [amd]);
-    await tabThrough(user);
-    await user.tab({ shift: true }); // from the page's start to the last stop
-    expect(focused()).toBe("button Export");
-    const back: string[] = [];
-    const stops = row ? 4 : 3;
-    for (let presses = 0; presses < stops; presses += 1) {
-      await user.tab({ shift: true });
-      back.push(focused());
-    }
-    expect(back).toEqual(
-      row
-        ? ["button Cancel", "button Advanced settings", "select resolution", "radio Quality"]
-        : ["button Cancel", "button Advanced settings", "select resolution"],
-    );
-  });
-
-  it.each<["Enter" | "Space", "{Enter}" | " "]>([
-    ["Enter", "{Enter}"],
-    ["Space", " "],
-  ])(
-    "with the door opened by %s: [the choice radio,] Resolution, the door, Frame rate, Quality, the chip radios as one stop, Cancel, Export",
-    async (_key, opener) => {
+  describe("T12: the Tab order of the settings view", () => {
+    it("with the door closed: [the choice radio,] Resolution, the door, Cancel, Export, and nothing inside the closed region", async () => {
       const { user } = await mount(DEFAULT, [amd]);
-      expect(await tabThrough(user, opener)).toEqual(
+      expect(region()).toHaveAttribute("hidden");
+      expect(await tabThrough(user)).toEqual(
+        lead(["select resolution", "button Advanced settings", "button Cancel", "button Export"]),
+      );
+    });
+
+    it("with the door closed on a 480p project there is no Resolution stop", async () => {
+      const { user } = await mount(sized(854, 480, 30));
+      expect(await tabThrough(user)).toEqual(
+        lead(["button Advanced settings", "button Cancel", "button Export"]),
+      );
+    });
+
+    it("goes back the same way with Shift+Tab", async () => {
+      const { user } = await mount(DEFAULT, [amd]);
+      await tabThrough(user);
+      await user.tab({ shift: true }); // from the page's start to the last stop
+      expect(focused()).toBe("button Export");
+      const back: string[] = [];
+      const stops = row ? 4 : 3;
+      for (let presses = 0; presses < stops; presses += 1) {
+        await user.tab({ shift: true });
+        back.push(focused());
+      }
+      expect(back).toEqual(
+        row
+          ? ["button Cancel", "button Advanced settings", "select resolution", "radio Quality"]
+          : ["button Cancel", "button Advanced settings", "select resolution"],
+      );
+    });
+
+    it.each<["Enter" | "Space", "{Enter}" | " "]>([
+      ["Enter", "{Enter}"],
+      ["Space", " "],
+    ])(
+      "with the door opened by %s: [the choice radio,] Resolution, the door, Frame rate, Quality, the chip radios as one stop, Cancel, Export",
+      async (_key, opener) => {
+        const { user } = await mount(DEFAULT, [amd]);
+        expect(await tabThrough(user, opener)).toEqual(
+          lead([
+            "select resolution",
+            "button Advanced settings",
+            "select frame rate",
+            "select quality",
+            "radio Auto",
+            "button Cancel",
+            "button Export",
+          ]),
+        );
+        expect(door()).toHaveAttribute("aria-expanded", "true");
+        expect(region()).not.toHaveAttribute("hidden");
+      },
+    );
+
+    it("with the door open on a 1080p project at 24 and no chip: no Frame rate and no chip stop", async () => {
+      const { user } = await mount(sized(1920, 1080, 24));
+      expect(await tabThrough(user, "{Enter}")).toEqual(
         lead([
           "select resolution",
           "button Advanced settings",
-          "select frame rate",
           "select quality",
-          "radio Auto",
           "button Cancel",
           "button Export",
         ]),
       );
-      expect(door()).toHaveAttribute("aria-expanded", "true");
-      expect(region()).not.toHaveAttribute("hidden");
-    },
-  );
-
-  it("with the door open on a 1080p project at 24 and no chip: no Frame rate and no chip stop", async () => {
-    const { user } = await mount(sized(1920, 1080, 24));
-    expect(await tabThrough(user, "{Enter}")).toEqual(
-      lead([
-        "select resolution",
-        "button Advanced settings",
-        "select quality",
-        "button Cancel",
-        "button Export",
-      ]),
-    );
+    });
   });
-});
 
-describe("T12: the door by keyboard", () => {
-  it("opens and closes on Enter and on Space, keeps focus, and hides the region again", async () => {
-    const { user } = await mount();
-    await tabTo(user, "button Advanced settings");
-    expect(door()).toHaveAttribute("aria-controls", "export-advanced");
-    expect(door()).toHaveAttribute("aria-expanded", "false");
-
-    for (const key of ["{Enter}", " "]) {
-      await user.keyboard(key);
-      expect(door()).toHaveAttribute("aria-expanded", "true");
-      expect(region()).not.toHaveAttribute("hidden");
-      expect(screen.getByRole("group", { name: "Advanced settings" })).toBeVisible();
-      expect(focused()).toBe("button Advanced settings");
-      await user.keyboard(key);
+  describe("T12: the door by keyboard", () => {
+    it("opens and closes on Enter and on Space, keeps focus, and hides the region again", async () => {
+      const { user } = await mount();
+      await tabTo(user, "button Advanced settings");
+      expect(door()).toHaveAttribute("aria-controls", "export-advanced");
       expect(door()).toHaveAttribute("aria-expanded", "false");
-      expect(region()).toHaveAttribute("hidden");
-      expect(focused()).toBe("button Advanced settings");
-    }
-  });
-});
 
-describe("T12: values changed with the keyboard are the values Export sends", () => {
-  it("the arrow keys change Resolution, Frame rate and Quality, and Enter on Export hands them over once", async () => {
-    const { user, onStart } = await mount();
-    await tabTo(user, "select resolution");
-    expect(shown(document.activeElement as Element)).toBe("Same as project (1080 x 1920)");
-    await arrow(user, "ArrowDown");
-    expect(shown(document.activeElement as Element)).toBe("720p");
-
-    await user.tab(); // the door
-    await user.keyboard("{Enter}");
-    await user.tab(); // Frame rate
-    expect(focused()).toBe("select frame rate");
-    await arrow(user, "ArrowDown");
-    expect(shown(document.activeElement as Element)).toBe("25 fps");
-
-    await user.tab(); // Quality
-    expect(focused()).toBe("select quality");
-    expect(shown(document.activeElement as Element)).toBe("Medium");
-    await arrow(user, "ArrowUp");
-    expect(shown(document.activeElement as Element)).toBe("High");
-    await arrow(user, "ArrowDown");
-    await arrow(user, "ArrowDown");
-    expect(shown(document.activeElement as Element)).toBe("Low");
-
-    await user.tab(); // Cancel
-    await user.tab(); // Export
-    expect(focused()).toBe("button Export");
-    await settleAll();
-    await user.keyboard("{Enter}");
-    expect(onStart).toHaveBeenCalledTimes(1);
-    expect(onStart.mock.calls[0][0]).toStrictEqual({
-      resolution: "720p",
-      quality: "low",
-      fps: 25,
-      mode: null,
+      for (const key of ["{Enter}", " "]) {
+        await user.keyboard(key);
+        expect(door()).toHaveAttribute("aria-expanded", "true");
+        expect(region()).not.toHaveAttribute("hidden");
+        expect(screen.getByRole("group", { name: "Advanced settings" })).toBeVisible();
+        expect(focused()).toBe("button Advanced settings");
+        await user.keyboard(key);
+        expect(door()).toHaveAttribute("aria-expanded", "false");
+        expect(region()).toHaveAttribute("hidden");
+        expect(focused()).toBe("button Advanced settings");
+      }
     });
   });
 
-  it("an arrow key the page cancels would not have changed the value (the helper is not a way round the page)", async () => {
-    const { user } = await mount();
-    await tabTo(user, "select resolution");
-    const stop = (event: KeyboardEvent): void => event.preventDefault();
-    window.addEventListener("keydown", stop);
-    await arrow(user, "ArrowDown");
-    window.removeEventListener("keydown", stop);
-    expect(shown(document.activeElement as Element)).toBe("Same as project (1080 x 1920)");
-  });
+  describe("T12: values changed with the keyboard are the values Export sends", () => {
+    it("the arrow keys change Resolution, Frame rate and Quality, and Enter on Export hands them over once", async () => {
+      const { user, onStart } = await mount();
+      await tabTo(user, "select resolution");
+      expect(shown(document.activeElement as Element)).toBe("Same as project (1080 x 1920)");
+      await arrow(user, "ArrowDown");
+      expect(shown(document.activeElement as Element)).toBe("720p");
 
-  it("Space on Export also hands the settings over once", async () => {
-    const { user, onStart } = await mount();
-    await tabThrough(user);
-    await user.tab({ shift: true });
-    expect(focused()).toBe("button Export");
-    await user.keyboard(" ");
-    expect(onStart).toHaveBeenCalledTimes(1);
-    expect(onStart.mock.calls[0][0]).toStrictEqual({
-      resolution: "source",
-      quality: "medium",
-      fps: null,
-      mode: null,
+      await user.tab(); // the door
+      await user.keyboard("{Enter}");
+      await user.tab(); // Frame rate
+      expect(focused()).toBe("select frame rate");
+      await arrow(user, "ArrowDown");
+      expect(shown(document.activeElement as Element)).toBe("25 fps");
+
+      await user.tab(); // Quality
+      expect(focused()).toBe("select quality");
+      expect(shown(document.activeElement as Element)).toBe("Medium");
+      await arrow(user, "ArrowUp");
+      expect(shown(document.activeElement as Element)).toBe("High");
+      await arrow(user, "ArrowDown");
+      await arrow(user, "ArrowDown");
+      expect(shown(document.activeElement as Element)).toBe("Low");
+
+      await user.tab(); // Cancel
+      await user.tab(); // Export
+      expect(focused()).toBe("button Export");
+      await settleAll();
+      await user.keyboard("{Enter}");
+      expect(onStart).toHaveBeenCalledTimes(1);
+      expect(onStart.mock.calls[0][0]).toStrictEqual({
+        resolution: "720p",
+        quality: "low",
+        fps: 25,
+        mode: null,
+      });
+    });
+
+    it("an arrow key the page cancels would not have changed the value (the helper is not a way round the page)", async () => {
+      const { user } = await mount();
+      await tabTo(user, "select resolution");
+      const stop = (event: KeyboardEvent): void => event.preventDefault();
+      window.addEventListener("keydown", stop);
+      await arrow(user, "ArrowDown");
+      window.removeEventListener("keydown", stop);
+      expect(shown(document.activeElement as Element)).toBe("Same as project (1080 x 1920)");
+    });
+
+    it("Space on Export also hands the settings over once", async () => {
+      const { user, onStart } = await mount();
+      await tabThrough(user);
+      await user.tab({ shift: true });
+      expect(focused()).toBe("button Export");
+      await user.keyboard(" ");
+      expect(onStart).toHaveBeenCalledTimes(1);
+      expect(onStart.mock.calls[0][0]).toStrictEqual({
+        resolution: "source",
+        quality: "medium",
+        fps: null,
+        mode: null,
+      });
+    });
+
+    it("Cancel by keyboard calls onCancel and starts nothing", async () => {
+      const { user, onStart, onCancel } = await mount();
+      await tabTo(user, "select resolution");
+      await user.tab(); // the door
+      await user.tab(); // Cancel
+      expect(focused()).toBe("button Cancel");
+      await user.keyboard("{Enter}");
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(onStart).not.toHaveBeenCalled();
     });
   });
 
-  it("Cancel by keyboard calls onCancel and starts nothing", async () => {
-    const { user, onStart, onCancel } = await mount();
-    await tabTo(user, "select resolution");
-    await user.tab(); // the door
-    await user.tab(); // Cancel
-    expect(focused()).toBe("button Cancel");
-    await user.keyboard("{Enter}");
-    expect(onCancel).toHaveBeenCalledTimes(1);
-    expect(onStart).not.toHaveBeenCalled();
+  describe("T12: the chip radios are one stop and move with the arrow keys", () => {
+    it("Down and Up move between Auto and Off, and the per-PC switch follows", async () => {
+      const { user } = await mount(DEFAULT, [amd]);
+      await tabTo(user, "select resolution");
+      await user.tab(); // the door
+      await user.keyboard("{Enter}");
+      await user.tab(); // Frame rate
+      await user.tab(); // Quality
+      await user.tab(); // the chip radios: one stop, on the checked one
+      expect(focused()).toBe("radio Auto");
+
+      await user.keyboard("{ArrowDown}");
+      expect(focused()).toBe("radio Off");
+      expect(screen.getByRole("radio", { name: "Off" })).toBeChecked();
+      expect(localStorage.getItem(CHIP_PREF)).toBe("off");
+
+      await user.keyboard("{ArrowUp}");
+      expect(focused()).toBe("radio Auto");
+      expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
+      expect(localStorage.getItem(CHIP_PREF)).toBeNull();
+
+      await user.tab(); // leaves the radios for Cancel: the group was one stop
+      expect(focused()).toBe("button Cancel");
+    });
   });
-});
-
-describe("T12: the chip radios are one stop and move with the arrow keys", () => {
-  it("Down and Up move between Auto and Off, and the per-PC switch follows", async () => {
-    const { user } = await mount(DEFAULT, [amd]);
-    await tabTo(user, "select resolution");
-    await user.tab(); // the door
-    await user.keyboard("{Enter}");
-    await user.tab(); // Frame rate
-    await user.tab(); // Quality
-    await user.tab(); // the chip radios: one stop, on the checked one
-    expect(focused()).toBe("radio Auto");
-
-    await user.keyboard("{ArrowDown}");
-    expect(focused()).toBe("radio Off");
-    expect(screen.getByRole("radio", { name: "Off" })).toBeChecked();
-    expect(localStorage.getItem(CHIP_PREF)).toBe("off");
-
-    await user.keyboard("{ArrowUp}");
-    expect(focused()).toBe("radio Auto");
-    expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
-    expect(localStorage.getItem(CHIP_PREF)).toBeNull();
-
-    await user.tab(); // leaves the radios for Cancel: the group was one stop
-    expect(focused()).toBe("button Cancel");
-  });
-});
 });

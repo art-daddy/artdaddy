@@ -215,7 +215,8 @@ function says(shape: Shape, sent: ExportSettings) {
   const rate = sent.fps ?? Math.floor(shape.fps);
   return {
     projectSizeAndRate: sent.resolution === "source" && sent.fps === null,
-    oneSizeSmaller: sent.resolution !== "source" && below !== undefined && sent.resolution === below.name,
+    oneSizeSmaller:
+      sent.resolution !== "source" && below !== undefined && sent.resolution === below.name,
     upTo30: shape.fps > 30 && rate <= 30,
     quality: QUALITY_WORD[sent.quality],
   };
@@ -276,8 +277,10 @@ describe("the line is true of what Export hands over: every pick of every lever,
       // each of the three qualities (and none) with every Resolution entry, then with every Frame rate entry
       it("over every quality, with every Resolution entry and with every Frame rate entry", () => {
         for (const quality of entries(["high", "medium", "low"])) {
-          for (const size of entries(shape.sizes)) expectTrue(shape, play(shape, choice, { size, quality }));
-          for (const rate of entries(rates)) expectTrue(shape, play(shape, choice, { rate, quality }));
+          for (const size of entries(shape.sizes))
+            expectTrue(shape, play(shape, choice, { size, quality }));
+          for (const rate of entries(rates))
+            expectTrue(shape, play(shape, choice, { rate, quality }));
         }
       });
 
@@ -322,7 +325,10 @@ describe("the owner's examples, word for word", () => {
   });
   it("Fast with its rate set back to the project's own: the cap clause goes (the shown values, not the choice's, are described)", () => {
     expect(play(SHAPES[0], "fast", { rate: "" }).line).toBe("One size smaller, Medium quality.");
-    expect(play(SHAPES[0], "fast", { rate: "" }).sent).toMatchObject({ resolution: "1080p", fps: null });
+    expect(play(SHAPES[0], "fast", { rate: "" }).sent).toMatchObject({
+      resolution: "1080p",
+      fps: null,
+    });
   });
   it("Fast on 72 fps: the size one smaller and a rate of 18 is not a clause (the project is above 30 and 18 is at most 30)", () => {
     expect(play(SHAPES[4], "fast").line).toBe(
@@ -334,7 +340,9 @@ describe("the owner's examples, word for word", () => {
 describe("where the line is and is not", () => {
   it("is in the region behind the door: not visible while the door is closed, visible once it is open", () => {
     setCanvas(3840, 2160, 60);
-    render(<ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />);
+    render(
+      <ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />,
+    );
     expect(lineBehindDoor()).toBe("Project size and frame rate, Medium quality.");
     expect(screen.getByText("Project size and frame rate, Medium quality.")).not.toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
@@ -343,7 +351,9 @@ describe("where the line is and is not", () => {
 
   it("follows the choice and the picks live: it changes with each of them and comes back with them", () => {
     setCanvas(3840, 2160, 60);
-    render(<ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />);
+    render(
+      <ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
     const seen = [lineBehindDoor()];
     fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
