@@ -221,6 +221,52 @@ describe("the menu bar decides which settings the Export dialog draws, once per 
   });
 });
 
+// Where the switch is read decides the FIRST draw of an opening, which a look at the screen after React has settled cannot see: read in an effect after the dialog opened, the first draw would show the
+// last opening's view (and that view's look would ask the app) before the effect put it right. So what is on screen is written down each time the app is asked about the encoder.
+describe("the first draw of an opening is the view the switch said at the click", () => {
+  type Seen = { newView: boolean; legacyView: boolean };
+  const NEW_VIEW: Seen = { newView: true, legacyView: false };
+  const LEGACY_VIEW: Seen = { newView: false, legacyView: true };
+
+  /** Open Export from the menu once for each entry (the switch set to it just before the click), cancel each time, and return what was on screen each time the app was asked, opening by opening. */
+  async function askedAtEachOpening(switches: boolean[]): Promise<Seen[][]> {
+    const onScreen: Seen[] = [];
+    vi.mocked(decideExportEncoder).mockImplementation(async () => {
+      onScreen.push({ newView: newView() !== null, legacyView: legacyView() !== null });
+      return decision();
+    });
+    renderBar();
+    const perOpening: Seen[][] = [];
+    for (const quick of switches) {
+      __setExportFlag("quick_route", quick);
+      onScreen.length = 0;
+      openFromMenu();
+      await settle();
+      perOpening.push([...onScreen]);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    }
+    return perOpening;
+  }
+
+  it("on at one opening and off at the next: the app is asked once at each, from the view the switch said, and never first from the other one", async () => {
+    expect(await askedAtEachOpening([true, false])).toEqual([[NEW_VIEW], [LEGACY_VIEW]]);
+  });
+
+  it("off at one opening and on at the next: the same, the other way round", async () => {
+    expect(await askedAtEachOpening([false, true])).toEqual([[LEGACY_VIEW], [NEW_VIEW]]);
+  });
+
+  it("the same holds through a longer run of openings, with the switch repeating and changing", async () => {
+    expect(await askedAtEachOpening([true, true, false, false, true])).toEqual([
+      [NEW_VIEW],
+      [NEW_VIEW],
+      [LEGACY_VIEW],
+      [LEGACY_VIEW],
+      [NEW_VIEW],
+    ]);
+  });
+});
+
 // The 0.28.0 dialog is the oracle: for the same project, look and picks the tool `export` is run with the same arguments and options, and the new view adds nothing to them.
 describe("Export from the new view runs the export tool as the 0.28.0 dialog does", () => {
   type Run = { args: Record<string, unknown>; options: Record<string, unknown> };
