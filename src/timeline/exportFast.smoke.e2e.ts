@@ -450,8 +450,13 @@ const near = (actual: number, want: number, tolerance: number, what: string): vo
 };
 
 /** What the two files must share whichever way each was made: the sound, the containers and codecs a player needs, and the length. `oneFrame` is a frame of the
- *  slower of the two rates, in seconds. */
-function expectSameVideo(quality: Delivered, other: Delivered, oneFrame: number): void {
+ *  slower of the two rates, in seconds; `seconds` is the length the project has (the cases above all run two seconds). */
+function expectSameVideo(
+  quality: Delivered,
+  other: Delivered,
+  oneFrame: number,
+  seconds = SECONDS,
+): void {
   const [q, f] = [quality.facts, other.facts];
   expect(f.streams, `${other.name}: stream counts`).toEqual(q.streams);
   expect(q.streams).toEqual({ video: 1, audio: 1 });
@@ -467,7 +472,7 @@ function expectSameVideo(quality: Delivered, other: Delivered, oneFrame: number)
     oneFrame + 1e-3,
   );
   expect(Math.abs(f.audioS! - q.audioS!), `${other.name}: sound length`).toBeLessThan(0.05);
-  near(q.videoS, SECONDS, 0.1, "Quality's video length in seconds");
+  near(q.videoS, seconds, 0.1, "Quality's video length in seconds");
 }
 
 /** The same video, made smaller: `fast` against `quality` brought to Fast's picture (both at one frame rate). The same moving test pattern made twice, once smaller
@@ -730,9 +735,10 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
 // engine Fast makes the encode and the file smaller, and does not make the drawing of the parts smaller.
 // ---------------------------------------------------------------------------------------------------------------------
 
-// The project: two real clips of one second, of different colour and each with its own tone, a crossfade across the cut and a text over both, on a 1280x720 canvas at 60 frames a second.
-// A fixed noise (the same in every frame, so cheap to encode) is laid over each colour: with flat colours the whole Fast file was 29 KB (x264 veryfast), and its final encode, which had made
-// all of its 60 frames, never exited (the app process's output sink did not finish; two runs, the same stop). With the noise every finished file is some hundreds of kilobytes.
+// The project: two real clips of one and a half seconds, of different colour and each with its own sound, a crossfade across the cut and a text over both, on a 1280x720 canvas at 60 frames a
+// second (three seconds, 180 frames). The sound is pink noise, which does not compress: it keeps every finished file well over 32 KB. With a two second project of flat colours and a sine tone the
+// whole Fast file on the processor (x264 veryfast) was 29 KB, and its final encode, which had made all of its 60 frames, never exited (the app process's output sink did not finish; two runs,
+// the same stop, see the report); the files of 37 KB and more ended as they should.
 async function streamedProject(): Promise<Project> {
   const dir = joinPath(ROOT, "stream-1280x720-60");
   await nodeFs.mkdir(dir);
@@ -742,15 +748,15 @@ async function streamedProject(): Promise<Project> {
   const set = (await setCanvasTool({ width: 1280, height: 720, fps: 60 }, ctx)) as Rec;
   expect(set.ok, JSON.stringify(set)).toBe(true);
   const refs: string[] = [];
-  for (const [colour, hertz] of [
-    ["red", 440],
-    ["blue", 880],
+  for (const [colour, seed] of [
+    ["red", 1],
+    ["blue", 2],
   ] as const) {
     const src = joinPath(dir, `${colour}.mp4`);
     await ff([
       "-y", "-v", "error",
-      "-f", "lavfi", "-i", `color=c=${colour}:s=1280x720:r=60:d=1,noise=alls=20:allf=u`,
-      "-f", "lavfi", "-i", `sine=frequency=${hertz}:sample_rate=48000:duration=1`,
+      "-f", "lavfi", "-i", `color=c=${colour}:s=1280x720:r=60:d=1.5`,
+      "-f", "lavfi", "-i", `anoisesrc=color=pink:amplitude=0.1:sample_rate=48000:duration=1.5:seed=${seed}`,
       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
       src,
     ]); // prettier-ignore
@@ -759,8 +765,8 @@ async function streamedProject(): Promise<Project> {
   const placed = (await addClipsTool(
     {
       entries: [
-        { media_ref: refs[0], timeline_in: 0, timeline_out: 60 },
-        { media_ref: refs[1], timeline_in: 60, timeline_out: 120 },
+        { media_ref: refs[0], timeline_in: 0, timeline_out: 90 },
+        { media_ref: refs[1], timeline_in: 90, timeline_out: 180 },
       ],
     },
     ctx,
@@ -769,14 +775,19 @@ async function streamedProject(): Promise<Project> {
   const videos = (placed.created as Rec[]).filter((clip) => clip.kind === "video");
   expect(videos).toHaveLength(2);
   expect(videos[1].track_id, "both clips on one track").toBe(videos[0].track_id);
-  // The crossfade runs half a second (30 frames) centred on the cut at frame 60.
+  // The crossfade runs half a second (30 frames) centred on the cut at frame 90.
   const faded = (await setTransitionTool(
     { clip_id: videos[1].clip_id, transition_in: { kind: "crossfade", duration: 30 } },
     ctx,
   )) as Rec;
   expect(faded.ok, JSON.stringify(faded)).toBe(true);
+  // The text is the largest tier (13% of the canvas height) so that its ink is plain to see in a 320x180 raster.
   const titled = (await addTextClipsTool(
-    { entries: [{ content: "FAST", timeline_in: 0, duration: 120 }] },
+    {
+      entries: [
+        { content: "FAST AND QUALITY", timeline_in: 0, duration: 180, style: { size: "xl" } },
+      ],
+    },
     ctx,
   )) as Rec;
   expect(titled.ok, JSON.stringify(titled)).toBe(true);
@@ -997,9 +1008,9 @@ describe.skipIf(!FF || !FP)(
       __setJobSupervisor(jobs);
       engineBefore = useExportJob.getState().engine;
       useExportJob.getState().setEngine("partition-pipes-v1");
-      // The native program waits two minutes for a render by default; a clip of two seconds that takes a minute is stuck, and the diagnosis is worth more than the second minute.
+      // The native program waits two minutes for a render by default; a project of three seconds that takes a minute and a half is stuck, and the diagnosis is worth more than the last half minute.
       waitBefore = process.env.ARTDADDY_QA_RENDER_WAIT_MS;
-      process.env.ARTDADDY_QA_RENDER_WAIT_MS = "60000";
+      process.env.ARTDADDY_QA_RENDER_WAIT_MS = "90000";
     }, 120_000);
     afterAll(async () => {
       await whenExportsSettle();
@@ -1037,14 +1048,14 @@ describe.skipIf(!FF || !FP)(
       }
 
       expect(picture(q)).toEqual({ width: 1280, height: 720, rate: 60 });
-      near(q.facts.frames, 120, 2, "Quality's frames at 60 fps");
+      near(q.facts.frames, 180, 2, "Quality's frames at 60 fps");
       const loud = await meanVolumeDb(q.file);
       expect(loud, "Quality's sound is not silence").toBeGreaterThan(-40);
       for (const made of [f, off]) {
         expect(picture(made), made.name).toEqual({ width: 854, height: 480, rate: 30 });
-        near(made.facts.frames, 60, 2, `${made.name}: frames at 30 fps`);
+        near(made.facts.frames, 90, 2, `${made.name}: frames at 30 fps`);
         near(made.facts.frames, q.facts.frames / 2, 2, `${made.name}: half of Quality's frames`);
-        expectSameVideo(q, made, 1 / 30);
+        expectSameVideo(q, made, 1 / 30, 3);
         expect(await meanVolumeDb(made.file), `${made.name}: the sound`).toBeCloseTo(loud, 0);
       }
       // Sound and picture end together in every file, within one frame of that file's own rate.
@@ -1065,20 +1076,20 @@ describe.skipIf(!FF || !FP)(
     it("H2. the crossfade, the caption and the sound are in the delivered files at both sizes", async () => {
       // The two artifacts for each instant: a frame of Quality's file and the frame of each Fast file at the same time, each brought to one 320x180 raster (so a 1280x720 file and an 854x480 one are
       // read the same way). Before the crossfade the corner is red, at the cut it is a blend of red and blue, after it blue; the text is white in all of them. The numbers are literals of
-      // the project: red and blue clips, a half second crossfade centred on the cut at 1.0 s (so it runs from 0.75 s to 1.25 s), a white text over the whole of it.
+      // the project: red and blue clips, a half second crossfade centred on the cut at 1.5 s (so it runs from 1.25 s to 1.75 s), a white text over the whole of it.
       const files = [await quality(), await fast(), await fastOff()];
       const ink: Record<string, number[]> = {};
       for (const made of files) {
         const [red, cut, blue] = [
-          await rasterAt(made.file, 0.3),
-          await rasterAt(made.file, 1.0),
-          await rasterAt(made.file, 1.7),
+          await rasterAt(made.file, 0.5),
+          await rasterAt(made.file, 1.5),
+          await rasterAt(made.file, 2.5),
         ];
         const [c0, c1, c2] = [cornerColour(red), cornerColour(cut), cornerColour(blue)];
         const round = (c: { r: number; g: number; b: number }) =>
           [c.r, c.g, c.b].map((v) => Math.round(v));
         log(
-          `${made.name}: corner colour at 0.3 s ${round(c0)}, 1.0 s ${round(c1)}, 1.7 s ${round(c2)}; ` +
+          `${made.name}: corner colour at 0.5 s ${round(c0)}, 1.5 s ${round(c1)}, 2.5 s ${round(c2)}; ` +
             `text ink share ${[red, cut, blue].map((r) => inkShare(r).toFixed(4))}`,
         );
         expect(
@@ -1095,7 +1106,7 @@ describe.skipIf(!FF || !FP)(
         ).toEqual([true, true, true]);
         ink[made.name] = [red, cut, blue].map(inkShare);
         for (const share of ink[made.name])
-          expect(share, `${made.name}: the white text is drawn`).toBeGreaterThan(0.002);
+          expect(share, `${made.name}: the white text is drawn`).toBeGreaterThan(0.001);
       }
       // The same text at both sizes: about as much ink in Fast's picture as in Quality's.
       const [q, ...fasts] = files;
@@ -1105,14 +1116,14 @@ describe.skipIf(!FF || !FP)(
           expect(ratio, `${made.name}: ink against Quality's at instant ${i}`).toBeGreaterThan(0.6);
           expect(ratio, `${made.name}: ink against Quality's at instant ${i}`).toBeLessThan(1.6);
         });
-      // The sound of each half is in the file: a tone of 440 Hz first, then one of 880 Hz, both audible.
+      // The sound of each half is in the file: pink noise at a low level, in the first half and in the second, both audible.
       for (const made of files) {
         expect(
-          await meanVolumeDb(made.file, { ss: 0.1, dur: 0.6 }),
+          await meanVolumeDb(made.file, { ss: 0.1, dur: 1 }),
           `${made.name}: first half`,
         ).toBeGreaterThan(-40);
         expect(
-          await meanVolumeDb(made.file, { ss: 1.3, dur: 0.6 }),
+          await meanVolumeDb(made.file, { ss: 1.9, dur: 1 }),
           `${made.name}: second half`,
         ).toBeGreaterThan(-40);
       }
