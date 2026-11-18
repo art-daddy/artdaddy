@@ -278,6 +278,10 @@ export const useExportJob = create<ExportState>((set, get) => ({
   beginLive: (jobId) => {
     const now = Date.now();
     set((s) => ({
+      // The dialog's own job is moved by whichever export is rendering (see `update`): its rule starts again with each new feed, so what an
+      // earlier attempt latched (finishing, taking longer) is not said of this one while the job is all the dialog has to read.
+      timeLeft: NO_TIME_LEFT,
+      pace: startPace(),
       live: {
         jobId,
         stage: "preparing",
