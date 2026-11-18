@@ -10,6 +10,7 @@
 // No expected number is computed with the code under test: every size, rate, frame count and x264 option below is written out. Each case says which
 // two artifacts it compares. FAST_SMOKE_COMMANDS=1 also prints every command and the whole x264 text of every file.
 //   npx vitest run --config vitest.smoke.config.ts src/timeline/exportFast.smoke.e2e.ts
+import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 
@@ -17,6 +18,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { __resetExportFlags, __setExportFlag, __setHeldOffByBuild } from "../api/exportFlags";
 import type { GraphicsAdapter, ProbeOutcome } from "../platform/host";
+import { useExportJob } from "../store/exportJob";
+import { FakeJobs } from "../test/fakeJobs";
 import { shippedSidecar } from "../test/sidecars";
 import { agentToolContext } from "../tools/agentStore";
 import type { ClientToolContext } from "../tools/context";
@@ -30,16 +33,19 @@ import {
   nodeRunner,
   openE2EDoc,
   resetE2EDocuments,
+  runNativeRenderSequence,
 } from "../tools/__e2e";
+import { __resetJobSupervisor, __setJobSupervisor, type JobSpec } from "../tools/jobSupervisor";
 import { joinPath } from "../tools/store";
 import { CHIP_PREF_KEY } from "./chipPref";
 import { findChip, type ChipDeps } from "./chipTest";
 import { ensureTimeline } from "./engine";
 import { CHIP_MAKERS, type ChipMaker, type SizeClass } from "./exportEncoder";
 import { exportTool } from "./exportItems";
-import { whenExportEnds, whenExportsSettle } from "./exportQueue";
+import { localDeliveryPort, whenExportEnds, whenExportsSettle } from "./exportQueue";
 import { setCanvasTool } from "./ops";
-import { addClipsTool } from "./placement";
+import { addClipsTool, addTextClipsTool } from "./placement";
+import { setTransitionTool } from "./props";
 
 type Rec = Record<string, unknown>;
 
@@ -709,3 +715,407 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
     await expectEncoder(fast, { fast: true });
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The streamed engine (`partition-pipes-v1`): the timeline is cut into parts, each part is drawn into a lossless stream, and the streams are piped into ONE encode that makes the file. The pipes live
+// in the app's native process, which a page (and so this file) does not have: the page's job supervisor is played by FakeJobs, and every job it is handed is run by the app crate's own native test
+// program (the supervisor and the stream code of src-tauri, `jobs::tests::render_sequence_real_artifact`) on the real ffmpeg, the way exportRange.smoke.e2e.ts runs a plan. What is different here is the
+// way in: the plan is made by the real `export` tool, the Export dialog's pick riding in the context as `ctx.exportRoute` as in the cases above, and the native program is handed the job the queue
+// built for it (its steps, its metadata, its staged scratch folder with the graphs, the caption file and the fonts). The file the page then verifies and publishes is what is read back.
+// The two artifacts compared: Quality's delivered file and Fast's, of one 60 frames a second project, each read back with ffprobe, ffmpeg and the bytes of the file.
+// What the commands this case prints (FAST_SMOKE_COMMANDS=1) show about where Fast's size is made: the parts are still DRAWN at the project's own size and rate, and only the last step shrinks. Each part is
+// one command that lays the clips on a 1280x720 canvas (`color=c=black:s=1280x720:r=60`, every clip `scale=1280:720`, `pad`, `fps=60`) and writes a lossless FFV1 stream (`-r 60`, `part0_video.nut`);
+// that command is the same for Quality and for Fast, it carries nothing of Fast. The one command that makes the file reads the parts (`-f concat -i segments.ffconcat`) and the sound (`audio.nut`), and
+// only there does Fast act: `scale=854:480:flags=lanczos` and `-r 30` in front of the encoder (the graphics chip, or x264 `-preset veryfast`), where Quality's has `[0:v]null[base]` and `-r 60`. So on this
+// engine Fast makes the encode and the file smaller, and does not make the drawing of the parts smaller.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// The project: two real clips of one second, of different colour and each with its own tone, a crossfade across the cut and a text over both, on a 1280x720 canvas at 60 frames a second.
+// A fixed noise (the same in every frame, so cheap to encode) is laid over each colour: with flat colours the whole Fast file was 29 KB (x264 veryfast), and its final encode, which had made
+// all of its 60 frames, never exited (the app process's output sink did not finish; two runs, the same stop). With the noise every finished file is some hundreds of kilobytes.
+async function streamedProject(): Promise<Project> {
+  const dir = joinPath(ROOT, "stream-1280x720-60");
+  await nodeFs.mkdir(dir);
+  await openE2EDoc(dir);
+  const ctx = mkCtx(dir);
+  await ensureTimeline(ctx.store);
+  const set = (await setCanvasTool({ width: 1280, height: 720, fps: 60 }, ctx)) as Rec;
+  expect(set.ok, JSON.stringify(set)).toBe(true);
+  const refs: string[] = [];
+  for (const [colour, hertz] of [
+    ["red", 440],
+    ["blue", 880],
+  ] as const) {
+    const src = joinPath(dir, `${colour}.mp4`);
+    await ff([
+      "-y", "-v", "error",
+      "-f", "lavfi", "-i", `color=c=${colour}:s=1280x720:r=60:d=1,noise=alls=20:allf=u`,
+      "-f", "lavfi", "-i", `sine=frequency=${hertz}:sample_rate=48000:duration=1`,
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+      src,
+    ]); // prettier-ignore
+    refs.push(await libRef(ctx, src, "video"));
+  }
+  const placed = (await addClipsTool(
+    {
+      entries: [
+        { media_ref: refs[0], timeline_in: 0, timeline_out: 60 },
+        { media_ref: refs[1], timeline_in: 60, timeline_out: 120 },
+      ],
+    },
+    ctx,
+  )) as Rec;
+  expect(placed.ok, JSON.stringify(placed)).toBe(true);
+  const videos = (placed.created as Rec[]).filter((clip) => clip.kind === "video");
+  expect(videos).toHaveLength(2);
+  expect(videos[1].track_id, "both clips on one track").toBe(videos[0].track_id);
+  // The crossfade runs half a second (30 frames) centred on the cut at frame 60.
+  const faded = (await setTransitionTool(
+    { clip_id: videos[1].clip_id, transition_in: { kind: "crossfade", duration: 30 } },
+    ctx,
+  )) as Rec;
+  expect(faded.ok, JSON.stringify(faded)).toBe(true);
+  const titled = (await addTextClipsTool(
+    { entries: [{ content: "FAST", timeline_in: 0, duration: 120 }] },
+    ctx,
+  )) as Rec;
+  expect(titled.ok, JSON.stringify(titled)).toBe(true);
+  return { ctx, names: new Set() };
+}
+
+/** The text files of the folder the page staged for a job (the filter graphs, the caption file, the list of parts), read as the app process starts it. */
+async function stagedFiles(cwd: string | null | undefined): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  if (!cwd) return files;
+  for (const entry of await fsp.readdir(cwd, { withFileTypes: true }))
+    if (entry.isFile() && !entry.name.endsWith(".json"))
+      files.set(entry.name, await fsp.readFile(joinPath(cwd, entry.name), "utf8"));
+  return files;
+}
+
+/** An export through the streamed engine: what `Delivered` holds, and the job the app process was handed. */
+interface Streamed extends Delivered {
+  /** The job the queue handed the app process. */
+  job: JobSpec;
+  /** The commands that draw the parts, in order; `command` (the last one of the job) is the encode that makes the file. */
+  parts: string[][];
+  /** The text files staged for the job: the graph of each part and of the final encode, the caption file, the list of parts. */
+  staged: Map<string, string>;
+  bytes: number;
+}
+
+/** The streamed engine, with the page's job supervisor played by `jobs` (which runs each job it is handed on the app crate's native test program and the real ffmpeg). */
+function streamedExporter(jobs: FakeJobs, staged: Map<string, Map<string, string>>) {
+  return async function streamedExport(
+    p: Project,
+    name: string,
+    args: Rec,
+    door: Door = {},
+  ): Promise<Streamed> {
+    expect(p.names.has(name), `${name} was exported from this project already`).toBe(false);
+    p.names.add(name);
+    await pcChip();
+    const base: ClientToolContext = {
+      ...p.ctx,
+      // Everything but the render itself (the ffprobe that checks the file) runs on the real programs from here; the render goes to the app process.
+      runner: nodeRunner,
+      surface: door.surface ?? "app",
+      ...(door.mode ? { exportMode: door.mode } : {}),
+      ...(door.slot === undefined
+        ? {}
+        : { exportRoute: door.slot as ClientToolContext["exportRoute"] }),
+    };
+    if (door.chip === "off") pc.memory.set(CHIP_PREF_KEY, "off");
+    let jobId = "";
+    try {
+      const res = (await exportTool(
+        { name, ...args },
+        agentToolContext(base, new AbortController().signal),
+      )) as Rec;
+      expect(res.ok, `${name}: ${JSON.stringify(res)}`).toBe(true);
+      expect(res.saved_to, `${name}: the file the tool says it wrote`).toBe(`${name}.mp4`);
+      jobId = String(res.job_id);
+      const ended = await whenExportEnds(jobId);
+      expect(ended?.state, `${name}: ${JSON.stringify(ended)}`).toBe("done");
+    } finally {
+      pc.memory.delete(CHIP_PREF_KEY);
+    }
+    const job = jobs.submitted.find((spec) => spec.id === jobId);
+    expect(job, `${name}: the app process was handed no job ${jobId}`).toBeDefined();
+    const steps = [job!.args, ...(job!.steps ?? [])];
+    const file = await p.ctx.store.exportPath(`${name}.mp4`);
+    const made: Streamed = {
+      name,
+      file,
+      command: steps.at(-1)!,
+      facts: await factsOf(file),
+      x264: await x264Text(file),
+      job: job!,
+      parts: steps.slice(0, -1),
+      staged: staged.get(jobId) ?? new Map(),
+      bytes: (await fsp.stat(file)).size,
+    };
+    // The file says what the command that made it said: x264's own text is in the file exactly when the command names x264, at the speed and the quality the command asked for.
+    const codec = flag(made.command, "-c:v");
+    if (codec === "libx264") {
+      expect(made.x264, `${name}: the file carries x264's own text`).not.toBeNull();
+      expect(speedOf(made.x264!), `${name}: the speed in the file, the command's`).toBe(
+        flag(made.command, "-preset") ?? "medium",
+      );
+      expect(optionOf(made.x264!, "crf"), `${name}: the quality in the file, the command's`).toBe(
+        Number(flag(made.command, "-crf") ?? 23).toFixed(1),
+      );
+    } else {
+      expect(Object.values(CHIP_CODEC), `${name}: an encoder the app knows`).toContain(codec);
+      expect(made.x264, `${name}: a chip's file carries no x264 text`).toBeNull();
+    }
+    const f = made.facts;
+    const graphs = [...made.staged].filter(([file]) => file.endsWith(".ffgraph"));
+    const sizesIn = (text: string) => [
+      ...new Set([...text.matchAll(/(?<![\d.])(\d{3,4})x(\d{3,4})(?!\d)/g)].map((m) => m[0])),
+    ];
+    const scalesIn = (text: string) =>
+      [...text.matchAll(/scale=(?:w=)?(\d+):(?:h=)?(\d+)/g)].map((m) => `${m[1]}x${m[2]}`);
+    log(
+      `${name}: ${f.width}x${f.height} at ${f.rate} fps, ${f.frames} frames, video ${f.videoS.toFixed(3)} s, audio ${f.audioS?.toFixed(3)} s, ` +
+        `${made.bytes} bytes, ${f.streams.video} video + ${f.streams.audio} audio stream, ${f.videoCodec}/${f.pixFmt}; encoder in the final command: ${codec}` +
+        `${flag(made.command, "-preset") ? ` -preset ${flag(made.command, "-preset")}` : ""}; ` +
+        `x264 text in the file: ${made.x264 ? `yes (${["ref", "subme", "trellis", "crf"].map((key) => `${key}=${optionOf(made.x264!, key)}`).join(" ")})` : "none"}`,
+    );
+    log(
+      `${name}: the app process was handed ${made.parts.length} part(s) and the final encode; parts: -r ${made.parts.map((part) => flag(part, "-r")).join(",")}, ` +
+        `${made.parts.map((part) => flag(part, "-c:v")).join(",")}; final: -r ${flag(made.command, "-r")}; ` +
+        `graph files ${JSON.stringify(graphs.map(([file, text]) => ({ file, sizes: sizesIn(text), scales: scalesIn(text) })))}; ` +
+        `final command: sizes ${JSON.stringify(sizesIn(made.command.join(" ")))}, scales ${JSON.stringify(scalesIn(made.command.join(" ")))}`,
+    );
+    if (VERBOSE) {
+      made.parts.forEach((part, i) => log(`${name}: part ${i} command ${part.join(" ")}`));
+      log(`${name}: final command ${made.command.join(" ")}`);
+      for (const [file, text] of made.staged)
+        if (!file.endsWith(".ass")) log(`${name}: staged ${file}: ${text.slice(0, 1500)}`);
+      if (made.x264) log(`${name}: x264 text ${made.x264}`);
+    }
+    return made;
+  };
+}
+
+/** One frame of `file` at `atS` seconds, brought to a fixed 320x180 raster and read as raw rgb24 bytes: the same raster for a 1280x720 file and an 854x480 one. */
+const RASTER = { width: 320, height: 180 };
+function rasterAt(file: string, atS: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      FF!,
+      [
+        "-v", "error", "-i", file, "-ss", String(atS), "-frames:v", "1",
+        "-vf", `scale=${RASTER.width}:${RASTER.height}:flags=area`, "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
+      ], // prettier-ignore
+      { windowsHide: true },
+    );
+    const out: Buffer[] = [];
+    let err = "";
+    child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+    child.stderr.on("data", (chunk) => (err += String(chunk)));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const raster = Buffer.concat(out);
+      if (code === 0 && raster.length === RASTER.width * RASTER.height * 3) resolve(raster);
+      else
+        reject(new Error(`no frame of ${file} at ${atS} s (ffmpeg ${code}): ${err.slice(-300)}`));
+    });
+  });
+}
+
+/** The average colour (0 to 255 each) of a patch of the raster that the text does not reach: the top left corner. */
+function cornerColour(raster: Buffer): { r: number; g: number; b: number } {
+  const sum = [0, 0, 0];
+  const [w, h] = [40, 22];
+  for (let y = 4; y < 4 + h; y++)
+    for (let x = 4; x < 4 + w; x++)
+      for (let c = 0; c < 3; c++) sum[c] += raster[(y * RASTER.width + x) * 3 + c];
+  return { r: sum[0] / (w * h), g: sum[1] / (w * h), b: sum[2] / (w * h) };
+}
+
+/** The share of the raster that is near white (all three channels over 200): the text's own ink. Neither the red, the blue nor any blend of the two has a pixel like that. */
+function inkShare(raster: Buffer): number {
+  let ink = 0;
+  for (let i = 0; i < raster.length; i += 3)
+    if (raster[i] > 200 && raster[i + 1] > 200 && raster[i + 2] > 200) ink++;
+  return ink / (RASTER.width * RASTER.height);
+}
+
+describe.skipIf(!FF || !FP)(
+  "Fast and Quality on the streamed engine, run by the app's native render program on the real ffmpeg",
+  () => {
+    const jobs = new FakeJobs();
+    const staged = new Map<string, Map<string, string>>();
+    let engineBefore = useExportJob.getState().engine;
+    let waitBefore: string | undefined;
+    const streamedProjectOnce = once(streamedProject);
+    const streamedExport = streamedExporter(jobs, staged);
+    // Quality as the dialog sends it; Fast with nothing touched, as a call that carries only the slot (the tool composes Fast's size and rate itself), with the Graphics chip
+    // at Auto (the chip if this PC's chip passed the app's test) and Off (the processor's light compression).
+    const quality = once(async () =>
+      streamedExport(await streamedProjectOnce(), "stream-quality", QUALITY, { mode: "quality" }),
+    );
+    const fast = once(async () =>
+      streamedExport(await streamedProjectOnce(), "stream-fast", QUALITY, { slot: FAST }),
+    );
+    const fastOff = once(async () =>
+      streamedExport(await streamedProjectOnce(), "stream-fast-chip-off", QUALITY, {
+        slot: FAST,
+        chip: "off",
+      }),
+    );
+
+    beforeAll(async () => {
+      const p = await streamedProjectOnce();
+      // The page's side of the app process: delivery of the staged folder and of the file is the page's own (the local port, on the real file system); the process is played by FakeJobs,
+      // which hands each job to the native test program with what the page told the process it depends on (the media files of the plan), as the supervisor would hold it.
+      jobs.delivery = localDeliveryPort(p.ctx.store);
+      jobs.onStart = async (spec) => {
+        try {
+          const intent = (await jobs.delivery!.list()).find((entry) => entry.id === spec.id);
+          const dependencies = intent?.source?.kind === "render" ? intent.source.paths : [];
+          staged.set(spec.id, await stagedFiles(spec.cwd));
+          const result = await runNativeRenderSequence({
+            ...spec,
+            meta: { ...spec.meta, dependencies },
+          });
+          if (result.code !== 0) {
+            // The queue shows only the ends of this text; the part that says why the native program stopped is kept here.
+            const at = result.stderr.indexOf("real render ended");
+            log(
+              `${String(spec.meta.filename)}: the native program ended with code ${result.code}; commands ${JSON.stringify([spec.args, ...(spec.steps ?? [])])}; ` +
+                `${at >= 0 ? result.stderr.slice(Math.max(0, at - 300), at + 3000) : result.stderr.slice(-3000)}`,
+            );
+          }
+          jobs.exit(spec.id, result.code, result.stderr);
+        } catch (error) {
+          jobs.exit(spec.id, -1, String(error));
+        }
+      };
+      __setJobSupervisor(jobs);
+      engineBefore = useExportJob.getState().engine;
+      useExportJob.getState().setEngine("partition-pipes-v1");
+      // The native program waits two minutes for a render by default; a clip of two seconds that takes a minute is stuck, and the diagnosis is worth more than the second minute.
+      waitBefore = process.env.ARTDADDY_QA_RENDER_WAIT_MS;
+      process.env.ARTDADDY_QA_RENDER_WAIT_MS = "60000";
+    }, 120_000);
+    afterAll(async () => {
+      await whenExportsSettle();
+      __resetJobSupervisor();
+      useExportJob.getState().setEngine(engineBefore);
+      if (waitBefore === undefined) delete process.env.ARTDADDY_QA_RENDER_WAIT_MS;
+      else process.env.ARTDADDY_QA_RENDER_WAIT_MS = waitBefore;
+    });
+
+    it("H. a 60 fps project with a crossfade, a caption and sound: Fast delivers 854x480 at 30 fps, about half of Quality's frames, the same length and a smaller file", async () => {
+      // The two artifacts: Quality's delivered file and Fast's (on the chip if this PC's chip passed, and on the processor with the switch Off), each read back with ffprobe and as bytes.
+      const q = await quality();
+      const f = await fast();
+      const off = await fastOff();
+      log(
+        `the commands that draw the parts are the same for Quality and for Fast: ${JSON.stringify(q.parts) === JSON.stringify(f.parts) && JSON.stringify(q.parts) === JSON.stringify(off.parts)}; ` +
+          `sizes of the files in bytes: Quality ${q.bytes}, Fast ${f.bytes}, Fast on the processor ${off.bytes}`,
+      );
+
+      // The engine under test is the one that ran: the job is the streamed one, with the parts first and the one encode that makes the file last (writing the staging file).
+      for (const made of [q, f, off]) {
+        expect(made.job.meta.renderTransport, `${made.name}: the job is the streamed one`).toBe(
+          "partition-pipes-v1",
+        );
+        expect(made.parts.length, `${made.name}: parts before the encode`).toBeGreaterThanOrEqual(
+          1,
+        );
+        expect(flag(made.parts[0], "-c:v"), `${made.name}: a part is a lossless stream`).toBe(
+          "ffv1",
+        );
+        expect(
+          made.command.at(-1)!.endsWith(".partial"),
+          `${made.name}: the last command writes the staging file`,
+        ).toBe(true);
+      }
+
+      expect(picture(q)).toEqual({ width: 1280, height: 720, rate: 60 });
+      near(q.facts.frames, 120, 2, "Quality's frames at 60 fps");
+      const loud = await meanVolumeDb(q.file);
+      expect(loud, "Quality's sound is not silence").toBeGreaterThan(-40);
+      for (const made of [f, off]) {
+        expect(picture(made), made.name).toEqual({ width: 854, height: 480, rate: 30 });
+        near(made.facts.frames, 60, 2, `${made.name}: frames at 30 fps`);
+        near(made.facts.frames, q.facts.frames / 2, 2, `${made.name}: half of Quality's frames`);
+        expectSameVideo(q, made, 1 / 30);
+        expect(await meanVolumeDb(made.file), `${made.name}: the sound`).toBeCloseTo(loud, 0);
+      }
+      // Sound and picture end together in every file, within one frame of that file's own rate.
+      for (const made of [q, f, off])
+        expect(
+          Math.abs(made.facts.audioS! - made.facts.videoS),
+          `${made.name}: sound ${made.facts.audioS} s, picture ${made.facts.videoS} s`,
+        ).toBeLessThanOrEqual(1 / made.facts.rate + 1e-3);
+      // The same encoder at the same quality makes the smaller picture at half the rate a smaller file.
+      expect(off.bytes, "Fast's file (processor) is smaller than Quality's").toBeLessThan(q.bytes);
+      await expectEncoder(q, { fast: false });
+      await expectEncoder(f, { fast: true });
+      await expectEncoder(off, { fast: true, chipOff: true });
+      expect(optionOf(q.x264!, "crf"), "Quality: Medium").toBe("23.0");
+      expect(optionOf(off.x264!, "crf"), "Fast: Medium").toBe("23.0");
+    }, 400_000);
+
+    it("H2. the crossfade, the caption and the sound are in the delivered files at both sizes", async () => {
+      // The two artifacts for each instant: a frame of Quality's file and the frame of each Fast file at the same time, each brought to one 320x180 raster (so a 1280x720 file and an 854x480 one are
+      // read the same way). Before the crossfade the corner is red, at the cut it is a blend of red and blue, after it blue; the text is white in all of them. The numbers are literals of
+      // the project: red and blue clips, a half second crossfade centred on the cut at 1.0 s (so it runs from 0.75 s to 1.25 s), a white text over the whole of it.
+      const files = [await quality(), await fast(), await fastOff()];
+      const ink: Record<string, number[]> = {};
+      for (const made of files) {
+        const [red, cut, blue] = [
+          await rasterAt(made.file, 0.3),
+          await rasterAt(made.file, 1.0),
+          await rasterAt(made.file, 1.7),
+        ];
+        const [c0, c1, c2] = [cornerColour(red), cornerColour(cut), cornerColour(blue)];
+        const round = (c: { r: number; g: number; b: number }) =>
+          [c.r, c.g, c.b].map((v) => Math.round(v));
+        log(
+          `${made.name}: corner colour at 0.3 s ${round(c0)}, 1.0 s ${round(c1)}, 1.7 s ${round(c2)}; ` +
+            `text ink share ${[red, cut, blue].map((r) => inkShare(r).toFixed(4))}`,
+        );
+        expect(
+          [c0.r > 180, c0.g < 70, c0.b < 70],
+          `${made.name}: red before the crossfade`,
+        ).toEqual([true, true, true]);
+        expect(
+          [c1.r > 70 && c1.r < 190, c1.g < 70, c1.b > 70 && c1.b < 190],
+          `${made.name}: a blend of red and blue at the cut`,
+        ).toEqual([true, true, true]);
+        expect(
+          [c2.b > 180, c2.r < 70, c2.g < 70],
+          `${made.name}: blue after the crossfade`,
+        ).toEqual([true, true, true]);
+        ink[made.name] = [red, cut, blue].map(inkShare);
+        for (const share of ink[made.name])
+          expect(share, `${made.name}: the white text is drawn`).toBeGreaterThan(0.002);
+      }
+      // The same text at both sizes: about as much ink in Fast's picture as in Quality's.
+      const [q, ...fasts] = files;
+      for (const made of fasts)
+        ink[made.name].forEach((share, i) => {
+          const ratio = share / ink[q.name][i];
+          expect(ratio, `${made.name}: ink against Quality's at instant ${i}`).toBeGreaterThan(0.6);
+          expect(ratio, `${made.name}: ink against Quality's at instant ${i}`).toBeLessThan(1.6);
+        });
+      // The sound of each half is in the file: a tone of 440 Hz first, then one of 880 Hz, both audible.
+      for (const made of files) {
+        expect(
+          await meanVolumeDb(made.file, { ss: 0.1, dur: 0.6 }),
+          `${made.name}: first half`,
+        ).toBeGreaterThan(-40);
+        expect(
+          await meanVolumeDb(made.file, { ss: 1.3, dur: 0.6 }),
+          `${made.name}: second half`,
+        ).toBeGreaterThan(-40);
+      }
+    }, 400_000);
+  },
+);
