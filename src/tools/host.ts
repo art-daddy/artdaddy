@@ -29,6 +29,7 @@ export interface ToolRunOptions {
   transcriptId?: string;
   trace?: ToolTrace;
   exportMode?: ClientToolContext["exportMode"];
+  exportRoute?: ClientToolContext["exportRoute"];
 }
 
 /** A tool runtime bound to ONE project. The agent runner captures the host for
@@ -75,6 +76,7 @@ class ProjectToolHost implements ToolHost {
   // The current turn's agent origin (chat execution), set for the duration of one run() call.
   private currentOrigin: MutationOrigin | undefined;
   private currentExportMode: ClientToolContext["exportMode"];
+  private currentExportRoute: ClientToolContext["exportRoute"];
   private currentSurface: ToolRunOptions["surface"] | undefined;
   // Where the running tool's look reports go: tied to this call and to who made it (tools/lookReport.ts).
   private currentLook: ClientToolContext["look"];
@@ -92,6 +94,7 @@ class ProjectToolHost implements ToolHost {
       {
         ...base,
         exportMode: this.currentExportMode,
+        exportRoute: this.currentExportRoute,
         surface: this.currentSurface,
         look: this.currentLook,
       },
@@ -135,7 +138,7 @@ class ProjectToolHost implements ToolHost {
     options: ToolRunOptions,
     trace: ToolTrace,
   ): Promise<unknown> {
-    const { signal, origin, exportMode, surface } = options;
+    const { signal, origin, exportMode, exportRoute, surface } = options;
     await this.ready;
     if (!this.has(name)) return { ok: false, error: `unknown agent tool: ${name}` };
     this.currentOrigin = origin;
@@ -150,10 +153,18 @@ class ProjectToolHost implements ToolHost {
         effect && isJobEffect(effect) ? openDocumentById(this.projectId)?.jobs : undefined;
       if (jobs) {
         return await jobs.run({ kind: `tool.${name}` }, (jobSignal) =>
-          this.runTool(name, args, trace, combineSignals(signal, jobSignal), exportMode, surface),
+          this.runTool(
+            name,
+            args,
+            trace,
+            combineSignals(signal, jobSignal),
+            exportMode,
+            surface,
+            exportRoute,
+          ),
         );
       }
-      return await this.runTool(name, args, trace, signal, exportMode, surface);
+      return await this.runTool(name, args, trace, signal, exportMode, surface, exportRoute);
     } catch (e) {
       // The job scope refused admission because the project began closing — report a clean tool
       // failure rather than reject the turn (the registry path already returns { ok:false } too).
@@ -173,9 +184,11 @@ class ProjectToolHost implements ToolHost {
     signal?: AbortSignal,
     exportMode?: ClientToolContext["exportMode"],
     surface?: ToolRunOptions["surface"],
+    exportRoute?: ClientToolContext["exportRoute"],
   ): Promise<unknown> {
     this.currentSignal = signal;
     this.currentExportMode = exportMode;
+    this.currentExportRoute = exportRoute;
     this.currentSurface = surface;
     this.currentLook = (report) => recordLook(report, trace.callId ?? "", trace.context);
     try {
@@ -183,6 +196,7 @@ class ProjectToolHost implements ToolHost {
     } finally {
       this.currentSignal = undefined;
       this.currentExportMode = undefined;
+      this.currentExportRoute = undefined;
       this.currentSurface = undefined;
       this.currentLook = undefined;
     }

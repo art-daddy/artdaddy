@@ -46,6 +46,9 @@ import {
 import { RUNG_THREAD_CAPS, capThreads, rungOf, type Ladder, type Rung } from "./exportPlan";
 import { chipVideoArgs, sizeClassOf, type ChipMaker, type ModeRequest } from "./exportEncoder";
 import { decideExportEncoder, type ChoiceFacts } from "./exportChoice";
+import { quickSettings } from "./exportRoute";
+import type { ExplicitSettings, RouteKind } from "./exportTypes3c";
+import { decideRoute, type RouteOutcome } from "./routeDecide";
 import { findChip } from "./chipTest";
 import { refusalReport, type ExportRefusalFacts } from "../api/agentEvents";
 import { decideRung, type RungDecision } from "./exportRung";
@@ -3093,19 +3096,37 @@ export async function unresolvedMediaBlockers(
 
 /** Everything that can REFUSE an export: loading, validation, unresolved media, an empty
  *  timeline, branding. Split from the encode so a submitted export still fails IN THE TURN
- *  that asked for it — a preflight error the agent only learns a minute later is useless. */
+ *  that asked for it — a preflight error the agent only learns a minute later is useless.
+ *  `routing` is given by the `export` tool for a whole-timeline deliverable: Quality or Fast is decided after the project is read and before the plan is built
+ *  (`processor` says this is a start again on the processor, after the graphics chip failed). */
 async function prepareRender(
   ctx: ClientToolContext,
   outPath: string,
   kind: "deliverable" | "working",
   options: ExportOptions = {},
+  routing?: { args: Args; processor: boolean },
 ): Promise<
   | { ok: false; result: Result }
-  | { ok: true; plan: RenderPlan; branding?: Branding; admission: RenderAdmission }
+  | {
+      ok: true;
+      plan: RenderPlan;
+      branding?: Branding;
+      admission: RenderAdmission;
+      route?: RouteOutcome;
+    }
 > {
   const r = await loadForRender(ctx, kind, options.mode);
   if (!r.ok) return r;
-  const picked = await encoderOptions(ctx, r, options, kind);
+  const routed = routing && kind === "deliverable" ? decideRoute(ctx, routing.args) : null;
+  // A Fast export asks for Fast's encoder, except that a start again on the processor keeps the processor's own and Fast's size, rate and quality.
+  const request: ModeRequest = routed?.quick ? (routing?.processor ? "full" : "quick") : r.request;
+  const picked = await encoderOptions(
+    ctx,
+    { ...r, request },
+    options,
+    kind,
+    routed?.quick ?? undefined,
+  );
   const built: ExportOptions = {
     ...options,
     engine: r.engine,
@@ -3123,6 +3144,7 @@ async function prepareRender(
     plan,
     admission: r.admission,
     ...(r.branding ? { branding: r.branding } : {}),
+    ...(routed ? { route: routed } : {}),
   };
 }
 
@@ -3157,18 +3179,34 @@ function requestOf(mode: ExportMode | undefined): ModeRequest {
 /** The encoder part of an export's options (exportChoice.ts), decided now that the project is loaded: what the person
  *  picked in the Export dialog if they picked, else the app's own rule, the same one for the menu, the chat and MCP. A
  *  working render is a frame source nobody watches and stays on the processor. Never refuses an export: a chip that
- *  cannot be used is the processor. */
+ *  cannot be used is the processor. For a Fast export (`quick`) the size, the rate and the quality are composed first, exactly
+ *  as the person could have typed them and only where they were not set, and the encoder is then chosen for the picture that will
+ *  really be delivered; the composed values are returned beside it, and only the ones that changed. */
 export async function encoderOptions(
   ctx: ClientToolContext,
   loaded: { seconds: Timeline; request: ModeRequest },
   options: ExportOptions,
   kind: "deliverable" | "working" = "deliverable",
-): Promise<Pick<ExportOptions, "mode" | "chip" | "faster" | "choice">> {
+  quick?: { explicit: ExplicitSettings },
+): Promise<
+  Pick<ExportOptions, "mode" | "chip" | "faster" | "choice" | "resolution" | "fps" | "quality">
+> {
   if (kind === "working") return { mode: "quality" };
+  const workload = summarizeRenderWorkload(loaded.seconds, options.range, options.maxDurationSec);
+  const composed = quick
+    ? quickSettings({
+        canvas: workload,
+        requested: { resolution: options.resolution, fps: options.fps, quality: options.quality },
+        explicit: quick.explicit,
+      })
+    : null;
+  const resolution = composed?.changedSize ? composed.resolution : options.resolution;
+  const fps = composed?.changedFps ? composed.fps : options.fps;
+  const quality = composed?.changedQuality ? composed.quality : options.quality;
   const decision = await decideExportEncoder({
     request: loaded.request,
-    workload: summarizeRenderWorkload(loaded.seconds, options.range, options.maxDurationSec),
-    settings: { resolution: options.resolution, quality: options.quality, fps: options.fps },
+    workload,
+    settings: { resolution, quality, fps },
     history: useExportJob.getState().calibrations,
     signal: ctx.signal,
   });
@@ -3188,6 +3226,9 @@ export async function encoderOptions(
     ...(decision.chip ? { chip: decision.chip } : {}),
     ...(decision.faster ? { faster: true } : {}),
     choice: { ...decision.facts, ...(shown ? { shown } : {}) },
+    ...(composed?.changedSize ? { resolution } : {}),
+    ...(composed?.changedFps ? { fps } : {}),
+    ...(composed?.changedQuality ? { quality } : {}),
   };
 }
 
@@ -3992,15 +4033,21 @@ export async function exportTimelineTool(
       error: "export requires atomic destination-volume staging on this platform",
     };
   const target = stagingPathFor(dest.path);
-  const prepared = await prepareRender(ctx, target, "deliverable", {
-    resolution: args.resolution as ExportOptions["resolution"],
-    quality: args.quality as ExportOptions["quality"],
-    fps: typeof args.fps === "number" ? args.fps : undefined,
-    // A Try again after the graphics chip failed asks for the processor, whatever the app would have chosen.
-    ...(retrying?.processor ? { mode: "quality" as const } : {}),
-    // A Try again after an export that ran a lean render path builds 0.27.0's recipe (leanOptions.ts `plain`).
-    ...(retrying?.plain ? { lean: { plain: true } } : {}),
-  });
+  const prepared = await prepareRender(
+    ctx,
+    target,
+    "deliverable",
+    {
+      resolution: args.resolution as ExportOptions["resolution"],
+      quality: args.quality as ExportOptions["quality"],
+      fps: typeof args.fps === "number" ? args.fps : undefined,
+      // A Try again after the graphics chip failed asks for the processor, whatever the app would have chosen.
+      ...(retrying?.processor ? { mode: "quality" as const } : {}),
+      // A Try again after an export that ran a lean render path builds 0.27.0's recipe (leanOptions.ts `plain`).
+      ...(retrying?.plain ? { lean: { plain: true } } : {}),
+    },
+    { args, processor: retrying?.processor === true },
+  );
   if (!prepared.ok) return prepared.result;
   // An export the app starts again by itself goes on with the project the first attempt was admitted on: an export is a
   // snapshot, and the minutes of the first attempt are when people keep editing. A project edited since is not started
@@ -4036,6 +4083,8 @@ export async function exportTimelineTool(
       ...(moved?.waived?.length ? { waived: moved.waived } : {}),
       ...(moved && retrying ? { moved: true as const } : {}),
       ...(retrying?.restart ? { restart: retrying.restart } : {}),
+      // Only a Fast export says so: the record of a Quality export is what it always was.
+      ...(prepared.route?.quick ? { route: "quick" as const } : {}),
     },
   );
   // If it fails, one click on the chat card starts it again.
@@ -4186,6 +4235,8 @@ export interface Carried {
   /** The attempt this one continues, when the app (or the person's Switch) started it again: the queue links the two at
    *  the admission, so they are one export to the person and to the assistant. */
   restart?: RestartLink;
+  /** Set only for an export that runs as Fast; absent is Quality. Kept on the record and the spec. */
+  route?: RouteKind;
 }
 
 /** The command of an export at the rung the plan chooses for this PC right now (exportPlan.ts): the gentlest
@@ -4350,6 +4401,7 @@ export async function prepareRenderSubmission(
     ...(carry?.story ? { story: carry.story } : {}),
     ...(carry?.waived?.length ? { waived: carry.waived } : {}),
     ...(carry?.restart ? { restart: carry.restart } : {}),
+    ...(carry?.route ? { route: carry.route } : {}),
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
     ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),

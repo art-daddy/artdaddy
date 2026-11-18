@@ -4,6 +4,15 @@ import type { LookReport } from "./lookReport";
 import type { ProjectStoreAccess } from "./store";
 import type { MutationOrigin } from "../project/MutationGate";
 import type { ExportMode } from "../timeline/exportOptions";
+import type { ExplicitSettings, RouteKind } from "../timeline/exportTypes3c";
+
+/** What the person chose about Quality or Fast before the export reached the tool (the Export dialog's choice). */
+export interface ExportRouteSlot {
+  route: RouteKind;
+  /** Which of the size, the rate and the quality the person set, as the dialog knows it (a "same as the project" that was picked is a setting, which the
+   *  arguments cannot tell from one that was left). Absent, the call's own arguments say (`explicitOfCall` in exportRoute.ts). */
+  explicit?: ExplicitSettings;
+}
 
 // What a client-side tool handler receives: the co-located project store (for
 // resolving refs + paths) and a command runner (to spawn binaries).
@@ -27,6 +36,9 @@ export interface ClientToolContext {
    *  "transcript"). Absent: a look. The background's own runs are titled by `background`. */
   speechPurpose?: "captions" | "look" | "transcript";
   exportMode?: ExportMode;
+  /** The Export dialog's pick of Quality or Fast. Absent for an export nobody picked a route for (the chat, MCP): it runs as Quality, as it always did. A started-again export
+   *  keeps it, because the detached context carries it. */
+  exportRoute?: ExportRouteSlot;
   /** Who is calling: the in-app agent ("app", the default) or an outside agent over MCP. The two
    *  differ in what the app can promise them: the in-app agent is told when background work lands,
    *  an MCP agent never is (`mcp/instructions.ts`). */

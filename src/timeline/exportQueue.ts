@@ -59,7 +59,7 @@ import {
   noteHelpTick3c,
   withLowerAdvice3c,
 } from "./exportHelpWatch";
-import type { HonestEstimate, PcClass } from "./exportTypes3c";
+import type { HonestEstimate, PcClass, RouteKind } from "./exportTypes3c";
 import type { ChoiceFacts } from "./exportChoice";
 import type { LeanRecord } from "./leanRecord";
 import { CHIP_MAKERS, type ChipMaker, type ModeReason, type SizeClass } from "./exportEncoder";
@@ -404,6 +404,8 @@ export interface ExportRecord {
    *  say what the export runs on. */
   encoder?: ExportEncoderKind;
   reason?: ModeReason;
+  /** Set only for an export that runs as Fast (the person's choice in the Export dialog); absent is Quality, so the record of a Quality export is what it always was. */
+  route?: RouteKind;
   /** The export failed in a way a chip can cause, and it ran on one: Try again runs it on the processor. */
   chipFailed?: true;
   /** Its plan ran a lean render path (leanRecord.ts, Phase 3a): when it fails, Try again builds 0.27.0's recipe (`plain` of
@@ -1180,6 +1182,8 @@ export interface ExportSpec {
    *  asked to start at, so the story says so (the `retry` event). `moved` says the person also chose another
    *  folder for it (the card's Save somewhere else). */
   retry?: { from: number; to: number; moved?: true };
+  /** Set only for an export that runs as Fast: kept on the record. Absent for Quality, a clip, a library copy and anything else no route was decided for. */
+  route?: RouteKind;
   /** The request can be started again at another folder (a whole-timeline export, whose tool chose the
    *  destination), so the question about the exported file's room offers a Save to box. A batch of files, which
    *  have their names in one chosen folder, is not. */
@@ -2078,6 +2082,7 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     ...(expected && admission.honest
       ? { estimate: admission.honest.estimate, estimateClass: admission.honest.pcClass }
       : {}),
+    ...(spec.route ? { route: spec.route } : {}),
     ...(spec.restart
       ? {
           attempt: attempts.attemptNumber(jobId),
