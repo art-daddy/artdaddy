@@ -17,6 +17,7 @@ import {
   type Said,
 } from "../test/exportRunKit";
 import { describeExportTime } from "./exportOptions";
+import { __resetFacts3c } from "./exportFacts3c";
 import { cancelExport, listExportOutcomes } from "./exportQueue";
 import {
   cellOf,
@@ -31,7 +32,7 @@ import { describeLiveStatus, QUIET_SECONDS } from "./exportWords";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));
 
-useKit();
+useKit(__resetFacts3c);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;

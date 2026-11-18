@@ -11,6 +11,7 @@ import { liveFeedOf, useExportJob } from "../store/exportJob";
 import { START, startRun, useKit } from "../test/exportRunKit";
 import { REPLAY_RUNS, type ReplayRun } from "./__fixtures__/timeLeftRuns";
 import { replayRun, stalledFrom } from "./__fixtures__/replay";
+import { __resetFacts3c } from "./exportFacts3c";
 import { listExportOutcomes } from "./exportQueue";
 import type { TimeLeft } from "./exportTimeLeft";
 import {
@@ -23,7 +24,7 @@ import { exportProgressReporter } from "./render";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));
 
-useKit();
+useKit(__resetFacts3c);
 
 /** What a person should read for an answer of the rule, written out from the grid: "under a minute", whole minutes, then hours and minutes. */
 function wordsOf(value: TimeLeft): string {

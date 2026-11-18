@@ -7,12 +7,13 @@
 // unchanged tree and are not to be regenerated to make this pass: a key that moves means the contract with the assistant moved.
 import { describe, expect, it, vi } from "vitest";
 
+import { __resetFacts3c } from "../timeline/exportFacts3c";
 import { cancelExport, listExportOutcomes } from "../timeline/exportQueue";
 import { startRun, steady, useKit, waitBehind } from "../test/exportRunKit";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));
 
-useKit();
+useKit(__resetFacts3c);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;

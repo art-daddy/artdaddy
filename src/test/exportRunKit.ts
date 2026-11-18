@@ -2,7 +2,8 @@
 // the Export dialog read one store, fed by the same progress reports the render makes. The test decides what each report says and when it arrives; the
 // kit plays the app process (its stdout and its exit) and the queue admits, follows and settles the export as it does for a person.
 //
-// A test file that uses it keeps `vi.mock("../api/exportEvents", ...)` itself (the mock is hoisted per file) and calls `useKit()` once at the top.
+// A test file that uses it keeps `vi.mock("../api/exportEvents", ...)` itself (the mock is hoisted per file) and calls `useKit(resetFacts)` once at the top. `resetFacts` puts away what the
+// queue records about an export's report facts between tests: the test file imports that function and hands it in, because the app's own sources (this kit is one) may not name that record.
 import { createHash } from "node:crypto";
 
 import { afterEach, beforeEach, expect, vi } from "vitest";
@@ -16,7 +17,6 @@ import { __resetExportQuestions } from "../store/exportQuestionHost";
 import { __resetJobNotes } from "../store/jobNotes";
 import { setOpenTimelineReader } from "../timeline/estimateDeps";
 import { formatActivityMark } from "../timeline/exportActivity";
-import { __resetFacts3c } from "../timeline/exportFacts3c";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 import {
   __resetExportQueue,
@@ -176,10 +176,11 @@ export const described = (store: ProjectStoreAccess, over: Record<string, unknow
     ...over,
   }) as ExportSpec;
 
-/** The fake clock from START, and everything the queue left behind put away after each test. Call once at the top of a test file. */
-export function useKit(): void {
+/** The fake clock from START, and everything the queue left behind put away after each test. Call once at the top of a test file, with the function that puts away the queue's record of an export's report facts
+ *  (it is run before each test and after it, where it always was). */
+export function useKit(resetFacts: () => void): void {
   beforeEach(() => {
-    __resetFacts3c();
+    resetFacts();
     vi.useFakeTimers({ now: START });
   });
   afterEach(async () => {
@@ -193,7 +194,7 @@ export function useKit(): void {
     setPcCheckService(null);
     setOpenTimelineReader(null);
     __resetExportFlags();
-    __resetFacts3c();
+    resetFacts();
     __resetRouteEstimatesMemo();
     useExportJob.setState({ calibrations: [], live: null, finishing: {} });
     useAuth.setState({ profile: null });
