@@ -59,6 +59,8 @@ void Promise.all([import("./timeline/exportQueue"), import("./project/documentRe
 // again (4i).
 void import("./tools/transcribe").then((m) => m.adoptTranscriptions()).catch(() => undefined);
 // The honest estimate: the way to read the open project, the one provider the route side reads, and the PC check (desktop app only).
+// Held off but still runs (`api/exportFlags.ts`: `estimate_v2` and `pc_check` are in OFF_IN_THIS_BUILD): in the desktop app this starts
+// the PC check service at launch (a 1-second heartbeat, input listeners, a battery read). Held, not deleted.
 void import("./timeline/estimateStart").catch(() => undefined);
 
 // DEV-ONLY seam for the UI sweep (scripts/uisweep): it drives real pointer input for the

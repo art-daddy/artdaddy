@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Phase 3c: the facts about a project that the honest estimate prices (the "cost shape"). Pure and fail-soft: it reads the same Timeline as
 // `summarizeRenderWorkload`, through the same render plan, and never throws; null means "cannot compute". It prices nothing itself: costTable.ts
 // holds the prices and estimator.ts multiplies them by these loads.

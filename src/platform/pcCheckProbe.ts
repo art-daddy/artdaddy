@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The speed test of the PC check, for exports: the reference clip, three timed runs of ffmpeg and the reading of ffmpeg's -progress.
 // Commands are only BUILT here and their output parsed from text: an injected `probe` runs them (the capability lane's
 // `runCapabilityProbe`, `platform/host.ts`), so nothing in this module starts a process or touches a disk of its own.

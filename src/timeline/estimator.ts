@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Phase 3c: the ONE estimate every number about an export's time comes from. Pure and fail-soft: it never throws, and a figure it cannot make is
 // null ("no estimate"), never a refused export, a negative time or an infinite one.
 //

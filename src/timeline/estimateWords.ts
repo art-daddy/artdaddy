@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The words about an estimate: the line under the Export dialog's three settings, the amber lines for a project that could take much longer
 // or is heavy, and the lines about the PC's speed check. Pure, so a number in a sentence is always the estimate record's own, and a
 // rough guess is never dressed as anything else.

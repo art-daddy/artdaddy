@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Phase 3c: what the estimate learns from exports, including cancelled and failed ones (DESIGN 3.5). A run teaches how far the model was off as a
 // ratio of the actual pace to the predicted one; the log keeps the last few, per encoder family and per speed revision and build, and `paceCorrection`
 // gives their weighted median. Storage is injected (a Storage-like object, never the page's), every read of a damaged value is "nothing", and a

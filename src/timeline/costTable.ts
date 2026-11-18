@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Phase 3c: the prices the honest estimate uses. DATA ONLY, and every number in this file is a PLACEHOLDER: seeded from the audit's per-frame
 // measurements (LAB-AUDIT FILTER-MAP.md sections 8.5 to 8.11, one PC, one repetition each) and the lab's own notes in exportEncoder.ts and
 // exportPlan.ts, then rounded. None of it was fitted. The lane fits it on the rig matrix and replaces the numbers, not the shape of the table.

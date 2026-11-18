@@ -101,6 +101,8 @@ export async function decideRung(input: {
   const freeBytes = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
   const baseline = planRung({ samples, freeBytes, minRung: input.minRung, ladder });
   // Where this PC measured nothing for this shape, the project's shape stands in: it can only start the export gentler, and only where the picture gate allows that rung (shapeRung.ts).
+  // Held, not deleted, and still runs while the estimate is held off (see `api/exportFlags.ts`): with `plan_rung` and `memory_shape` on and no measured peak for this shape, the
+  // prior is worked out, then dropped: the picture gate's answers are all `pending`, so `shapeStart` returns null and `plan` is `baseline`.
   const shaped = hasMeasuredPeak(samples)
     ? null
     : await shapeStart({

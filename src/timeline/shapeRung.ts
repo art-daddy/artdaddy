@@ -1,3 +1,8 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). The memory-shape prior is held instead by the picture gate's
+// pending answers (pictureGate.ts); its own switch, `memory_shape`, is not in OFF_IN_THIS_BUILD. Kept for a later release,
+// so do not remove it as unused. The full note is in src/api/exportFlags.ts.
+//
 // The shape prior for the starting rung. Where this PC has measured nothing for the project's shape, the table's prediction of the peak (shapeMemory.ts) at each rung of the export's own ladder
 // stands in for the missing samples, so the plan starts the export at the first rung whose predicted peak fits under the ceiling instead of letting it stop first. It stands in; it never overrides: a measurement this PC made
 // decides at every rung it covers (the prior is not even consulted), and it can only make the start GENTLER than 0.27.0's, never lighter.

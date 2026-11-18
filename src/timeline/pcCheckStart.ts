@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Starts the PC check in the app: the one service (`platform/pcCheck.ts`) with its real inputs, the speed probe registered, the service made known to the rest of the app, the chip test's turn in its
 // one slot, and the six signals the service decides from, read from the app's own sources. Everything here fails soft: a piece that cannot start leaves the check out and the app as it was.
 import { exportFlag, pcClass as serverCutoffs } from "../api/exportFlags";

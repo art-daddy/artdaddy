@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // "An export is being asked": from the moment the person's click (or an assistant's call) becomes a request until the request is admitted or refused, including every question it puts to the person. The queue's own busy flag follows
 // only exports that are queued or running, so an export in its question phase is invisible to it; the PC check reads this one instead and stops, and does not start, while an export is asked.
 //

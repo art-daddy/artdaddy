@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The PC check: ONE service that decides when a probe of this PC may run, runs one probe at a time inside a time box and keeps its
 // answer. It knows no probe by name: the export speed test, and later the speech probe, register themselves. It never disturbs an
 // export, a look, playback or the person typing: a run it stops stores nothing, and `pcClass()` never waits for anything.

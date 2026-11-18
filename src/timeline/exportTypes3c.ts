@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // Phase 3c (honest estimates, the lighter Quick route, the slow banner, the graphics-chip safeguards): the closed lists and plain types
 // the 3c modules share. Types and frozen constants only: no logic, no storage, no import of app state.
 //

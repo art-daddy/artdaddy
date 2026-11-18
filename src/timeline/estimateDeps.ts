@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The real inputs of the honest estimate (see `routeEstimates.ts`): the switches, the speed check the app ran, the server's cut-offs, this PC's earlier exports and the pace log's storage. The
 // two things that are not here yet are left as named seams: the source facts reader and the lean recipe decision are `null` and `undefined`, which the estimator prices as "unknown source"
 // and "today's recipe", and the open timeline is read through a reader the app registers at start-up, so nothing here has to import the editor.

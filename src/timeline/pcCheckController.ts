@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The one place the PC check hears of the world. The service decides when a probe may run from six signals (an export queued or running, an export being asked, playback, a look or a
 // background job, a project open, the person's last input) and stops a run the moment one turns busy; it reads nothing itself. This reads each source, tells the service whenever a
 // source says it changed, and on a heartbeat for the ones with no event (playback, a project closing, the server's switch), so the check stops within a second and a half of anything

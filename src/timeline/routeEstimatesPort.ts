@@ -1,3 +1,7 @@
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
+//
 // The one place the route decision, the Export dialog and the chat question get the honest estimates of every way an export could run. The estimate side (the
 // estimator, this PC's measured pace, the pace log, the project's cost shape) registers a provider once at start-up; nothing here imports it, so the route code
 // and the estimate code are built and tested apart. No provider, a throwing one or a garbled answer means "no estimate for that way": the export is never held up
