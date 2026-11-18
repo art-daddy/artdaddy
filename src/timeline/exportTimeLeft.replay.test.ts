@@ -362,10 +362,9 @@ function slowOutcomes(factor: number): SlowOutcome[] {
   });
 }
 const SLOW_BY_FACTOR = new Map<number, SlowOutcome[]>(
-  [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].map((factor) => [
-    factor,
-    slowOutcomes(factor),
-  ]),
+  [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].map(
+    (factor): [number, SlowOutcome[]] => [factor, slowOutcomes(factor)],
+  ),
 );
 const caughtShare = (outcomes: readonly SlowOutcome[]): number =>
   outcomes.filter((o) => o.caughtAt !== null).length / outcomes.length;
