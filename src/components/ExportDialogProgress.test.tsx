@@ -15,6 +15,7 @@ import {
   type ExportSubmission,
 } from "../timeline/exportQueue";
 import { ExportMemFs } from "../test/timelineKit";
+import { playSteady } from "../test/steadyFeed";
 import { ProjectStoreAccess } from "../tools/store";
 
 vi.mock("../tools/genJobs", () => ({
@@ -68,6 +69,18 @@ const report = (over: Parameters<ReturnType<typeof useExportJob.getState>["updat
 const stage = (jobId: string, to: "preparing" | "rendering" | "checking" | "saving") =>
   act(() => useExportJob.getState().setLiveStage(jobId, to));
 const open = () => render(<ExportDialog open onCancel={() => {}} onStart={() => {}} />);
+const FAKE_NOW = 5_000_000;
+const fakeClock = () =>
+  vi.useFakeTimers({ now: FAKE_NOW, toFake: ["Date", "setInterval", "clearInterval"] });
+/** A render of `total` seconds in all, at twice the video's speed, reporting every second from second `from` to second `to` on the fake clock (which starts at FAKE_NOW).
+ *  The raw guess the producers publish with each report is a constant 90 s: what the dialog says about the time left follows the rule's own reading of the feed. */
+const playRender = (total: number, from: number, to: number) =>
+  playSteady((r) => report({ fraction: r.fraction, etaSec: 90, speed: 2, frame: r.frame }), {
+    total,
+    from,
+    to,
+    origin: FAKE_NOW,
+  });
 
 beforeEach(() => {
   __resetExportQueue();
@@ -88,6 +101,7 @@ afterEach(async () => {
 
 describe("the Export dialog's panel, while its export goes", () => {
   it("names the stage the export is at, with how far it is, then the speed and time left, as the chat card does", async () => {
+    fakeClock();
     const g = gated();
     useExportJob.getState().begin(null);
     const sub = await startFromMenu("film.mp4", g.wait);
@@ -95,9 +109,10 @@ describe("the Export dialog's panel, while its export goes", () => {
     open();
     expect(status()).toBe("Preparing · checking your clips");
     stage(sub.job_id, "rendering");
-    report({ fraction: 0.4, etaSec: 90, speed: 2, frame: 120 });
+    // A render of 100 s in all that is 40 s in has 60 s left: the nearest minute (the raw guess of 90 s would read "1m 30s").
+    playRender(100, 1, 40);
     expect(status()).toBe("Rendering and encoding · 40%");
-    expect(pace()).toBe("2.0× · 1m 30s left");
+    expect(pace()).toBe("2.0× · about 1 min left");
     // The render is over; the file is checked, then saved. Naming them is the point: the bar sits at 100% for minutes.
     stage(sub.job_id, "checking");
     expect(status()).toBe("Checking the file");
@@ -145,12 +160,14 @@ describe("the Export dialog's panel, while its export goes", () => {
   });
 
   it("keeps the old numbers for a job whose export has no id yet (the moment before it is admitted)", () => {
+    fakeClock();
     useExportJob.getState().begin(null);
     open();
     expect(status()).toBe("Preparing…");
-    report({ fraction: 0.42, etaSec: 90, speed: 2 });
+    // The job's own feed, 42 s into a render of 100 s: 58 s left, the nearest minute.
+    playRender(100, 1, 42);
     expect(status()).toBe("42%");
-    expect(pace()).toBe("2.0× · 1m 30s left");
+    expect(pace()).toBe("2.0× · about 1 min left");
   });
 
   describe("a line that is refreshed by a clock", () => {
@@ -182,17 +199,18 @@ describe("the Export dialog's panel, while its export goes", () => {
       act(() => useExportJob.getState().attach(sub.job_id));
       open();
       stage(sub.job_id, "rendering");
-      report({ fraction: 0.4, etaSec: 90, speed: 2, frame: 120 });
-      expect(pace()).toBe("2.0× · 1m 30s left");
+      playRender(100, 1, 40);
+      expect(pace()).toBe("2.0× · about 1 min left");
+      // The last report was at 40 s; the clock goes on to 40 s + 75 s + 10 s.
       act(() => {
-        vi.setSystemTime(5_000_000 + 75_000);
+        vi.setSystemTime(5_000_000 + 40_000 + 75_000);
         vi.advanceTimersByTime(10_000);
       });
       expect(status()).toBe("No progress for 85 s · Rendering and encoding · 40%");
       expect(pace()).toBe("2.0×");
-      // It moves again: back to normal.
-      report({ fraction: 0.5, etaSec: 60, speed: 2, frame: 150 });
-      expect(status()).toMatch(/^(Still working · 1 min in · )?Rendering and encoding · 50%$/);
+      // It moves again: back to normal (125 s into the export: two minutes in).
+      report({ fraction: 0.5, etaSec: 60, speed: 2, frame: 1500 });
+      expect(status()).toBe("Still working · 2 min in · Rendering and encoding · 50%");
       g.open();
     });
 

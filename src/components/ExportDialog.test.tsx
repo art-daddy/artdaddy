@@ -10,6 +10,7 @@ import { exportRunning, useExportJob } from "../store/exportJob";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
 import { plainFailure } from "../timeline/exportWords";
+import { playSteady } from "../test/steadyFeed";
 
 vi.mock("../timeline/exportChoice", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../timeline/exportChoice")>()),
@@ -493,15 +494,33 @@ describe("ExportDialog", () => {
   });
 
   it("shows the percentage once ffmpeg reports a position", () => {
-    useExportJob.getState().begin(null);
-    useExportJob.getState().update({ phase: "rendering", fraction: 0.42, etaSec: 90, speed: 2 });
-    open();
-    expect(screen.getByRole("progressbar", { name: "export progress" })).toHaveAttribute(
-      "aria-valuenow",
-      "42",
-    );
-    expect(screen.getByTestId("export-status")).toHaveTextContent("42%");
-    expect(screen.getByText(/1m 30s left/)).toBeInTheDocument();
+    vi.useFakeTimers({ now: 5_000_000, toFake: ["Date"] });
+    try {
+      useExportJob.getState().begin(null);
+      // A render of 100 s in all that is 42 s in: 58 s are left, said as the nearest minute. The raw guess the producer publishes (90 s) would read "1m 30s".
+      playSteady(
+        (r) =>
+          useExportJob
+            .getState()
+            .update({
+              phase: "rendering",
+              fraction: r.fraction,
+              etaSec: 90,
+              speed: 2,
+              frame: r.frame,
+            }),
+        { total: 100, from: 1, to: 42, origin: 5_000_000 },
+      );
+      open();
+      expect(screen.getByRole("progressbar", { name: "export progress" })).toHaveAttribute(
+        "aria-valuenow",
+        "42",
+      );
+      expect(screen.getByTestId("export-status")).toHaveTextContent("42%");
+      expect(screen.getByTestId("export-pace").textContent).toBe("2.0× · about 1 min left");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("offers Cancel while running and calls the job's abort", () => {
