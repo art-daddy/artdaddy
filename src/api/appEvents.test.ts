@@ -983,6 +983,9 @@ describe("the transcription sample", () => {
     } as const;
     afterEach(() => __resetSpeechFactsShipped());
 
+    // This test pins the state the build ships in. It fails when SPEECH_FACTS_SHIPPED is turned on, which needs the owner's yes
+    // and both privacy documents (the app's PRIVACY.txt and the website's privacy page) changed in the same commit; that commit
+    // changes this test to say the lit state. Every other test sets the state it needs through the setter.
     it("adds nothing in the build as shipped, whatever the run knows: the sample is what it always was", async () => {
       const calls = captureFetch();
       reportTranscription({ ...run, gpu: "amd" }, T0, { beam: 1, rerun: true, notes: made });
