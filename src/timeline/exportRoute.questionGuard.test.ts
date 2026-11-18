@@ -3,10 +3,12 @@
 // `QUICK_BUNDLE.speedup` feeds two things: the figure after the word Fast (`fastSpeedupLabel`) and the question "Are you sure?" (`needsSlowConfirm`, which asks only when a figure exists). The owner decided, for this
 // build (decisions D2 and D3 of the build program): no figure on Fast, because the lab's rule for one (at least 80 % of the typical cells reach 1.5 times on the strong AND the weak lab PCs) is not met, and no
 // question, because it would push people towards Fast exactly where Fast adds nothing (4K, 4K at 60, long edits). The question's screen (`SlowExportQuestion`: the focus trap, the answer shield, "Use Fast", the
-// Escape rule) is NOT built. So the table is empty, and the two pure functions answer "no figure" and "never ask" for every input. If someone fills one row of the table to light the figure, the question would
-// start asking at once through a screen that does not exist; this file fails first and says what has to be built.
+// Escape rule) is NOT built. So the table is empty, and the two pure functions answer "no figure" and "never ask" for every input. The settings view draws neither today (it passes no figure to the choice row
+// and ignores the question that `resolveChoice` works out), so nothing on screen changes if a row is added here; but the model's `figureFor` and `askFor` read the table, and the day either is wired the figure
+// or the question would appear with no screen for the question and no lab rule behind the figure. This file fails first and says what has to be built.
 //
-// The guard retires itself in exactly one way: the question's screen exists AND is drawn by another source file. Then the table may be filled on purpose (and this file is replaced by the question's own tests).
+// The guard retires itself in exactly one way: the question's screen exists AND is drawn by another source file. Then this file is replaced by the question's own tests, and the table is filled only once the
+// lab's rule for a figure (decision D2) is met.
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -41,8 +43,9 @@ function questionScreenIsDrawn(): boolean {
 
 const WHY =
   "The question UI does not exist yet, so the table that feeds the figure and the question must stay empty (decision D3: no 'Are you sure?' question; decision D2: no speed figure on Fast until the lab's " +
-  "rule is met). A row in QUICK_BUNDLE.speedup would light the question (needsSlowConfirm asks as soon as a figure exists) with no screen to ask it on. Build SlowExportQuestion first (spec D2-UI-SPEC section 3.7: " +
-  "alertdialog, focus trap, 400 ms answer shield, Cancel / Export / Use Fast, Escape is Cancel) and draw it from ExportSettingsView; then fill the table on purpose and replace this file with the question's own tests.";
+  "rule is met). A row in QUICK_BUNDLE.speedup makes fastSpeedupLabel return a figure and needsSlowConfirm answer true, which the model's figureFor and askFor turn into a figure after Fast and a question " +
+  "the moment the dialog reads them, with no screen for the question. Build SlowExportQuestion first (spec D2-UI-SPEC section 3.7: alertdialog, focus trap, 400 ms answer shield, Cancel / Export / Use Fast, " +
+  "Escape is Cancel) and draw it from ExportSettingsView; then replace this file with the question's own tests and fill the table once the lab's rule for a figure is met.";
 
 const drawn = questionScreenIsDrawn();
 
