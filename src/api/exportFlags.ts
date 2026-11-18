@@ -97,11 +97,22 @@
 //               words of a clip that begins with that much quiet start where they are said (speechWordTimes.ts; the
 //               build decides whether any launch does: this switch only takes it away) (off: 0.27.0: whisper's own
 //               word times, the engine started as before)
+//   quick_route
+//               the Export dialog offers a Fast choice beside Quality: a smaller picture (one size step below the
+//               project's), at most 30 frames a second, Medium quality unless one was set, and the graphics chip or the
+//               faster setting (off: 0.28.0: the Export dialog has no Fast choice, and an export that asks for Fast
+//               runs as Quality)
+//
+// `quick_export` and `quick_route` are independent. In 0.28.0 `quick_export` only decides whether the Graphics chip row is drawn (ChipRow.tsx, chipRow.ts) and whether the chat card's chip line offers
+// "Turn off" (ChipLine.tsx); nothing reads it for a Fast export, which is `quick_route`. A name that has shipped is never renamed or dropped, so its entry above is kept as it was.
 //
 // THIS BUILD SHIPS `estimate_v2` AND `pc_check` OFF (OFF_IN_THIS_BUILD below), whatever the server says: the honest estimate did not meet the bar it was built against (E1, lane L11's
 // fit n1-202611170115: 24 % of the judged cells within 2 times against 90 %, 0 of 11 weak-profile cells, 85 % of the measured times inside the shown range against 90 %, five cells 4 times or
 // more under-estimated without "could take much longer"), and the speed check did not meet its (P1: the class and the reading against the reference export; P2: the disturbance of a running
-// export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs.
+// export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs, except `quick_route` (next).
+//
+// THIS BUILD ALSO SHIPS `quick_route` OFF, whatever the server says: the Fast choice is built in pieces, and this build has its rules and the export's plumbing but not the Export dialog's choice, its words or its screens, so
+// nothing is there yet to draw it or to start it. The server's file already says true (the switch exists there), so a later build lights the choice by removing the name from OFF_IN_THIS_BUILD in one line, with the test that pins this.
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -144,6 +155,7 @@ export const EXPORT_FLAG_NAMES = [
   "chip_restart",
   "speech_wake",
   "speech_word_times",
+  "quick_route",
 ] as const;
 export type ExportFlagName = (typeof EXPORT_FLAG_NAMES)[number];
 
@@ -181,13 +193,15 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   chip_restart: true,
   speech_wake: true,
   speech_word_times: true,
+  quick_route: true,
 };
 
 /** Behaviours that are in this build and NOT shipped: they stay off whatever the server says, whatever the compiled default says and whatever a stored answer holds, because the proof they were
- *  built against was not met (see the top of this file). The server's "back on" cannot reach them. A later build that meets its bars removes the name here, in one line, with the test that pins this. */
+ *  built against was not met, or the screens that would show them are not in this build (see the top of this file). The server's "back on" cannot reach them. A later build that meets its bars removes the name here, in one line, with the test that pins this. */
 export const OFF_IN_THIS_BUILD: ReadonlySet<ExportFlagName> = new Set<ExportFlagName>([
   "estimate_v2",
   "pc_check",
+  "quick_route",
 ]);
 
 /** Tests only: forces the hold on (true) or off (false); null leaves it to the build's mode. */

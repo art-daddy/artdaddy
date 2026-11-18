@@ -60,7 +60,7 @@ const RELEASED_FLAG_NAMES = [
   "chip_restart",
 ];
 // Appended after the release decision (disable-only, each with its own entry in the comment block above).
-const LATER_FLAG_NAMES = ["speech_wake", "speech_word_times"];
+const LATER_FLAG_NAMES = ["speech_wake", "speech_word_times", "quick_route"];
 
 beforeEach(() => __resetExportFlags());
 afterEach(() => {
@@ -545,7 +545,7 @@ describe("the extra places for the speech model", () => {
   });
 });
 
-// This build ships the estimate and the PC speed check off (the top of exportFlags.ts): the proof they were built against was not met, so no answer can switch them on.
+// This build ships the estimate and the PC speed check off (the proof they were built against was not met) and the Fast choice off (the dialog's choice and its screens are not in this build): see the top of exportFlags.ts. No answer can switch them on.
 describe("what this build holds off", () => {
   beforeEach(() => __setHeldOffByBuild(true));
   afterEach(() => {
@@ -556,8 +556,8 @@ describe("what this build holds off", () => {
   const allOn = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, true]));
   const allOff = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, false]));
 
-  it("is exactly the estimate and the speed check, each a name the switches know (the decision this release is shipped on: change it only with a bar that was met)", () => {
-    expect([...OFF_IN_THIS_BUILD].sort()).toEqual(["estimate_v2", "pc_check"]);
+  it("is exactly the estimate, the speed check and the Fast choice, each a name the switches know (the decision this release is shipped on: change it only with a bar that was met, or the dialog that shows the choice)", () => {
+    expect([...OFF_IN_THIS_BUILD].sort()).toEqual(["estimate_v2", "pc_check", "quick_route"]);
     for (const name of OFF_IN_THIS_BUILD) expect(EXPORT_FLAG_NAMES).toContain(name);
   });
 
@@ -615,9 +615,9 @@ describe("what this build holds off", () => {
     }
   });
 
-  // The one thing that ships the decision is that a build NOT run by the unit suite holds the two off with nothing set up: the mode is the whole of it. A suite that lifted the hold by a call in its own setup, or by a
+  // The one thing that ships the decision is that a build NOT run by the unit suite holds the held ones off with nothing set up: the mode is the whole of it. A suite that lifted the hold by a call in its own setup, or by a
   // module-level flag, would stay green if that default were flipped, and a copy of the module loaded again after vi.resetModules() would start held (the first version of this hold broke two other files that way).
-  it("is held in a shipped build with nothing of the tests set: the mode alone holds the two off though the server says every switch is on, and a module loaded again behaves the same", async () => {
+  it("is held in a shipped build with nothing of the tests set: the mode alone holds them off though the server says every switch is on, and a module loaded again behaves the same", async () => {
     __setHeldOffByBuild(null);
     vi.stubEnv("MODE", "production");
     await refreshExportFlags({
