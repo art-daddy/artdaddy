@@ -176,10 +176,15 @@ export function qualityEntries(): { value: ExportQuality; label: string }[] {
   return QUALITIES.map((value) => ({ value, label: QUALITY_WORDS[value] }));
 }
 
-/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or a number from 1 up to (not including) the project's rate, a quality that
- *  is not one of the three. With no readable project numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object
- *  where nothing was dropped (so a state that writes it back cannot loop). */
-export function clampOverrides(o: Overrides, facts: ProjectFacts | null): Overrides {
+/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or an entry of the Frame rate list (the ladder below the project's rate and Fast's
+ *  own rate, the list a dialog that offers Fast draws and a superset of any other), a quality that is not one of the three. A value the select cannot show is never sent. With no readable project
+ *  numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object where nothing was dropped (so a state that
+ *  writes it back cannot loop). */
+export function clampOverrides(
+  o: Overrides,
+  facts: ProjectFacts | null,
+  bundle: QuickBundle = QUICK_BUNDLE,
+): Overrides {
   const kept: Overrides = {};
   let dropped = false;
   if (o.resolution !== undefined) {
@@ -187,15 +192,7 @@ export function clampOverrides(o: Overrides, facts: ProjectFacts | null): Overri
     else dropped = true;
   }
   if (o.fps !== undefined) {
-    if (
-      o.fps === null ||
-      (facts !== null &&
-        typeof o.fps === "number" &&
-        Number.isFinite(o.fps) &&
-        o.fps >= 1 &&
-        o.fps < facts.fps)
-    )
-      kept.fps = o.fps;
+    if (rateOptions(facts, ownLevers("fast", facts, bundle).fps).includes(o.fps)) kept.fps = o.fps;
     else dropped = true;
   }
   if (o.quality !== undefined) {
@@ -213,7 +210,7 @@ export function leversShown(
   bundle: QuickBundle = QUICK_BUNDLE,
 ): Levers {
   const own = ownLevers(choice, facts, bundle);
-  const kept = clampOverrides(overrides, facts);
+  const kept = clampOverrides(overrides, facts, bundle);
   return {
     resolution: kept.resolution ?? own.resolution,
     fps: kept.fps !== undefined ? kept.fps : own.fps,
@@ -326,7 +323,7 @@ export function resolveChoice(
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
 ): Resolved {
-  const kept = clampOverrides(overrides, facts);
+  const kept = clampOverrides(overrides, facts, bundle);
   const shown = leversShown(choice, kept, facts, bundle);
   return {
     kept,

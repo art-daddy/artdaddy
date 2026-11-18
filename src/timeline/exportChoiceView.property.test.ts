@@ -82,18 +82,21 @@ const ownOf = (
   bundle: QuickBundle = QUICK_BUNDLE,
 ): Levers => (choice === "quality" ? QUALITY_OWN : fastOwn(f, bundle));
 
-/** What a pick must hold to survive: a size in the list, a rate that is null or from 1 up to and excluding the project's, a quality of the three. */
+/** What a pick must hold to survive: a size in the list, a rate that is null or an entry of the Frame rate list (a ladder rate below the project's, or Fast's own rate), a quality of the three. */
 const sizeInRange = (r: ExportResolution, f: ProjectFacts | null): boolean =>
   r === "source" || (f !== null && isPreset(r) && PRESET_SHORT_SIDE[r] < shortSideOf(f));
-const rateInRange = (v: unknown, f: ProjectFacts | null): boolean =>
-  v === null || (f !== null && typeof v === "number" && Number.isFinite(v) && v >= 1 && v < f.fps);
+const rateInList = (v: unknown, f: ProjectFacts | null, bundle: QuickBundle): boolean => {
+  if (v === null) return true;
+  if (f === null || typeof v !== "number" || !(v >= 1 && v < f.fps)) return false;
+  return RATE_LADDER.includes(v) || v === fastOwn(f, bundle).fps;
+};
 const qualityInRange = (q: unknown): boolean => q === "high" || q === "medium" || q === "low";
 
 /** The picks that survive the clamp, worked out from the rules above. */
-const keptOracle = (o: Overrides, f: ProjectFacts | null): Overrides => {
+const keptOracle = (o: Overrides, f: ProjectFacts | null, bundle = QUICK_BUNDLE): Overrides => {
   const kept: Overrides = {};
   if (o.resolution !== undefined && sizeInRange(o.resolution, f)) kept.resolution = o.resolution;
-  if (o.fps !== undefined && rateInRange(o.fps, f)) kept.fps = o.fps;
+  if (o.fps !== undefined && rateInList(o.fps, f, bundle)) kept.fps = o.fps;
   if (o.quality !== undefined && qualityInRange(o.quality)) kept.quality = o.quality;
   return kept;
 };
@@ -358,7 +361,7 @@ describe("T15 (d) clampOverrides", () => {
     );
   });
 
-  it("never keeps a size outside sizeOptions, a rate at or above the project's, or a number that is not finite", () => {
+  it("never keeps a size outside sizeOptions, a rate that is not an entry of the Frame rate list, or a number that is not finite", () => {
     fc.assert(
       fc.property(maybeProject, overridesOrGarbage, (f, o) => {
         const result = clampOverrides(o, f);
@@ -368,6 +371,8 @@ describe("T15 (d) clampOverrides", () => {
           expect(f).not.toBeNull();
           expect(result.fps).toBeGreaterThanOrEqual(1);
           expect(result.fps).toBeLessThan((f as ProjectFacts).fps);
+          // what is kept is what the select can show: an entry of the list a dialog that offers Fast draws
+          expect(rateOptions(f, ownLevers("fast", f).fps)).toContain(result.fps);
         }
         if (result.quality !== undefined)
           expect(["high", "medium", "low"]).toContain(result.quality);
@@ -393,7 +398,7 @@ describe("T15 (d) clampOverrides", () => {
 });
 
 describe("T15 (e) leversShown: never above the project, and the choice's own where nothing was picked", () => {
-  it("shows a size in the list and a rate that is Same as project or below the project's", () => {
+  it("shows a size in the list and a rate that is Same as project or an entry of the Frame rate list", () => {
     fc.assert(
       fc.property(choice, maybeProject, overridesOrGarbage, anyBundle, (c, f, o, b) => {
         const shown = leversShown(c, o, f, b);
@@ -402,6 +407,8 @@ describe("T15 (e) leversShown: never above the project, and the choice's own whe
           expect(f).not.toBeNull();
           expect(shown.fps).toBeLessThan((f as ProjectFacts).fps);
         }
+        // the select shows what is sent: the shown rate is always one of its entries
+        expect(rateOptions(f, ownLevers("fast", f, b).fps)).toContain(shown.fps);
         expect(["high", "medium", "low"]).toContain(shown.quality);
       }),
       { numRuns: RUNS },
@@ -412,7 +419,7 @@ describe("T15 (e) leversShown: never above the project, and the choice's own whe
     fc.assert(
       fc.property(choice, maybeProject, overridesOrGarbage, anyBundle, (c, f, o, b) => {
         const shown = leversShown(c, o, f, b);
-        const kept = keptOracle(o, f);
+        const kept = keptOracle(o, f, b);
         const own = ownOf(c, f, b);
         expect(shown.resolution).toBe(kept.resolution ?? own.resolution);
         expect(shown.fps).toBe(kept.fps !== undefined ? kept.fps : own.fps);

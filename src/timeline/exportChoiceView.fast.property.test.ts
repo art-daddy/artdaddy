@@ -414,12 +414,10 @@ describe("what is sent after the project changed under a pick (resolveChoice, pa
     .tuple(maybeProject, maybeProject)
     .chain(([before, after]) => picksOn(before).map((picks) => ({ before, after, picks })));
 
-  /** What the project holds of a pick, by the rules of the lists: a size in the list, a rate that is the project's own or from 1 up to its rate, any quality of the three. */
+  /** What the project holds of a pick, by the rules of the lists: a size in the list, a rate that is an entry of its Frame rate list (Fast's own rate included), any quality of the three. */
   const holds = (picks: Overrides, f: ProjectFacts | null) => ({
     size: picks.resolution !== undefined && sizesOffered(f).includes(picks.resolution),
-    fps:
-      picks.fps !== undefined &&
-      (picks.fps === null || (f !== null && picks.fps >= 1 && picks.fps < f.fps)),
+    fps: picks.fps !== undefined && ratesOffered(f, true).includes(picks.fps),
     quality: picks.quality !== undefined,
   });
 
@@ -475,20 +473,27 @@ describe("what is sent after the project changed under a pick (resolveChoice, pa
     );
   });
 
-  it("never sends a size at or above the project's, or a rate at or above its rate, as a pick", () => {
+  it("never sends a size or a rate that the lists of the changed project do not hold, whoever picked it", () => {
     fc.assert(
-      fc.property(changed, ({ after, picks }) => {
-        const resolved = resolveChoice("fast", picks, after);
-        const sent = payloadFor("fast", resolved.shown, resolved.kept, null);
-        const where = JSON.stringify({ after, picks });
-        expect(sent.route?.explicit, where).toBeDefined();
-        if (sent.route?.explicit?.size)
+      fc.property(
+        changed,
+        fc.constantFrom("quality" as const, "fast" as const),
+        ({ after, picks }, choice) => {
+          const resolved = resolveChoice(choice, picks, after);
+          const sent = payloadFor(choice, resolved.shown, resolved.kept, null);
+          const where = JSON.stringify({ after, picks, choice });
+          // the select can show what is sent: every sent size and rate is an entry of the list drawn for the project as it is now
           expect(sizesOffered(after), where).toContain(sent.resolution);
-        if (sent.route?.explicit?.fps && typeof sent.fps === "number") {
-          expect(after, where).not.toBeNull();
-          expect(sent.fps).toBeLessThan((after as ProjectFacts).fps);
-        }
-      }),
+          expect(ratesOffered(after, true), where).toContain(sent.fps);
+          if (choice === "fast") {
+            expect(sent.route?.explicit, where).toBeDefined();
+            if (sent.route?.explicit?.fps && typeof sent.fps === "number") {
+              expect(after, where).not.toBeNull();
+              expect(sent.fps).toBeLessThan((after as ProjectFacts).fps);
+            }
+          }
+        },
+      ),
       { numRuns: 2000 },
     );
   });

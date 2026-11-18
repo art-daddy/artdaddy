@@ -512,14 +512,16 @@ describe("the Quality list", () => {
 });
 
 describe("clampOverrides: a pick the project no longer holds is dropped", () => {
+  // the 72 fps project: its Frame rate list is Same, 60, 50, 30, 25, 24 and 18 (Fast's own rate)
+  const P72 = facts(1920, 1080, 72);
   const kept: [string, Overrides, ProjectFacts | null][] = [
     ["nothing picked", {}, A],
     ["a smaller size", { resolution: "720p" }, A],
     ["the project's own size picked on purpose", { resolution: "source" }, A],
     ["Same as project picked for the rate", { fps: null }, A],
     ["a lower rate", { fps: 24 }, A],
-    ["a rate that is a fraction below the project's", { fps: 29.97 }, A],
-    ["the lowest rate there is", { fps: 1 }, A],
+    ["a rate of the ladder below a project that is off the ladder", { fps: 60 }, P72],
+    ["Fast's own rate, which the ladder has not got (72 gives 18)", { fps: 18 }, P72],
     ["a quality", { quality: "high" }, A],
     ["all three", { resolution: "480p", fps: 25, quality: "low" }, A],
     [
@@ -550,6 +552,21 @@ describe("clampOverrides: a pick the project no longer holds is dropped", () => 
     ["a rate that is not a number", { fps: Number.NaN }, A, {}],
     ["an infinite rate", { fps: Number.POSITIVE_INFINITY }, A, {}],
     [
+      "a rate below the project's that the list does not offer (29.97 at 30)",
+      { fps: 29.97 },
+      A,
+      {},
+    ],
+    ["the lowest rate there is, which the list does not offer", { fps: 1 }, A, {}],
+    ["a rate between two entries of the list", { fps: 27 }, facts(1920, 1080, 60), {}],
+    [
+      "a rate that was Fast's own for the project before it changed",
+      { fps: 18 },
+      facts(1920, 1080, 64),
+      {},
+    ],
+    ["a rate Fast's own for another project would be", { fps: 16 }, P72, {}],
+    [
       "a quality that is not one of the three",
       { quality: "ultra" as unknown as ExportQuality },
       A,
@@ -563,6 +580,16 @@ describe("clampOverrides: a pick the project no longer holds is dropped", () => 
       expect(result).not.toBe(picks);
     },
   );
+
+  it("follows the bundle's own rate: with a cap of 10 the 72 fps project's Fast rate is 9, not 18", () => {
+    const capped: QuickBundle = { ...QUICK_BUNDLE, maxFps: 10 };
+    expect(clampOverrides({ fps: 9 }, P72, capped)).toEqual({ fps: 9 });
+    expect(clampOverrides({ fps: 18 }, P72, capped)).toEqual({});
+    // the shown values and the click's answer read the same bundle as the clamp
+    expect(leversShown("fast", { fps: 9 }, P72, capped)).toEqual(levers("720p", 9));
+    expect(resolveChoice("fast", { fps: 9 }, P72, capped).kept).toEqual({ fps: 9 });
+    expect(resolveChoice("quality", { fps: 18 }, P72, capped).shown).toEqual(QUALITY_OWN);
+  });
 
   it("keeps what is in range and drops only what is not, without touching the object it was given", () => {
     const picks: Overrides = { resolution: "2160p", fps: 24, quality: "high" };
