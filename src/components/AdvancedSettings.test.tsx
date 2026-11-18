@@ -62,7 +62,7 @@ const NOTES = {
 } as const;
 const SUMMARY = "Project size and frame rate, Medium quality.";
 const FASTER =
-  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+  "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
 
 const RATES_60: AdvancedSettingsProps["rates"] = [
   { value: null, label: "Same as project (60 fps)" },
