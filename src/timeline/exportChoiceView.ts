@@ -115,7 +115,11 @@ export function sizeOptions(facts: ProjectFacts | null): ExportResolution[] {
 }
 
 /** Fast's own rate where a dialog that offers Fast adds it to the Frame rate list (72 gives 18, 32 gives 16): the one derivation of the list's extra entry, for what is drawn and for what is kept. */
-function fastRateExtra(facts: ProjectFacts | null, fastOffered: boolean, bundle: QuickBundle): number | null {
+function fastRateExtra(
+  facts: ProjectFacts | null,
+  fastOffered: boolean,
+  bundle: QuickBundle,
+): number | null {
   return fastOffered ? ownLevers("fast", facts, bundle).fps : null;
 }
 

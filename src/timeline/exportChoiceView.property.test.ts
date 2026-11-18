@@ -385,9 +385,7 @@ describe("T15 (d) clampOverrides", () => {
         }
         // what is kept is what the select can show: an entry of the list the dialog draws (the one `rateEntriesFor` makes for the same `fastOffered`)
         if (result.fps !== undefined)
-          expect(rateEntriesFor(f, fastOffered).map((entry) => entry.value)).toContain(
-            result.fps,
-          );
+          expect(rateEntriesFor(f, fastOffered).map((entry) => entry.value)).toContain(result.fps);
         if (result.quality !== undefined)
           expect(["high", "medium", "low"]).toContain(result.quality);
       }),
