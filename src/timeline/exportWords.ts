@@ -294,7 +294,7 @@ export function describeEncoder(encoder: unknown, reason: unknown): string {
   if (encoder === "amd" || encoder === "nvidia" || encoder === "intel")
     return `Using your graphics chip${reason === "over_minute" ? " to save time" : ""} · the file is larger and the picture can differ slightly`;
   if (encoder === "x264_fast")
-    return "Using a faster setting to save time · the picture may be slightly softer";
+    return "Using light compression to save time · the picture may be slightly softer";
   return "";
 }
 

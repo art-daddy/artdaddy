@@ -221,7 +221,7 @@ describe("ExportCard", () => {
     await start("one.mp4", g.wait);
     render(<ExportCard />);
     expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
-    expect(screen.queryByText(/graphics chip|faster setting/)).toBeNull();
+    expect(screen.queryByText(/graphics chip|faster setting|light compression/)).toBeNull();
     g.open();
   });
 
@@ -242,7 +242,7 @@ describe("ExportCard", () => {
       "the faster setting",
       "x264_fast",
       "promise_line",
-      "Using a faster setting to save time · the picture may be slightly softer",
+      "Using light compression to save time · the picture may be slightly softer",
     ],
   ] as const)(
     "says, under the status line, what an export runs on, and why: %s",
@@ -259,7 +259,7 @@ describe("ExportCard", () => {
     const g = gated();
     await start("one.mp4", g.wait, { encoder: "x264", reason: "none" });
     render(<ExportCard />);
-    expect(screen.queryByText(/graphics chip|faster setting/)).toBeNull();
+    expect(screen.queryByText(/graphics chip|faster setting|light compression/)).toBeNull();
     g.open();
   });
 
