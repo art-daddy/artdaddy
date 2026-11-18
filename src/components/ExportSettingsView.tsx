@@ -137,6 +137,7 @@ export default function ExportSettingsView({
           qualities={qualityEntries()}
           quality={shown.quality}
           onQuality={(value) => pick({ quality: value })}
+          fastChosen={choice === "fast"}
           chip={
             workload
               ? {

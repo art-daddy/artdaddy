@@ -39,10 +39,14 @@ export interface AdvancedSettingsProps {
     /** The chip row's first look has answered, told before paint. */
     onDrawn: (drawn: boolean) => void;
   };
+  /** Fast is the choice: the chip row's note for the passed state says what a Fast export does. */
+  fastChosen?: boolean;
 }
 
-// The owner's sentence for the state where the chip passed its test (OD-5); the other four states keep the row's own notes.
+// The owner's sentence for the state where the chip passed its test (OD-5); the other four states keep the row's own notes. With Fast chosen the sentence does not say when the chip is used: a Fast
+// export uses a chip that passed.
 const CHIP_NOTES = { auto_passed: D2_WORDS.chipNotePassed } as const;
+const CHIP_NOTES_FAST = { auto_passed: D2_WORDS.chipNotePassedFast } as const;
 
 const doorCls = "flex items-center gap-[7px] text-xs text-neutral-300";
 const triangleCls =
@@ -62,6 +66,7 @@ export default function AdvancedSettings({
   quality,
   onQuality,
   chip,
+  fastChosen = false,
 }: AdvancedSettingsProps): JSX.Element {
   const doorId = useId();
   const regionRef = useRef<HTMLDivElement>(null);
@@ -137,7 +142,7 @@ export default function AdvancedSettings({
             fps={chip.fps}
             onChange={chip.onChange}
             onDrawn={chip.onDrawn}
-            notes={CHIP_NOTES}
+            notes={fastChosen ? CHIP_NOTES_FAST : CHIP_NOTES}
           />
         )}
       </div>

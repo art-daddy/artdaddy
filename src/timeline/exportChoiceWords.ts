@@ -35,6 +35,10 @@ export const D2_WORDS = {
    *  words). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
   chipNotePassed:
     "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
+  /** S18 with Fast chosen: the same note without "when it saves time", because a Fast export uses a chip that passed whether or not it saves time (`chooseEncoder`, request "quick"); the clause about the
+   *  file and the picture is the same. */
+  chipNotePassedFast:
+    "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
   /** S19, S20 the footer. */
   cancel: "Cancel",
   exportAction: "Export",
