@@ -8,7 +8,6 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { __setExportFlag, __setHeldOffByBuild } from "../api/exportFlags";
 import ExportSettingsView from "../components/ExportSettingsView";
 import type { ExportSettings } from "../components/ExportDialog";
 import { processorName, resolveExportResources, runCapabilityProbe } from "../platform/host";
@@ -18,30 +17,28 @@ import {
   after,
   callOf,
   CRF,
+  commandOf,
   keysOf,
   observe,
+  outputOf,
   pic,
+  recordOf,
   resetAfter,
   resetBefore,
-  recordOf,
   scrub,
   textOf,
-  world,
-  commandOf,
-  outputOf,
   withoutPreset,
+  world,
   type Any,
   type Canvas,
   type Picture,
-  type Seen,
 } from "../test/fastDialogKit";
-import { amdChip } from "../test/chipExportKit";
-import { __resetChipTests, findChip } from "./chipTest";
+import { registerLibraryClip } from "../tools/import";
+import { __resetChipTests } from "./chipTest";
 import * as exportAsk from "./exportAsk";
 import type { ExportEngine } from "./exportOptions";
 import { emptyTimeline } from "./model";
 import { addClipsTool } from "./placement";
-import { registerLibraryClip } from "../tools/import";
 import type { RenderWorkload } from "./renderPlan";
 
 // What the queue sends the server for each settled export is dropped here; it is never sent.
@@ -154,25 +151,30 @@ async function pick(user: User, what: string): Promise<void> {
   await user.selectOptions(box, entry);
 }
 
-/** Open the real settings view on a project of this canvas (with the dialog's workload), make the picks, press Export, and return the object handed to onStart. `between` runs after the picks and
- *  right before the click, in the same turn (the project changing under the open dialog: the view has not drawn again yet, and the click works the project out as it is at that moment). */
+/** Open the real settings view on a project of this canvas (with the dialog's workload, or without it: the dialog has no project figures to hand over), make the picks, press Export, and return the
+ *  object handed to onStart. `between` runs after the picks and right before the click, in the same turn (the project changing under the open dialog: the view has not drawn again yet, and the click
+ *  works the project out as it is at that moment). */
 async function dialogGives(
   canvas: Canvas,
   picks: readonly string[],
-  between?: () => void,
+  options: { between?: () => void; workload?: boolean } = {},
 ): Promise<ExportSettings> {
   setCanvas(canvas);
   const onStart = vi.fn<(settings: ExportSettings) => void>();
   const user = userEvent.setup();
   const view = render(
-    <ExportSettingsView workload={workloadOf(canvas)} onCancel={() => undefined} onStart={onStart} />,
+    <ExportSettingsView
+      workload={options.workload === false ? null : workloadOf(canvas)}
+      onCancel={() => undefined}
+      onStart={onStart}
+    />,
   );
   await settle();
   for (const what of picks) await pick(user, what);
   await settle();
   const button = screen.getByRole("button", { name: "Export" });
-  if (between) {
-    between();
+  if (options.between) {
+    options.between();
     fireEvent.click(button);
   } else await user.click(button);
   expect(onStart).toHaveBeenCalledTimes(1);
@@ -514,9 +516,9 @@ describe("C. the flags of the slot are the dialog's word on what the person set,
 
   it("a pick the project no longer holds at the click is dropped from what is sent and from the flags", async () => {
     // The project shrinks to 1920x1080 at 30 in the turn of the click, before the view has drawn again: the 1440p and the 50 fps are not on offer any more.
-    const settings = await dialogGives(UHD60, ["fast", "size:1440p", "rate:50 fps"], () =>
-      setCanvas(HD30),
-    );
+    const settings = await dialogGives(UHD60, ["fast", "size:1440p", "rate:50 fps"], {
+      between: () => setCanvas(HD30),
+    });
     expect(settings).toMatchObject({ resolution: "720p", fps: null, quality: "medium" });
     expect(settings.route).toEqual({
       route: "quick",
@@ -611,6 +613,32 @@ describe("E. the chat and MCP doors never take Fast", () => {
     },
     300_000,
   );
+});
+
+describe("G. before the app has answered about the encoder (no project figures for the dialog)", () => {
+  it("Quality asks for Full quality as the 0.28.0 dialog does, Fast leaves the encoder to the app and still takes the chip", async () => {
+    const quality = await dialogGives(UHD60, ["quality"], { workload: false });
+    expect(quality).toStrictEqual({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "quality",
+    });
+    const fast = await dialogGives(UHD60, ["fast"], { workload: false });
+    expect(fast.mode).toBeNull();
+    expect(fast.route).toEqual({
+      route: "quick",
+      explicit: { size: false, fps: false, quality: false },
+    });
+    const chosen = callOf(quality);
+    const plain = await observe({ canvas: UHD60, ...chosen, chip: true });
+    expect([plain.codec, plain.output]).toEqual(["libx264", pic(3840, 2160, 60)]);
+    expect(plain.running).not.toHaveProperty("route");
+    const taken = callOf(fast);
+    const viaChip = await observe({ canvas: UHD60, ...taken, chip: true });
+    expect([viaChip.codec, viaChip.output]).toEqual(["h264_amf", pic(1920, 1080, 30)]);
+    expect(viaChip.running.route).toBe("quick");
+  });
 });
 
 describe("F. a clip export and a library copy ignore the dialog's Fast slot (clip_ids and media_refs)", () => {
