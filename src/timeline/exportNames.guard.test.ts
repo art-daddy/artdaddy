@@ -11,7 +11,7 @@ import path from "node:path";
 
 import ts from "typescript";
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { EXPORT_ENCODERS } from "../api/exportVocabulary";
@@ -21,6 +21,9 @@ import { describeEncoder } from "./exportWords";
 import { describeLower } from "./lowerWords";
 import { quickAvailable } from "./quickAvailable";
 import { BANNER_BUTTON_LABELS } from "./routeWords";
+
+// The scans below read and parse every shipped file. Alone that takes a few seconds; a run of the whole suite puts every test file on every core, where it takes several times as long, so the file asks for a longer wall clock.
+vi.setConfig({ testTimeout: 120_000 });
 
 const SRC = path.resolve(__dirname, "..");
 const posix = (p: string): string => p.replace(/\\/g, "/");
