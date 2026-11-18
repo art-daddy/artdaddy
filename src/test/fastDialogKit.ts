@@ -172,15 +172,15 @@ export interface Run {
   mode?: "fast" | "quality";
   chip?: boolean;
   engine?: ExportEngine;
-  /** The switch `quick_route`: held off by the build (as shipped), off on the server, or on (the unit suite's state). */
-  switch?: "held" | "off" | "on";
+  /** The switch `quick_route`: as a shipped build has it (the hold on for the other names, the Fast choice not held), off on the server, or on with the hold lifted (the unit suite's state). */
+  switch?: "shipped" | "off" | "on";
   /** The door the call came through: the assistant in the app (the default) or an outside program over MCP. */
   surface?: "app" | "mcp";
 }
 
 /** One export of a fresh project, from the call to its end: what the app process was handed, the reply, the record while it ran and after, and the assistant's list row. */
 export async function observe(run: Run) {
-  __setHeldOffByBuild(run.switch === "held");
+  __setHeldOffByBuild(run.switch === "shipped");
   __setExportFlag("quick_route", run.switch !== "off");
   const t = await world(run.canvas, run);
   const extra: Partial<ClientToolContext> = {

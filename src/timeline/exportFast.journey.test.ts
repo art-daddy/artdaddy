@@ -236,14 +236,14 @@ interface Run {
   mode?: "fast" | "quality";
   chip?: boolean;
   engine?: ExportEngine;
-  /** The switch `quick_route`: held off by the build (as shipped), off on the server, or on (the unit suite's state). */
-  switch?: "held" | "off" | "on";
+  /** The switch `quick_route`: as a shipped build has it (the hold on for the other names, the Fast choice not held), off on the server, or on with the hold lifted (the unit suite's state). */
+  switch?: "shipped" | "off" | "on";
 }
 
 /** One export of a fresh project, from the call to its end: what the app process was handed, the reply, the record while it ran and after, the assistant's list row and
  *  the report sent when it settled. */
 async function observe(run: Run) {
-  __setHeldOffByBuild(run.switch === "held");
+  __setHeldOffByBuild(run.switch === "shipped");
   __setExportFlag("quick_route", run.switch !== "off");
   reported.length = 0;
   const t = await world(run.canvas, run);
@@ -379,10 +379,7 @@ describe("2b. the faster setting's own switch", () => {
 });
 
 describe("3. with the switch off a Fast pick is Quality in every byte", () => {
-  const OFF = [
-    { name: "held off by the build, as shipped", off: "held" as const },
-    { name: "switched off on the server", off: "off" as const },
-  ];
+  const OFF = [{ name: "switched off on the server", off: "off" as const }];
   it.each(OFF)("$name: three canvases, with and without a chip", async ({ off }) => {
     for (const canvas of [UHD60, HD30, SD24])
       for (const chip of [false, true]) {
@@ -418,6 +415,29 @@ describe("3. with the switch off a Fast pick is Quality in every byte", () => {
   });
 });
 
+describe("3b. the build's hold on the other switches does not reach the Fast choice (as shipped)", () => {
+  it("with the hold on for the estimate and the speed check, a Fast pick is Fast, in the bytes it has with the hold lifted", async () => {
+    for (const canvas of [UHD60, HD30, SD24])
+      for (const chip of [false, true]) {
+        const where = `${canvas.w}x${canvas.h}@${canvas.fps}, ${chip ? "chip" : "processor"}`;
+        // The two artifacts: what the app process was handed with the build's hold on and with it lifted, and the record of each.
+        const lifted = await observe({ canvas, slot: FAST, chip, switch: "on" });
+        const shipped = await observe({ canvas, slot: FAST, chip, switch: "shipped" });
+        expect(shipped.command, where).toEqual(lifted.command);
+        expect(shipped.reply, where).toEqual(lifted.reply);
+        expect(shipped.output, where).toEqual(lifted.output);
+        expect([shipped.running.route, shipped.done.route], where).toEqual(["quick", "quick"]);
+        // And it is Fast, not the project's own picture, where Fast has something to change.
+        if (canvas !== SD24)
+          expect(shipped.output, where).not.toEqual(pic(canvas.w, canvas.h, canvas.fps));
+        // The way back is still the server's: the same pick with the switch off is Quality in every byte.
+        const off = await observe({ canvas, slot: FAST, chip, switch: "off" });
+        const none = await observe({ canvas, chip, switch: "off" });
+        expect(off.command, where).toEqual(none.command);
+      }
+  });
+});
+
 describe("4. what Fast leaves on the record, in the assistant's list and in the report", () => {
   it('the record says route: "quick" for a Fast export and has no route key for anything else', async () => {
     for (const chip of [false, true]) {
@@ -426,7 +446,6 @@ describe("4. what Fast leaves on the record, in the assistant's list and in the 
       const others: [string, Run][] = [
         ["no slot", { canvas: UHD60, chip }],
         ["a standard slot", { canvas: UHD60, slot: STANDARD, chip }],
-        ["the switch held off", { canvas: UHD60, slot: FAST, chip, switch: "held" }],
         ["the switch off", { canvas: UHD60, slot: FAST, chip, switch: "off" }],
         ["the dialog's Fast mode typed by hand", { canvas: UHD60, mode: "fast", chip }],
       ];

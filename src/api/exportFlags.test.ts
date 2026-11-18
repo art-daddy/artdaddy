@@ -545,7 +545,8 @@ describe("the extra places for the speech model", () => {
   });
 });
 
-// This build ships the estimate and the PC speed check off (the proof they were built against was not met) and the Fast choice off (the dialog's choice and its screens are not in this build): see the top of exportFlags.ts. No answer can switch them on.
+// This build ships the estimate and the PC speed check off (the proof they were built against was not met): see the top of exportFlags.ts. No answer can switch them on. The Fast choice is NOT held (the dialog's choice is in this build): the last two
+// cases of this block say what that means, with the hold on, as a shipped build has it.
 describe("what this build holds off", () => {
   beforeEach(() => __setHeldOffByBuild(true));
   afterEach(() => {
@@ -556,8 +557,8 @@ describe("what this build holds off", () => {
   const allOn = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, true]));
   const allOff = Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, false]));
 
-  it("is exactly the estimate, the speed check and the Fast choice, each a name the switches know (the decision this release is shipped on: change it only with a bar that was met, or the dialog that shows the choice)", () => {
-    expect([...OFF_IN_THIS_BUILD].sort()).toEqual(["estimate_v2", "pc_check", "quick_route"]);
+  it("is exactly the estimate and the speed check, each a name the switches know (the decision this release is shipped on: change it only with a bar that was met)", () => {
+    expect([...OFF_IN_THIS_BUILD].sort()).toEqual(["estimate_v2", "pc_check"]);
     for (const name of OFF_IN_THIS_BUILD) expect(EXPORT_FLAG_NAMES).toContain(name);
   });
 
@@ -639,5 +640,49 @@ describe("what this build holds off", () => {
       expect(exportFlag(name), `${name} in the suite's mode`).toBe(true);
       expect(again.isOffInThisBuild(name), `${name} in the suite's mode, reloaded`).toBe(false);
     }
+  });
+
+  // The Fast choice is not held. With the hold on (the state of a shipped build) it is on from the first moment and only the server's own answer turns it off, and back on, as for every behaviour that is not held.
+  it("does not hold the Fast choice: with the hold on it is on at once, and only the server's own answer turns it off and back on, while the other two stay off", async () => {
+    expect(isOffInThisBuild("quick_route")).toBe(false);
+    expect(exportFlag("quick_route")).toBe(true);
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: { ...allOn, quick_route: false } }),
+      signedIn,
+      force: true,
+    });
+    expect(exportFlag("quick_route")).toBe(false);
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOn }),
+      signedIn,
+      force: true,
+    });
+    expect(exportFlag("quick_route")).toBe(true);
+    for (const name of OFF_IN_THIS_BUILD) expect(exportFlag(name), name).toBe(false);
+  });
+
+  // The same in the mode of a shipped build, with nothing of the tests set: a build that is not run by the unit suite runs the Fast choice, in a module that is loaded again as well.
+  it("runs the Fast choice in a shipped build with nothing of the tests set, in a reloaded module too, and the server can still turn it off", async () => {
+    __setHeldOffByBuild(null);
+    vi.stubEnv("MODE", "production");
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: allOn }),
+      signedIn,
+      force: true,
+    });
+    expect(isOffInThisBuild("quick_route"), "in a production build").toBe(false);
+    expect(exportFlag("quick_route"), "in a production build").toBe(true);
+    vi.resetModules();
+    const again = await import("./exportFlags");
+    expect(again.isOffInThisBuild("quick_route"), "in a reloaded module").toBe(false);
+    expect(again.exportFlag("quick_route"), "in a reloaded module").toBe(true);
+    for (const name of OFF_IN_THIS_BUILD)
+      expect(again.exportFlag(name), `${name} in a reloaded module`).toBe(false);
+    await refreshExportFlags({
+      fetcher: async () => reply({ v: 1, flags: { ...allOn, quick_route: false } }),
+      signedIn,
+      force: true,
+    });
+    expect(exportFlag("quick_route"), "told off in a production build").toBe(false);
   });
 });

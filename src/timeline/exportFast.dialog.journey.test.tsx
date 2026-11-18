@@ -638,10 +638,7 @@ describe("C. the flags of the slot are the dialog's word on what the person set,
 });
 
 describe("D. the switch is read by the tool when it runs, not by the dialog at the click", () => {
-  const OFF = [
-    { name: "held off by the build, as shipped", off: "held" as const },
-    { name: "switched off on the server", off: "off" as const },
-  ];
+  const OFF = [{ name: "switched off on the server", off: "off" as const }];
   it.each(OFF)(
     "$name: the tool runs what the dialog showed, on the plain encoder, with no route",
     async ({ off }) => {
@@ -677,6 +674,20 @@ describe("D. the switch is read by the tool when it runs, not by the dialog at t
     },
     300_000,
   );
+
+  // The build's hold on the other switches (the estimate and the speed check) does not reach the Fast choice: the dialog's pick runs as Fast in a shipped build, in the bytes it has with the hold lifted.
+  it("as shipped (the hold on for the other names): the dialog's Fast pick runs as Fast, in the bytes it has with the hold lifted", async () => {
+    for (const canvas of [UHD60, HD30])
+      for (const chip of [false, true]) {
+        const where = `${canvasName(canvas)}, ${chip ? "chip" : "processor"}`;
+        const call = callOf(await dialogGives(canvas, ["fast"]));
+        const lifted = await observe({ canvas, ...call, chip, switch: "on" });
+        const shipped = await observe({ canvas, ...call, chip, switch: "shipped" });
+        expect(shipped.command, where).toEqual(lifted.command);
+        expect(shipped.output, where).toEqual(lifted.output);
+        expect([shipped.running.route, shipped.done.route], where).toEqual(["quick", "quick"]);
+      }
+  }, 300_000);
 });
 
 describe("E. the chat and MCP doors never take Fast", () => {

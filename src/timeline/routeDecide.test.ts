@@ -34,21 +34,35 @@ describe("a Fast pick is Fast only while the switch is on", () => {
     });
   });
 
-  it.each([
-    ["switched off on the server", () => __setExportFlag("quick_route", false)],
-    ["held off by the build, as shipped", () => __setHeldOffByBuild(true)],
-  ])("is Quality, and says the switch is off, whatever was picked: %s", (_name, turnOff) => {
-    turnOff();
-    for (const slot of [
-      { route: "quick", explicit: NOTHING_SET },
-      { route: "standard" },
-      undefined,
-    ])
-      expect(decideRoute(withSlot(slot), {})).toEqual({
-        route: "standard",
-        offer: "off",
-        quick: null,
-      });
+  it.each([["switched off on the server", () => __setExportFlag("quick_route", false)]])(
+    "is Quality, and says the switch is off, whatever was picked: %s",
+    (_name, turnOff) => {
+      turnOff();
+      for (const slot of [
+        { route: "quick", explicit: NOTHING_SET },
+        { route: "standard" },
+        undefined,
+      ])
+        expect(decideRoute(withSlot(slot), {})).toEqual({
+          route: "standard",
+          offer: "off",
+          quick: null,
+        });
+    },
+  );
+
+  // The build's hold no longer reaches this switch: with it on (the state of a shipped build) and nothing forced, a Fast pick is Fast, and only the server's own answer takes it back.
+  it("is Fast with the build's hold on and the switch left as the build has it, and Quality the moment the server turns it off", () => {
+    __resetExportFlags();
+    __setHeldOffByBuild(true);
+    const slot = withSlot({ route: "quick", explicit: NOTHING_SET });
+    expect(decideRoute(slot, {})).toEqual({
+      route: "quick",
+      offer: "offered",
+      quick: { explicit: NOTHING_SET },
+    });
+    __setExportFlag("quick_route", false);
+    expect(decideRoute(slot, {})).toEqual({ route: "standard", offer: "off", quick: null });
   });
 
   it("is Quality, with Fast on offer, for a pick of Quality and for no pick", () => {

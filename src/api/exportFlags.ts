@@ -109,7 +109,7 @@
 // THIS BUILD SHIPS `estimate_v2` AND `pc_check` OFF (OFF_IN_THIS_BUILD below), whatever the server says: the honest estimate did not meet the bar it was built against (E1, lane L11's
 // fit n1-202611170115: 24 % of the judged cells within 2 times against 90 %, 0 of 11 weak-profile cells, 85 % of the measured times inside the shown range against 90 %, five cells 4 times or
 // more under-estimated without "could take much longer"), and the speed check did not meet its (P1: the class and the reading against the reference export; P2: the disturbance of a running
-// export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs, except `quick_route` (next).
+// export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs, `quick_route` included (last paragraph).
 // HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): the 29 files whose header starts with these words stay with their tests (search src for "HELD OFF ON PURPOSE"). Nobody should delete them as "dead code".
 // Three things still run while they are held off: (1) the PC check service starts at launch in the desktop app (main.tsx:64, the dynamic import of timeline/estimateStart);
 // (2) the chip test takes its turn in the PC check's slot (the gate in timeline/chipTest.ts:446-472, installed by timeline/pcCheckStart.ts:125); (3) the memory-shape prior's start setting,
@@ -118,8 +118,9 @@
 // To light the estimate and the speed check again: remove their names from OFF_IN_THIS_BUILD (one line each, with exportFlags.test.ts, which pins the list) AND bring new evidence that the numbers
 // they show can be backed (the bar and the miss are above: 24 % of the judged cells within 2 times against 90 %). The memory-shape prior also needs the owner's picture-gate answers (timeline/pictureGate.ts).
 //
-// THIS BUILD ALSO SHIPS `quick_route` OFF, whatever the server says: the Fast choice is built in pieces, and this build has its rules and the export's plumbing but not the Export dialog's choice, its words or its screens, so
-// nothing is there yet to draw it or to start it. The server's file already says true (the switch exists there), so a later build lights the choice by removing the name from OFF_IN_THIS_BUILD in one line, with the test that pins this.
+// `quick_route` IS NOT HELD OFF BY THE BUILD. It was held in the builds that had the rules of the Fast choice and the export's plumbing but not the Export dialog's choice, its words or its screens; the dialog's Quality | Fast choice is
+// in this build, so the name left OFF_IN_THIS_BUILD, in one commit that also carries every test that had assumed the hold. The server's answer now decides it like any other behaviour above: its file says true, and it can only turn the
+// choice off (the dialog is then the 0.28.0 one, and an export that asks for Fast runs as Quality). To hold it off again in a build: revert that one commit (the name goes back into OFF_IN_THIS_BUILD together with the test that pins the list).
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -204,11 +205,10 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
 };
 
 /** Behaviours that are in this build and NOT shipped: they stay off whatever the server says, whatever the compiled default says and whatever a stored answer holds, because the proof they were
- *  built against was not met, or the screens that would show them are not in this build (see the top of this file). The server's "back on" cannot reach them. A later build that meets its bars removes the name here, in one line, with the test that pins this. */
+ *  built against was not met (see the top of this file). The server's "back on" cannot reach them. A later build that meets its bars removes the name here, in one line, with the test that pins this. */
 export const OFF_IN_THIS_BUILD: ReadonlySet<ExportFlagName> = new Set<ExportFlagName>([
   "estimate_v2",
   "pc_check",
-  "quick_route",
 ]);
 
 /** Tests only: forces the hold on (true) or off (false); null leaves it to the build's mode. */
