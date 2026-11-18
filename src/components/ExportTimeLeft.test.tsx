@@ -235,6 +235,11 @@ describe("the speed on the Export dialog's right side", () => {
     reportAt(30, 30 / 200);
     expect(dialogPace()).toBe("2.0× · about 3 min left");
     expect(cardLine()).toMatch(/ · 15% · about 3 min left$/);
+    // The conditions are the same as ever: during the render only. When the render is over (the file is checked, then saved) neither the speed nor the time is said.
+    toStage(run.sub.job_id, "checking");
+    expect(dialogPace()).toBe("");
+    toStage(run.sub.job_id, "saving");
+    expect(dialogPace()).toBe("");
   });
 
   it.each([
@@ -242,7 +247,7 @@ describe("the speed on the Export dialog's right side", () => {
     [0.96, "1.0×"],
     [3.26, "3.3×"],
     [12.34, "12.3×"],
-  ])(
+  ] as const)(
     "prints a speed of %s as %s, with nothing after it before a time is said",
     async (speed, text) => {
       const run = await watched();
@@ -494,5 +499,17 @@ describe("a render made in parts", () => {
     reportAt(141, fractionAt(141), { step: 2, steps: STEPS });
     expectSaid("about 3 min left", 180);
     expect(dialogPace()).toBe("2.0× · about 3 min left");
+  });
+
+  // The words check the part themselves: a figure the store holds is not said for a feed that is at a part before the last, whatever put it there.
+  it("does not say a figure the store holds for a feed that is at an earlier part", async () => {
+    const run = await watched();
+    toStage(run.sub.job_id, "rendering");
+    for (let t = 1; t <= 30; t++) reportAt(t, t / 200);
+    expectSaid("about 3 min left", 180);
+    act(() => useExportJob.setState((s) => ({ live: { ...s.live!, step: 0, steps: STEPS } })));
+    expectSaid("");
+    act(() => useExportJob.setState((s) => ({ live: { ...s.live!, step: 2, steps: STEPS } })));
+    expectSaid("about 3 min left", 180); // the last part: the same answer is said again
   });
 });
