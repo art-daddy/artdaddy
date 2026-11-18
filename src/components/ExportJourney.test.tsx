@@ -27,6 +27,7 @@ import {
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 import * as host from "../platform/host";
 import { ExportMemFs } from "../test/timelineKit";
+import { playSteady } from "../test/steadyFeed";
 import { ProjectStoreAccess } from "../tools/store";
 
 const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
@@ -201,14 +202,22 @@ describe("an assistant's export on a PC that is short of memory", () => {
     expect(screen.getByText("Waiting · 1st in line · teaser.mp4")).toBeVisible();
 
     // 4. ffmpeg starts reporting (as render.ts publishes it): the card follows, and so does the
-    //    assistant's own export list.
+    //    assistant's own export list. A render of 100 s in all reports every second for 38 s: 38 % made,
+    //    62 s left, said as the nearest minute (the raw guess it publishes, 100 s, would read "about 2 min").
     const jobId = useExportJob.getState().live!.jobId;
-    act(() => {
-      useExportJob.getState().setLiveStage(jobId, "rendering");
-      useExportJob.getState().update({ fraction: 0.38, etaSec: 100, frame: 684, speed: 1.2 });
-    });
+    act(() => useExportJob.getState().setLiveStage(jobId, "rendering"));
+    const origin = Date.now();
+    playSteady(
+      (r) =>
+        act(() =>
+          useExportJob
+            .getState()
+            .update({ fraction: r.fraction, etaSec: 100, frame: r.frame, speed: 1.2 }),
+        ),
+      { total: 100, from: 1, to: 38, origin },
+    );
     expect(screen.getByTestId("export-card-status").textContent).toBe(
-      "Rendering and encoding · 38% · about 2 min left",
+      "Rendering and encoding · 38% · about 1 min left",
     );
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "38");
     const listed = (((await manageExportsTool({ action: "list" })) as Any).exports as Any[]).map(
@@ -226,8 +235,8 @@ describe("an assistant's export on a PC that is short of memory", () => {
 
     // 5. The render stands still for 75 seconds (the same block, again and again): the card says so.
     for (let second = 5; second <= 75; second += 5) {
-      vi.setSystemTime(9_000_000 + second * 1000);
-      act(() => useExportJob.getState().update({ fraction: 0.38, etaSec: 100, frame: 684 }));
+      vi.setSystemTime(origin + (38 + second) * 1000);
+      act(() => useExportJob.getState().update({ fraction: 0.38, etaSec: 100, frame: 38 * 30 }));
     }
     act(() => void vi.advanceTimersByTime(10_000));
     expect(screen.getByTestId("export-card-status").textContent).toMatch(

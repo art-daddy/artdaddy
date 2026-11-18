@@ -5,7 +5,6 @@
 // hostage. Re-opening rejoins the job already in progress rather than starting a second one.
 import { useCallback, useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
 
-import { formatEta } from "../timeline/ffmpegProgress";
 import { attempts } from "../timeline/exportAttempts";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { dialogEstimate } from "../timeline/dialogEstimate";
@@ -33,6 +32,7 @@ import {
   STATUS_REFRESH_MS,
   type ModeView,
 } from "../timeline/exportWords";
+import type { TimeLeft } from "../timeline/exportTimeLeft";
 import { flags3cNow } from "../timeline/flags3c";
 import type { RenderWorkload } from "../timeline/renderPlan";
 import type { ExportRouteSlot } from "../tools/context";
@@ -205,7 +205,7 @@ export default function ExportDialog({
   const phase = useExportJob((s) => s.phase);
   const jobId = useExportJob((s) => s.jobId);
   const fraction = useExportJob((s) => s.fraction);
-  const etaSec = useExportJob((s) => s.etaSec);
+  const timeLeft = useExportJob((s) => s.timeLeft);
   const speed = useExportJob((s) => s.speed);
   const savedTo = useExportJob((s) => s.savedTo);
   const error = useExportJob((s) => s.error);
@@ -297,7 +297,7 @@ export default function ExportDialog({
             phase={phase}
             jobId={jobId}
             fraction={fraction}
-            etaSec={etaSec}
+            timeLeft={timeLeft}
             speed={speed}
             savedTo={savedTo}
             error={error}
@@ -490,7 +490,7 @@ function Progress({
   phase,
   jobId,
   fraction,
-  etaSec,
+  timeLeft,
   speed,
   savedTo,
   error,
@@ -499,7 +499,8 @@ function Progress({
   /** The export this job follows, once the queue has given it an id. */
   jobId: string | null;
   fraction: number | null;
-  etaSec: number | null;
+  /** What the time-left rule says of the job's own feed: read only until the export has a feed of its own. */
+  timeLeft: TimeLeft;
   speed: number;
   savedTo: string | null;
   error: string | null;
@@ -534,15 +535,13 @@ function Progress({
   const shown =
     phase === "preparing" || phase === "rendering"
       ? describeDialogProgress(
-          { own, place: place > 0 ? place : null, phase, fraction, etaSec, speed },
+          { own, place: place > 0 ? place : null, phase, fraction, timeLeft, speed },
           Date.now(),
         )
       : null;
+  // The speed as a multiple of the video's length, as ever; after it, only what the time-left rule says (the chat card's words).
   const pace = shown
-    ? [
-        shown.speed === null ? "" : `${shown.speed.toFixed(1)}×`,
-        shown.left === null ? "" : `${formatEta(shown.left)} left`,
-      ]
+    ? [shown.speed === null ? "" : `${shown.speed.toFixed(1)}×`, shown.timeLeft]
         .filter(Boolean)
         .join(" · ")
     : "";

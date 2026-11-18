@@ -324,11 +324,12 @@ describe("the assistant's list, while a render is much slower than its estimate 
       projected_total_s: 400,
       note: NOTE_SLOW,
     });
-    // the existing facts of the row are as they were
+    // the existing facts of the row are as they were; the time left is the one the card says, on the rounding grid: a render that projects 400 s in all has 400 - 90 = 310 s left
+    // 90 s in, and under ten minutes the grid is whole minutes, so the nearest is 5 min = 300 s (the banner above keeps the raw 400 and the raw pace)
     expect(rowOf(run.id)).toMatchObject({
       stage: "rendering",
       progress_percent: 23,
-      time_left_s: 310,
+      time_left_s: 300,
     });
     expect(factsOf3c(run.id)?.help_shown).toEqual(["slow"]);
     expect(factsForReport(run.id)).toBeUndefined();

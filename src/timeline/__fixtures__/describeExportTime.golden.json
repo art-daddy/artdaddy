@@ -1,0 +1,841 @@
+{
+ "header": {
+  "function": "describeExportTime (src/timeline/exportOptions.ts)",
+  "capturedFrom": "the tree before the live time-left wiring: commit 41c2b4e0 of the client repository (rc6/eta), nothing of the wiring present",
+  "note": "Generated once from the untouched function and never regenerated. 'NaN', 'Infinity' and '-Infinity' stand for those numbers (JSON has none). A row that moves means the words moved: find out why, do not bless it."
+ },
+ "rows": [
+  [
+   null,
+   ""
+  ],
+  [
+   "NaN",
+   ""
+  ],
+  [
+   "Infinity",
+   ""
+  ],
+  [
+   "-Infinity",
+   ""
+  ],
+  [
+   -1000000000,
+   ""
+  ],
+  [
+   -3,
+   ""
+  ],
+  [
+   -0.001,
+   ""
+  ],
+  [
+   0,
+   "under a minute"
+  ],
+  [
+   0.4,
+   "under a minute"
+  ],
+  [
+   1,
+   "under a minute"
+  ],
+  [
+   5,
+   "under a minute"
+  ],
+  [
+   10,
+   "under a minute"
+  ],
+  [
+   20,
+   "under a minute"
+  ],
+  [
+   29,
+   "under a minute"
+  ],
+  [
+   30,
+   "under a minute"
+  ],
+  [
+   31,
+   "under a minute"
+  ],
+  [
+   40,
+   "under a minute"
+  ],
+  [
+   43,
+   "under a minute"
+  ],
+  [
+   44,
+   "under a minute"
+  ],
+  [
+   44.4,
+   "under a minute"
+  ],
+  [
+   44.5,
+   "under a minute"
+  ],
+  [
+   44.9,
+   "under a minute"
+  ],
+  [
+   44.999999,
+   "under a minute"
+  ],
+  [
+   45,
+   "about 1 min"
+  ],
+  [
+   45.0001,
+   "about 1 min"
+  ],
+  [
+   46,
+   "about 1 min"
+  ],
+  [
+   50,
+   "about 1 min"
+  ],
+  [
+   59,
+   "about 1 min"
+  ],
+  [
+   59.5,
+   "about 1 min"
+  ],
+  [
+   60,
+   "about 1 min"
+  ],
+  [
+   61,
+   "about 1 min"
+  ],
+  [
+   89,
+   "about 1 min"
+  ],
+  [
+   89.999,
+   "about 1 min"
+  ],
+  [
+   90,
+   "about 2 min"
+  ],
+  [
+   90.001,
+   "about 2 min"
+  ],
+  [
+   149,
+   "about 2 min"
+  ],
+  [
+   149.999,
+   "about 2 min"
+  ],
+  [
+   150,
+   "about 3 min"
+  ],
+  [
+   150.001,
+   "about 3 min"
+  ],
+  [
+   209,
+   "about 3 min"
+  ],
+  [
+   209.999,
+   "about 3 min"
+  ],
+  [
+   210,
+   "about 4 min"
+  ],
+  [
+   210.001,
+   "about 4 min"
+  ],
+  [
+   269,
+   "about 4 min"
+  ],
+  [
+   269.999,
+   "about 4 min"
+  ],
+  [
+   270,
+   "about 5 min"
+  ],
+  [
+   270.001,
+   "about 5 min"
+  ],
+  [
+   329,
+   "about 5 min"
+  ],
+  [
+   329.999,
+   "about 5 min"
+  ],
+  [
+   330,
+   "about 6 min"
+  ],
+  [
+   330.001,
+   "about 6 min"
+  ],
+  [
+   389,
+   "about 6 min"
+  ],
+  [
+   389.999,
+   "about 6 min"
+  ],
+  [
+   390,
+   "about 7 min"
+  ],
+  [
+   390.001,
+   "about 7 min"
+  ],
+  [
+   449,
+   "about 7 min"
+  ],
+  [
+   449.999,
+   "about 7 min"
+  ],
+  [
+   450,
+   "about 8 min"
+  ],
+  [
+   450.001,
+   "about 8 min"
+  ],
+  [
+   509,
+   "about 8 min"
+  ],
+  [
+   509.999,
+   "about 8 min"
+  ],
+  [
+   510,
+   "about 9 min"
+  ],
+  [
+   510.001,
+   "about 9 min"
+  ],
+  [
+   569,
+   "about 9 min"
+  ],
+  [
+   569.999,
+   "about 9 min"
+  ],
+  [
+   570,
+   "about 10 min"
+  ],
+  [
+   570.001,
+   "about 10 min"
+  ],
+  [
+   629,
+   "about 10 min"
+  ],
+  [
+   629.999,
+   "about 10 min"
+  ],
+  [
+   630,
+   "about 11 min"
+  ],
+  [
+   630.001,
+   "about 11 min"
+  ],
+  [
+   75,
+   "about 1 min"
+  ],
+  [
+   105,
+   "about 2 min"
+  ],
+  [
+   120,
+   "about 2 min"
+  ],
+  [
+   135,
+   "about 2 min"
+  ],
+  [
+   165,
+   "about 3 min"
+  ],
+  [
+   180,
+   "about 3 min"
+  ],
+  [
+   195,
+   "about 3 min"
+  ],
+  [
+   225,
+   "about 4 min"
+  ],
+  [
+   240,
+   "about 4 min"
+  ],
+  [
+   255,
+   "about 4 min"
+  ],
+  [
+   285,
+   "about 5 min"
+  ],
+  [
+   300,
+   "about 5 min"
+  ],
+  [
+   315,
+   "about 5 min"
+  ],
+  [
+   345,
+   "about 6 min"
+  ],
+  [
+   360,
+   "about 6 min"
+  ],
+  [
+   375,
+   "about 6 min"
+  ],
+  [
+   405,
+   "about 7 min"
+  ],
+  [
+   420,
+   "about 7 min"
+  ],
+  [
+   435,
+   "about 7 min"
+  ],
+  [
+   465,
+   "about 8 min"
+  ],
+  [
+   480,
+   "about 8 min"
+  ],
+  [
+   495,
+   "about 8 min"
+  ],
+  [
+   525,
+   "about 9 min"
+  ],
+  [
+   540,
+   "about 9 min"
+  ],
+  [
+   555,
+   "about 9 min"
+  ],
+  [
+   585,
+   "about 10 min"
+  ],
+  [
+   600,
+   "about 10 min"
+  ],
+  [
+   900,
+   "about 15 min"
+  ],
+  [
+   1200,
+   "about 20 min"
+  ],
+  [
+   1500,
+   "about 25 min"
+  ],
+  [
+   1800,
+   "about 30 min"
+  ],
+  [
+   2100,
+   "about 35 min"
+  ],
+  [
+   2400,
+   "about 40 min"
+  ],
+  [
+   2700,
+   "about 45 min"
+  ],
+  [
+   3000,
+   "about 50 min"
+  ],
+  [
+   3300,
+   "about 55 min"
+  ],
+  [
+   3600,
+   "about 1 h"
+  ],
+  [
+   4500,
+   "about 1 h 15 min"
+  ],
+  [
+   5400,
+   "about 1 h 30 min"
+  ],
+  [
+   6300,
+   "about 1 h 45 min"
+  ],
+  [
+   7200,
+   "about 2 h"
+  ],
+  [
+   8100,
+   "about 2 h 15 min"
+  ],
+  [
+   9000,
+   "about 2 h 30 min"
+  ],
+  [
+   9900,
+   "about 2 h 45 min"
+  ],
+  [
+   10800,
+   "about 3 h"
+  ],
+  [
+   11700,
+   "about 3 h 15 min"
+  ],
+  [
+   12600,
+   "about 3 h 30 min"
+  ],
+  [
+   13500,
+   "about 3 h 45 min"
+  ],
+  [
+   14400,
+   "about 4 h"
+  ],
+  [
+   15300,
+   "about 4 h 15 min"
+  ],
+  [
+   16200,
+   "about 4 h 30 min"
+  ],
+  [
+   17100,
+   "about 4 h 45 min"
+  ],
+  [
+   18000,
+   "about 5 h"
+  ],
+  [
+   18900,
+   "about 5 h 15 min"
+  ],
+  [
+   19800,
+   "about 5 h 30 min"
+  ],
+  [
+   20700,
+   "about 5 h 45 min"
+  ],
+  [
+   21600,
+   "about 6 h"
+  ],
+  [
+   22500,
+   "about 6 h 15 min"
+  ],
+  [
+   23400,
+   "about 6 h 30 min"
+  ],
+  [
+   24300,
+   "about 6 h 45 min"
+  ],
+  [
+   25200,
+   "about 7 h"
+  ],
+  [
+   26100,
+   "about 7 h 15 min"
+  ],
+  [
+   27000,
+   "about 7 h 30 min"
+  ],
+  [
+   27900,
+   "about 7 h 45 min"
+  ],
+  [
+   28800,
+   "about 8 h"
+  ],
+  [
+   29700,
+   "about 8 h 15 min"
+  ],
+  [
+   30600,
+   "about 8 h 30 min"
+  ],
+  [
+   31500,
+   "about 8 h 45 min"
+  ],
+  [
+   32400,
+   "about 9 h"
+  ],
+  [
+   33300,
+   "about 9 h 15 min"
+  ],
+  [
+   34200,
+   "about 9 h 30 min"
+  ],
+  [
+   35100,
+   "about 9 h 45 min"
+  ],
+  [
+   36000,
+   "about 10 h"
+  ],
+  [
+   36900,
+   "about 10 h 15 min"
+  ],
+  [
+   37800,
+   "about 10 h 30 min"
+  ],
+  [
+   38700,
+   "about 10 h 45 min"
+  ],
+  [
+   39600,
+   "about 11 h"
+  ],
+  [
+   40500,
+   "about 11 h 15 min"
+  ],
+  [
+   41400,
+   "about 11 h 30 min"
+  ],
+  [
+   42300,
+   "about 11 h 45 min"
+  ],
+  [
+   43200,
+   "about 12 h"
+  ],
+  [
+   3569,
+   "about 59 min"
+  ],
+  [
+   3570,
+   "about 1 h"
+  ],
+  [
+   3599,
+   "about 1 h"
+  ],
+  [
+   3629,
+   "about 1 h"
+  ],
+  [
+   3630,
+   "about 1 h 1 min"
+  ],
+  [
+   3659,
+   "about 1 h 1 min"
+  ],
+  [
+   3660,
+   "about 1 h 1 min"
+  ],
+  [
+   5399,
+   "about 1 h 30 min"
+  ],
+  [
+   7199,
+   "about 2 h"
+  ],
+  [
+   7230,
+   "about 2 h 1 min"
+  ],
+  [
+   86399,
+   "about 24 h"
+  ],
+  [
+   86400,
+   "about 24 h"
+  ],
+  [
+   172799,
+   "about 48 h"
+  ],
+  [
+   172800,
+   "about 48 h"
+  ],
+  [
+   172801,
+   "about 48 h"
+  ],
+  [
+   10000000,
+   "about 2777 h 47 min"
+  ],
+  [
+   1000000000000,
+   "about 277777777 h 47 min"
+  ],
+  [
+   54.1,
+   "about 1 min"
+  ],
+  [
+   126534.7,
+   "about 35 h 9 min"
+  ],
+  [
+   57.2,
+   "about 1 min"
+  ],
+  [
+   36304.4,
+   "about 10 h 5 min"
+  ],
+  [
+   172123.6,
+   "about 47 h 49 min"
+  ],
+  [
+   1321.6,
+   "about 22 min"
+  ],
+  [
+   43143.2,
+   "about 11 h 59 min"
+  ],
+  [
+   947.8,
+   "about 16 min"
+  ],
+  [
+   1.6,
+   "under a minute"
+  ],
+  [
+   1425,
+   "about 24 min"
+  ],
+  [
+   14.7,
+   "under a minute"
+  ],
+  [
+   161799.6,
+   "about 44 h 57 min"
+  ],
+  [
+   12.9,
+   "under a minute"
+  ],
+  [
+   2,
+   "under a minute"
+  ],
+  [
+   1.1,
+   "under a minute"
+  ],
+  [
+   90.4,
+   "about 2 min"
+  ],
+  [
+   474.7,
+   "about 8 min"
+  ],
+  [
+   4019.2,
+   "about 1 h 7 min"
+  ],
+  [
+   23200.5,
+   "about 6 h 27 min"
+  ],
+  [
+   2.4,
+   "under a minute"
+  ],
+  [
+   215.4,
+   "about 4 min"
+  ],
+  [
+   42677.1,
+   "about 11 h 51 min"
+  ],
+  [
+   8205,
+   "about 2 h 17 min"
+  ],
+  [
+   3.4,
+   "under a minute"
+  ],
+  [
+   11.1,
+   "under a minute"
+  ],
+  [
+   3836.3,
+   "about 1 h 4 min"
+  ],
+  [
+   19816.6,
+   "about 5 h 30 min"
+  ],
+  [
+   38.6,
+   "under a minute"
+  ],
+  [
+   24.6,
+   "under a minute"
+  ],
+  [
+   2092.7,
+   "about 35 min"
+  ],
+  [
+   10721.6,
+   "about 2 h 59 min"
+  ],
+  [
+   4881.7,
+   "about 1 h 21 min"
+  ],
+  [
+   52873.2,
+   "about 14 h 41 min"
+  ],
+  [
+   86564,
+   "about 24 h 3 min"
+  ],
+  [
+   3312.8,
+   "about 55 min"
+  ],
+  [
+   20.7,
+   "under a minute"
+  ],
+  [
+   427.8,
+   "about 7 min"
+  ],
+  [
+   46.3,
+   "about 1 min"
+  ],
+  [
+   59.7,
+   "about 1 min"
+  ]
+ ]
+}
