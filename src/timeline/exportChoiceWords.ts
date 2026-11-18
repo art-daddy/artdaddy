@@ -30,8 +30,10 @@ export const D2_WORDS = {
   /** S16 the quality row. */
   qualityLabel: "Quality",
   qualityName: "quality",
-  /** S18 the Graphics chip note for the state where the chip passed its test (OD-5: the page's sentence). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
-  chipNotePassed: "Auto: used when it saves time. The file is usually larger.",
+  /** S18 the Graphics chip note for the state where the chip passed its test (OD-5, owner's yes of 18 Nov: the page's sentence with the clause "the picture can differ slightly" kept, in 0.28.0's own
+   *  words). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
+  chipNotePassed:
+    "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
   /** S19, S20 the footer. */
   cancel: "Cancel",
   exportAction: "Export",
@@ -49,10 +51,9 @@ export const D2_WORDS = {
   useFastSettings: "Use Fast's settings",
 } as const;
 
-/** OD-5: the two clauses of the 0.28.0 chip note that the page's shorter sentence leaves out ("When it is used, the file is usually larger and the picture can differ slightly. It
- *  passed ArtDaddy's test on this PC."). Kept so that restoring them is one edit to `D2_WORDS.chipNotePassed`; nothing reads them. */
+/** OD-5: the clause of the 0.28.0 chip note that is still left out ("When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.").
+ *  "the picture can differ slightly" is back in `D2_WORDS.chipNotePassed` (the owner's yes); this one stays out until the owner asks. Restoring it is one edit there; nothing reads it. */
 export const CHIP_NOTE_DROPPED_CLAUSES = Object.freeze({
-  pictureDiffers: "the picture can differ slightly",
   passedTest: "It passed ArtDaddy's test",
 });
 

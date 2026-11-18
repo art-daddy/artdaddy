@@ -110,16 +110,15 @@ export function sizeOptions(facts: ProjectFacts | null): ExportResolution[] {
   return facts === null ? ["source"] : quickSizeChoices(facts);
 }
 
-/** The Frame rate list, the same for both choices: `null` (the project's own rate), then every rate of the ladder strictly below the project's, then Fast's own rate where the ladder has not
- *  got it (72 gives 18, 32 gives 16), highest first. Never a rate at or above the project's. */
+/** The Frame rate list: `null` (the project's own rate), then every rate of the ladder strictly below the project's, then `extra` where the ladder has not got it, highest first. Never a rate at or
+ *  above the project's. `extra` is Fast's own rate (72 gives 18, 32 gives 16) and is passed only by a view that offers Fast; a view without it passes nothing. */
 export function rateOptions(
   facts: ProjectFacts | null,
-  bundle: QuickBundle = QUICK_BUNDLE,
+  extra: number | null = null,
 ): (number | null)[] {
   if (facts === null) return [null];
   const rates = RATE_LADDER.filter((rate) => rate < facts.fps);
-  const own = ownLevers("fast", facts, bundle).fps;
-  if (own !== null && !rates.includes(own)) rates.push(own);
+  if (extra !== null && extra < facts.fps && extra >= 1 && !rates.includes(extra)) rates.push(extra);
   return [null, ...rates.sort((a, b) => b - a)];
 }
 
@@ -146,12 +145,12 @@ export function sizeEntries(
   }));
 }
 
-/** What the Frame rate list says of each entry. */
+/** What the Frame rate list says of each entry (`extra` as in `rateOptions`). */
 export function rateEntries(
   facts: ProjectFacts | null,
-  bundle: QuickBundle = QUICK_BUNDLE,
+  extra: number | null = null,
 ): { value: number | null; label: string }[] {
-  return rateOptions(facts, bundle).map((value) => ({
+  return rateOptions(facts, extra).map((value) => ({
     value,
     label:
       value === null
