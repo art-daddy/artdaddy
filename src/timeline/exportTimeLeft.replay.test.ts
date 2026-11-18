@@ -91,6 +91,8 @@ const SHORT_RUN_MAX_RENDER_SECONDS = 20;
 const FIXTURE_MIN_LONG_RUNS = 40;
 const FIXTURE_MIN_SHORT_RUNS = 5;
 const FIXTURE_MAX_BYTES = 1.5 * 1024 * 1024;
+/** ffmpeg prints the first frame of some runs a frame or so before zero: such a position is kept as recorded and counts as 0 %. */
+const FIXTURE_MIN_POSITION_MS = -100;
 const FIXTURE_FILE = "src/timeline/__fixtures__/timeLeftRuns.json";
 const ROUTES = ["x264", "x264-light", "chip"];
 
@@ -575,7 +577,7 @@ describe("the recorded runs", () => {
         run.id,
       ).toBe(true);
       expect(
-        out.every((o) => Number.isFinite(o) && o >= 0),
+        out.every((o) => Number.isFinite(o) && o >= FIXTURE_MIN_POSITION_MS),
         run.id,
       ).toBe(true);
       expect(at[at.length - 1], `${run.id}: the last report is the run's end`).toBe(run.endMs);

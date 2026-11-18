@@ -24,7 +24,8 @@ export interface ReplayRun {
   readonly endMs: number;
   /** The run's folder under the lab's runs folder. */
   readonly source: string;
-  /** `[arrival in ms since the run began, render position in ms]`; a position of 0 is "no picture yet". */
+  /** `[arrival in ms since the run began, render position in ms]`; 0 is "no picture yet" and a small negative position (ffmpeg's first
+   *  frame of some runs) is kept as recorded and counts as 0 %. */
   readonly samples: ReadonlyArray<readonly [number, number]>;
 }
 
