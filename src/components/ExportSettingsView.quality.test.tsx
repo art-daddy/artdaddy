@@ -371,6 +371,9 @@ const SCENARIOS: Scenario[] = [
 const KEYS = ["fps", "mode", "quality", "resolution"];
 
 type Side = "legacy" | "view";
+/** How the new view is drawn: without the choice row (`fastChoice` false), with it (the default), or with it after Fast was picked and Quality picked again: nothing may stay of the detour. */
+type ViewState = "no row" | "row" | "row after Fast, then Quality again";
+const VIEW_STATES: ViewState[] = ["no row", "row", "row after Fast, then Quality again"];
 type User = ReturnType<typeof userEvent.setup>;
 interface Played {
   sent: ExportSettings;
@@ -412,8 +415,8 @@ async function happen(user: User, side: Side, what: Between): Promise<void> {
   await user.click(await screen.findByRole("radio", { name: "Off" }));
 }
 
-/** One side of a scenario from a clean PC and clean stores: shown, settled, picked, then Export pressed once (twice in the gap scenario). */
-async function play(side: Side, scenario: Scenario): Promise<Played[]> {
+/** One side of a scenario from a clean PC and clean stores: shown, settled, picked, then Export pressed once (twice in the gap scenario). `state` is how the new view is drawn (ignored for the 0.28.0 dialog). */
+async function play(side: Side, scenario: Scenario, state: ViewState = "row"): Promise<Played[]> {
   cleanup();
   localStorage.clear();
   __resetChipTests();
@@ -439,13 +442,23 @@ async function play(side: Side, scenario: Scenario): Promise<Played[]> {
     side === "legacy" ? (
       <ExportDialog open onCancel={noop} onStart={onStart} workload={scenario.workload} />
     ) : (
-      <ExportSettingsView workload={scenario.workload} onCancel={noop} onStart={onStart} />
+      <ExportSettingsView
+        workload={scenario.workload}
+        onCancel={noop}
+        onStart={onStart}
+        fastChoice={state !== "no row"}
+      />
     ),
   );
   await settleAll();
   if (side === "legacy" && scenario.presses[0].legacyDrawsModeRow)
     await screen.findByRole("radiogroup", { name: "export mode" });
   const user = userEvent.setup();
+  if (side === "view" && state === "row after Fast, then Quality again") {
+    await user.click(screen.getByRole("radio", { name: "Fast" }));
+    await user.click(screen.getByRole("radio", { name: "Quality" }));
+    await settleAll();
+  }
   if (scenario.picks) {
     await pick(user, side, scenario.picks);
     await settleAll();
@@ -482,28 +495,37 @@ beforeEach(() => {
 });
 
 describe("Quality sends what the 0.28.0 dialog sends", () => {
-  it.each(SCENARIOS)("$name", async (scenario) => {
-    const legacy = await play("legacy", scenario);
-    const view = await play("view", scenario);
+  // The 0.28.0 side of a scenario does not depend on how the new view is drawn: it is played once and compared with each state.
+  const oracle = new Map<Scenario, Promise<Played[]>>();
+  const legacyOf = (scenario: Scenario): Promise<Played[]> => {
+    if (!oracle.has(scenario)) oracle.set(scenario, play("legacy", scenario));
+    return oracle.get(scenario)!;
+  };
 
-    // each Export press hands over exactly once; the written-out values hold for the oracle (so two empty runs cannot agree) and the new view equals it, strictly
-    expect(legacy.map((played) => played.calls)).toEqual(scenario.presses.map((_, i) => i + 1));
-    expect(view.map((played) => played.calls)).toEqual(scenario.presses.map((_, i) => i + 1));
-    expect(legacy.map((played) => played.sent)).toStrictEqual(
-      scenario.presses.map((press) => press.sent),
-    );
-    expect(view.map((played) => played.sent)).toStrictEqual(legacy.map((played) => played.sent));
-    for (const played of view) expect(Object.keys(played.sent).sort()).toEqual(KEYS);
+  describe.each(VIEW_STATES)("the new view, %s", (state) => {
+    it.each(SCENARIOS)("$name", async (scenario) => {
+      const legacy = await legacyOf(scenario);
+      const view = await play("view", scenario, state);
 
-    scenario.presses.forEach((press, i) => {
-      // the one intended difference: 0.28.0 says it showed its Mode row where it drew it; the new view never draws it and says so
-      expect(legacy[i].modeRowDrawn).toBe(press.legacyDrawsModeRow);
-      expect(legacy[i].modeRowOnScreen).toBe(press.legacyDrawsModeRow);
-      expect(view[i].modeRowDrawn).toBe(false);
-      expect(view[i].modeRowOnScreen).toBe(false);
-      // and everywhere else the two agree
-      if (!press.legacyDrawsModeRow)
-        expect(view[i].modeRowOnScreen).toBe(legacy[i].modeRowOnScreen);
+      // each Export press hands over exactly once; the written-out values hold for the oracle (so two empty runs cannot agree) and the new view equals it, strictly
+      expect(legacy.map((played) => played.calls)).toEqual(scenario.presses.map((_, i) => i + 1));
+      expect(view.map((played) => played.calls)).toEqual(scenario.presses.map((_, i) => i + 1));
+      expect(legacy.map((played) => played.sent)).toStrictEqual(
+        scenario.presses.map((press) => press.sent),
+      );
+      expect(view.map((played) => played.sent)).toStrictEqual(legacy.map((played) => played.sent));
+      for (const played of view) expect(Object.keys(played.sent).sort()).toEqual(KEYS);
+
+      scenario.presses.forEach((press, i) => {
+        // the one intended difference: 0.28.0 says it showed its Mode row where it drew it; the new view never draws it and says so
+        expect(legacy[i].modeRowDrawn).toBe(press.legacyDrawsModeRow);
+        expect(legacy[i].modeRowOnScreen).toBe(press.legacyDrawsModeRow);
+        expect(view[i].modeRowDrawn).toBe(false);
+        expect(view[i].modeRowOnScreen).toBe(false);
+        // and everywhere else the two agree
+        if (!press.legacyDrawsModeRow)
+          expect(view[i].modeRowOnScreen).toBe(legacy[i].modeRowOnScreen);
+      });
     });
   });
 });
@@ -517,20 +539,29 @@ describe("the one intended difference: the old Mode row", () => {
     expect(drawn.length).toBeGreaterThanOrEqual(2);
   });
 
-  it.each(drawn)(
-    "is drawn by 0.28.0 and never by the new view, which still sends what 0.28.0 sends: $name",
-    async (scenario) => {
-      const legacy = await play("legacy", scenario);
-      expect(screen.getByRole("radio", { name: "Fast" })).toBeChecked();
-      expect(screen.getByRole("radio", { name: "Full quality" })).not.toBeChecked();
-      const view = await play("view", scenario);
-      expect(screen.queryByRole("radiogroup", { name: "export mode", hidden: true })).toBeNull();
-      expect(screen.queryByRole("radio", { name: "Fast", hidden: true })).toBeNull();
-      expect(screen.queryByRole("radio", { name: "Full quality", hidden: true })).toBeNull();
-      expect(legacy[0].modeRowOnScreen).toBe(true);
-      expect(view[0].modeRowOnScreen).toBe(false);
-      expect(view[0].sent).toStrictEqual(legacy[0].sent);
-      expect(view[0].sent.mode).toBeNull();
-    },
-  );
+  describe.each(VIEW_STATES)("the new view, %s", (state) => {
+    it.each(drawn)(
+      "is drawn by 0.28.0 and never by the new view, which still sends what 0.28.0 sends: $name",
+      async (scenario) => {
+        const legacy = await play("legacy", scenario);
+        expect(screen.getByRole("radio", { name: "Fast" })).toBeChecked();
+        expect(screen.getByRole("radio", { name: "Full quality" })).not.toBeChecked();
+        const view = await play("view", scenario, state);
+        expect(screen.queryByRole("radiogroup", { name: "export mode", hidden: true })).toBeNull();
+        expect(screen.queryByRole("radio", { name: "Full quality", hidden: true })).toBeNull();
+        if (state === "no row") {
+          expect(screen.queryByRole("radio", { name: "Fast", hidden: true })).toBeNull();
+        } else {
+          // the radio named Fast is the choice row's: it is the person's pick and it is not the old Mode row's, which started on Fast
+          const group = screen.getByRole("radiogroup", { name: "export choice" });
+          expect(within(group).getByRole("radio", { name: "Quality" })).toBeChecked();
+          expect(within(group).getByRole("radio", { name: "Fast" })).not.toBeChecked();
+        }
+        expect(legacy[0].modeRowOnScreen).toBe(true);
+        expect(view[0].modeRowOnScreen).toBe(false);
+        expect(view[0].sent).toStrictEqual(legacy[0].sent);
+        expect(view[0].sent.mode).toBeNull();
+      },
+    );
+  });
 });

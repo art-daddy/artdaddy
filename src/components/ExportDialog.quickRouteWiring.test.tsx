@@ -72,6 +72,7 @@ const decision = (): ExportEncoderDecision => ({
 
 beforeEach(() => {
   stand.mounted = 0;
+  stand.sent = { resolution: "480p", quality: "low", fps: 24, mode: null };
   useExportJob.getState().reset();
   useExportJob.setState({ calibrations: [] });
   vi.mocked(decideExportEncoder).mockReset();
@@ -110,6 +111,29 @@ describe("the Export dialog hands the settings over to the new view", () => {
   it("tells the view there is no project when the dialog has none", () => {
     render(dialog({ workload: null }));
     expect(screen.getByText("stand-in sees no project")).toBeInTheDocument();
+  });
+
+  it("hands the host a Fast object the view made untouched: the very object, route and every flag in it, nothing added to it and nothing dropped", () => {
+    const fast: ExportSettings = {
+      resolution: "720p",
+      quality: "medium",
+      fps: null,
+      mode: null,
+      route: { route: "quick", explicit: { size: true, fps: false, quality: true } },
+    };
+    stand.sent = fast;
+    const onStart = vi.fn();
+    render(dialog({ onStart }));
+    fireEvent.click(screen.getByRole("button", { name: "stand-in start" }));
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onStart.mock.calls[0][0]).toBe(fast);
+    expect(onStart.mock.calls[0][0]).toStrictEqual({
+      resolution: "720p",
+      quality: "medium",
+      fps: null,
+      mode: null,
+      route: { route: "quick", explicit: { size: true, fps: false, quality: true } },
+    });
   });
 
   it("draws no 0.28.0 settings, no queue pane and no footer around the view; without quickRoute it draws all three and no view, though the switch is on", () => {

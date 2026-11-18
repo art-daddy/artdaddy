@@ -32,6 +32,10 @@ export { describeFigure } from "./exportChoiceWords";
 /** The two choices as a person reads them. Code maps them to the export's own route kinds (`routeOf`). */
 export type Choice = "quality" | "fast";
 
+/** Whether the dialog draws the Quality | Fast row and the line under the door. The one switch for it: false is the dialog without a choice (the settings view as it was before Fast was wired: Quality
+ *  alone, no line under the door), and nothing else in the dialog changes. */
+export const FAST_CHOICE_OFFERED: boolean = true;
+
 /** The three values the settings carry: the Resolution list's, the Frame rate list's (`null` is the project's own rate) and the Quality list's. */
 export interface Levers {
   resolution: ExportResolution;
@@ -110,6 +114,25 @@ export function sizeOptions(facts: ProjectFacts | null): ExportResolution[] {
   return facts === null ? ["source"] : quickSizeChoices(facts);
 }
 
+/** Fast's own rate where a dialog that offers Fast adds it to the Frame rate list (72 gives 18, 32 gives 16): the one derivation of the list's extra entry, for what is drawn and for what is kept. */
+function fastRateExtra(
+  facts: ProjectFacts | null,
+  fastOffered: boolean,
+  bundle: QuickBundle,
+): number | null {
+  return fastOffered ? ownLevers("fast", facts, bundle).fps : null;
+}
+
+/** The Frame rate list as the dialog draws it: the project's own rate and the lower rates of the ladder, and Fast's own rate too where the ladder has not got it (72 gives 18, 32 gives 16),
+ *  so that what Fast shows is always an entry of the list. Only a dialog that offers Fast passes `fastOffered`. */
+export function rateEntriesFor(
+  facts: ProjectFacts | null,
+  fastOffered: boolean,
+  bundle: QuickBundle = QUICK_BUNDLE,
+): { value: number | null; label: string }[] {
+  return rateEntries(facts, fastRateExtra(facts, fastOffered, bundle));
+}
+
 /** The Frame rate list: `null` (the project's own rate), then every rate of the ladder strictly below the project's, then `extra` where the ladder has not got it, highest first. Never a rate at or
  *  above the project's. `extra` is Fast's own rate (72 gives 18, 32 gives 16) and is passed only by a view that offers Fast; a view without it passes nothing. */
 export function rateOptions(
@@ -162,10 +185,16 @@ export function qualityEntries(): { value: ExportQuality; label: string }[] {
   return QUALITIES.map((value) => ({ value, label: QUALITY_WORDS[value] }));
 }
 
-/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or a number from 1 up to (not including) the project's rate, a quality that
- *  is not one of the three. With no readable project numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object
- *  where nothing was dropped (so a state that writes it back cannot loop). */
-export function clampOverrides(o: Overrides, facts: ProjectFacts | null): Overrides {
+/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or an entry of the Frame rate list as the dialog draws it (the ladder below the
+ *  project's rate, and Fast's own rate where `fastOffered`: `rateEntriesFor` has the same list), a quality that is not one of the three. A value the select cannot show is never sent. With no
+ *  readable project numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object where nothing was dropped (so a state that
+ *  writes it back cannot loop). */
+export function clampOverrides(
+  o: Overrides,
+  facts: ProjectFacts | null,
+  bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
+): Overrides {
   const kept: Overrides = {};
   let dropped = false;
   if (o.resolution !== undefined) {
@@ -173,14 +202,7 @@ export function clampOverrides(o: Overrides, facts: ProjectFacts | null): Overri
     else dropped = true;
   }
   if (o.fps !== undefined) {
-    if (
-      o.fps === null ||
-      (facts !== null &&
-        typeof o.fps === "number" &&
-        Number.isFinite(o.fps) &&
-        o.fps >= 1 &&
-        o.fps < facts.fps)
-    )
+    if (rateOptions(facts, fastRateExtra(facts, fastOffered, bundle)).includes(o.fps))
       kept.fps = o.fps;
     else dropped = true;
   }
@@ -197,9 +219,10 @@ export function leversShown(
   overrides: Overrides,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
 ): Levers {
   const own = ownLevers(choice, facts, bundle);
-  const kept = clampOverrides(overrides, facts);
+  const kept = clampOverrides(overrides, facts, bundle, fastOffered);
   return {
     resolution: kept.resolution ?? own.resolution,
     fps: kept.fps !== undefined ? kept.fps : own.fps,
@@ -271,16 +294,30 @@ export function payloadFor(
   return { ...base, mode: null, route: { route: "quick", explicit: explicitOf(overrides) } };
 }
 
-/** The line under the door: for the choice, not for the values (the page keeps it when a lever is changed). */
+/** The line under the door, from the values the dialog will send (`shown`), never from the choice: a pick of a size, a rate or a quality changes what it says. Each clause is written only where it is true of
+ *  those values and says nothing of the encoder (the chip or the light compression is decided when the export starts). Empty where the project cannot be read. */
 export function summaryFor(
-  choice: Choice,
+  shown: Levers,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
 ): string {
-  return summaryWords(choice, {
-    smallerSize: facts !== null && quickDefaultSize(facts, bundle) !== null,
-    maxFps: bundle.maxFps,
-    quality: choice === "quality" ? QUALITY_START : bundle.quality,
+  if (facts === null) return "";
+  const size = quickDefaultSize(facts, bundle);
+  // What the export delivers for the shown size and rate: the rate is the project's own where none is shown.
+  const delivered = quickSettings({
+    canvas: facts,
+    requested: { resolution: shown.resolution, fps: shown.fps ?? undefined },
+    explicit: { size: true, fps: true, quality: true },
+    bundle,
+  }).delivered;
+  return summaryWords({
+    projectSizeAndRate: shown.resolution === "source" && shown.fps === null,
+    oneSizeSmaller: size !== null && shown.resolution === size,
+    upToFps:
+      delivered !== null && facts.fps > bundle.maxFps && delivered.fps <= bundle.maxFps
+        ? bundle.maxFps
+        : null,
+    quality: shown.quality,
   });
 }
 
@@ -297,9 +334,10 @@ export function resolveChoice(
   overrides: Overrides,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
 ): Resolved {
-  const kept = clampOverrides(overrides, facts);
-  const shown = leversShown(choice, kept, facts, bundle);
+  const kept = clampOverrides(overrides, facts, bundle, fastOffered);
+  const shown = leversShown(choice, kept, facts, bundle, fastOffered);
   return {
     kept,
     shown,

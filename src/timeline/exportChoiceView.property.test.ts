@@ -12,6 +12,7 @@ import {
   ownLevers,
   payloadFor,
   rateEntries,
+  rateEntriesFor,
   rateOptions,
   resolveChoice,
   sizeEntries,
@@ -82,18 +83,31 @@ const ownOf = (
   bundle: QuickBundle = QUICK_BUNDLE,
 ): Levers => (choice === "quality" ? QUALITY_OWN : fastOwn(f, bundle));
 
-/** What a pick must hold to survive: a size in the list, a rate that is null or from 1 up to and excluding the project's, a quality of the three. */
+/** What a pick must hold to survive: a size in the list, a rate that is null or an entry of the Frame rate list (a ladder rate below the project's, or Fast's own rate), a quality of the three. */
 const sizeInRange = (r: ExportResolution, f: ProjectFacts | null): boolean =>
   r === "source" || (f !== null && isPreset(r) && PRESET_SHORT_SIDE[r] < shortSideOf(f));
-const rateInRange = (v: unknown, f: ProjectFacts | null): boolean =>
-  v === null || (f !== null && typeof v === "number" && Number.isFinite(v) && v >= 1 && v < f.fps);
+const rateInList = (
+  v: unknown,
+  f: ProjectFacts | null,
+  bundle: QuickBundle,
+  fastOffered: boolean,
+): boolean => {
+  if (v === null) return true;
+  if (f === null || typeof v !== "number" || !(v >= 1 && v < f.fps)) return false;
+  return RATE_LADDER.includes(v) || (fastOffered && v === fastOwn(f, bundle).fps);
+};
 const qualityInRange = (q: unknown): boolean => q === "high" || q === "medium" || q === "low";
 
-/** The picks that survive the clamp, worked out from the rules above. */
-const keptOracle = (o: Overrides, f: ProjectFacts | null): Overrides => {
+/** The picks that survive the clamp, worked out from the rules above (`fastOffered`: the dialog draws Fast's own rate in the Frame rate list). */
+const keptOracle = (
+  o: Overrides,
+  f: ProjectFacts | null,
+  bundle = QUICK_BUNDLE,
+  fastOffered = true,
+): Overrides => {
   const kept: Overrides = {};
   if (o.resolution !== undefined && sizeInRange(o.resolution, f)) kept.resolution = o.resolution;
-  if (o.fps !== undefined && rateInRange(o.fps, f)) kept.fps = o.fps;
+  if (o.fps !== undefined && rateInList(o.fps, f, bundle, fastOffered)) kept.fps = o.fps;
   if (o.quality !== undefined && qualityInRange(o.quality)) kept.quality = o.quality;
   return kept;
 };
@@ -358,10 +372,10 @@ describe("T15 (d) clampOverrides", () => {
     );
   });
 
-  it("never keeps a size outside sizeOptions, a rate at or above the project's, or a number that is not finite", () => {
+  it("never keeps a size outside sizeOptions, a rate that is not an entry of the Frame rate list, or a number that is not finite", () => {
     fc.assert(
-      fc.property(maybeProject, overridesOrGarbage, (f, o) => {
-        const result = clampOverrides(o, f);
+      fc.property(maybeProject, overridesOrGarbage, fc.boolean(), (f, o, fastOffered) => {
+        const result = clampOverrides(o, f, undefined, fastOffered);
         if (result.resolution !== undefined) expect(sizeOptions(f)).toContain(result.resolution);
         if (typeof result.fps === "number") {
           expect(Number.isFinite(result.fps)).toBe(true);
@@ -369,8 +383,28 @@ describe("T15 (d) clampOverrides", () => {
           expect(result.fps).toBeGreaterThanOrEqual(1);
           expect(result.fps).toBeLessThan((f as ProjectFacts).fps);
         }
+        // what is kept is what the select can show: an entry of the list the dialog draws (the one `rateEntriesFor` makes for the same `fastOffered`)
+        if (result.fps !== undefined)
+          expect(rateEntriesFor(f, fastOffered).map((entry) => entry.value)).toContain(result.fps);
         if (result.quality !== undefined)
           expect(["high", "medium", "low"]).toContain(result.quality);
+      }),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("keeps exactly the picks of the list the dialog draws: with Fast offered the list has Fast's own rate, without it the ladder alone", () => {
+    fc.assert(
+      fc.property(maybeProject, overridesOrGarbage, anyBundle, (f, o, b) => {
+        expect(clampOverrides(o, f, b, true)).toEqual(keptOracle(o, f, b, true));
+        expect(clampOverrides(o, f, b, false)).toEqual(keptOracle(o, f, b, false));
+        // and the views of one set of facts agree with the clamp, whichever way the dialog is built
+        for (const choice of ["quality", "fast"] as const)
+          for (const fastOffered of [true, false]) {
+            const resolved = resolveChoice(choice, o, f, b, fastOffered);
+            expect(resolved.kept).toEqual(keptOracle(o, f, b, fastOffered));
+            expect(leversShown(choice, o, f, b, fastOffered)).toEqual(resolved.shown);
+          }
       }),
       { numRuns: RUNS },
     );
@@ -393,7 +427,7 @@ describe("T15 (d) clampOverrides", () => {
 });
 
 describe("T15 (e) leversShown: never above the project, and the choice's own where nothing was picked", () => {
-  it("shows a size in the list and a rate that is Same as project or below the project's", () => {
+  it("shows a size in the list and a rate that is Same as project or an entry of the Frame rate list", () => {
     fc.assert(
       fc.property(choice, maybeProject, overridesOrGarbage, anyBundle, (c, f, o, b) => {
         const shown = leversShown(c, o, f, b);
@@ -402,6 +436,8 @@ describe("T15 (e) leversShown: never above the project, and the choice's own whe
           expect(f).not.toBeNull();
           expect(shown.fps).toBeLessThan((f as ProjectFacts).fps);
         }
+        // the select shows what is sent: the shown rate is always one of its entries
+        expect(rateOptions(f, ownLevers("fast", f, b).fps)).toContain(shown.fps);
         expect(["high", "medium", "low"]).toContain(shown.quality);
       }),
       { numRuns: RUNS },
@@ -412,7 +448,7 @@ describe("T15 (e) leversShown: never above the project, and the choice's own whe
     fc.assert(
       fc.property(choice, maybeProject, overridesOrGarbage, anyBundle, (c, f, o, b) => {
         const shown = leversShown(c, o, f, b);
-        const kept = keptOracle(o, f);
+        const kept = keptOracle(o, f, b);
         const own = ownOf(c, f, b);
         expect(shown.resolution).toBe(kept.resolution ?? own.resolution);
         expect(shown.fps).toBe(kept.fps !== undefined ? kept.fps : own.fps);
@@ -524,26 +560,70 @@ describe("T15 (g) payloadFor", () => {
   });
 });
 
-describe("T15 (h) summaryFor is built from the bundle", () => {
-  it("writes the bundle's cap, its quality and whether its ladder has a size below the project's", () => {
+describe("T15 (h) summaryFor is built from the shown values, the bundle's cap and ladder, and never the bundle's quality", () => {
+  /** The rung the bundle's ladder gives for a project: the largest preset of the ladder whose short side is below the project's, else none. */
+  const rungOf = (f: ProjectFacts, b: QuickBundle): SizePreset | null =>
+    [...b.ladder]
+      .filter((rung) => PRESET_SHORT_SIDE[rung] < shortSideOf(f))
+      .sort((x, y) => PRESET_SHORT_SIDE[y] - PRESET_SHORT_SIDE[x])[0] ?? null;
+
+  it("writes One size smaller where the shown size is the bundle's rung below the project's, and nowhere else", () => {
     fc.assert(
-      fc.property(maybeProject, anyBundle, (f, b) => {
-        const smaller =
-          f !== null && b.ladder.some((rung) => PRESET_SHORT_SIDE[rung] < shortSideOf(f));
-        expect(summaryFor("fast", f, b)).toBe(
-          `${smaller ? "One size smaller, up to" : "Up to"} ${b.maxFps} frames a second, ${QUALITY_NAME[b.quality]} quality, light compression.`,
+      fc.property(project, anyBundle, shownLevers, (f, b, shown) => {
+        const rung = rungOf(f, b);
+        expect(summaryFor(shown, f, b).includes("One size smaller")).toBe(
+          rung !== null && shown.resolution === rung,
         );
-        expect(summaryFor("quality", f, b)).toBe("Project size and frame rate, Medium quality.");
       }),
       { numRuns: RUNS },
     );
   });
 
-  it("gives another line for another bundle: another cap or another quality is another sentence", () => {
+  it("writes the bundle's cap, only where the project runs faster than it and the shown rate is no faster", () => {
     fc.assert(
-      fc.property(maybeProject, randomBundle, randomBundle, (f, one, other) => {
-        if (one.maxFps === other.maxFps && one.quality === other.quality) return;
-        expect(summaryFor("fast", f, one)).not.toBe(summaryFor("fast", f, other));
+      fc.property(project, anyBundle, shownLevers, (f, b, shown) => {
+        const delivered = shown.fps ?? Math.trunc(f.fps);
+        const named = new RegExp(`[Uu]p to ${b.maxFps} frames a second`).test(
+          summaryFor(shown, f, b),
+        );
+        expect(named).toBe(f.fps > b.maxFps && delivered <= b.maxFps);
+      }),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("gives another line for another cap where the project runs faster than both and the shown rate is under both", () => {
+    fc.assert(
+      fc.property(
+        project,
+        fc.integer({ min: 31, max: 120 }),
+        fc.integer({ min: 5, max: 29 }),
+        fc.integer({ min: 5, max: 29 }),
+        shownLevers,
+        (f0, fps, one, other, shown) => {
+          fc.pre(one !== other);
+          const f = { ...f0, fps };
+          const low = { ...shown, fps: 5 };
+          expect(summaryFor(low, f, { ...QUICK_BUNDLE, maxFps: one })).not.toBe(
+            summaryFor(low, f, { ...QUICK_BUNDLE, maxFps: other }),
+          );
+        },
+      ),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("ends with the shown quality's name, whatever quality the bundle starts Fast on, and is empty for no project", () => {
+    fc.assert(
+      fc.property(maybeProject, anyBundle, shownLevers, (f, b, shown) => {
+        const line = summaryFor(shown, f, b);
+        if (f === null) {
+          expect(line).toBe("");
+          return;
+        }
+        expect(line.endsWith(`${QUALITY_NAME[shown.quality]} quality.`)).toBe(true);
+        for (const name of Object.values(QUALITY_NAME))
+          if (name !== QUALITY_NAME[shown.quality]) expect(line).not.toContain(`${name} quality`);
       }),
       { numRuns: RUNS },
     );

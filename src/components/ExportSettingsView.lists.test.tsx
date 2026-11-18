@@ -1,5 +1,5 @@
 // The lists the Quality / Fast view's settings view offers, and which rows it draws at all, read the way a person reads them: the names of the options in the Resolution select (in the normal view) and in the
-// Frame rate select (behind the door), for every project of the spec's table; the faster-setting line behind the door; and everything the view must never draw. The expected words are written out here (an
+// Frame rate select (behind the door), for every project of the spec's table; the light-compression line behind the door; and everything the view must never draw. The expected words are written out here (an
 // oracle), never read from the words file or computed by the model. The only boundaries mocked are the ones the dialog tests mock: the app's look at the encoder and the PC the Graphics chip row asks.
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -10,6 +10,7 @@ import { processorName, resolveExportResources, runCapabilityProbe } from "../pl
 import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
 import { amd, harness } from "../test/chipHarness";
+import { retiredIn } from "../test/retiredNames";
 import { __resetChipTests } from "../timeline/chipTest";
 import { __resetExportAsk } from "../timeline/exportAsk";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
@@ -104,8 +105,17 @@ const workloadOf = (width: number, height: number, fps: number): RenderWorkload 
 
 const settle = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+/** Whether the view under test draws the Quality | Fast row: set for each of the two states the tests below run in. */
+let withRow = true;
 const mount = (workload: RenderWorkload | null = null) =>
-  render(<ExportSettingsView workload={workload} onCancel={vi.fn()} onStart={vi.fn()} />);
+  render(
+    <ExportSettingsView
+      workload={workload}
+      onCancel={vi.fn()}
+      onStart={vi.fn()}
+      fastChoice={withRow}
+    />,
+  );
 
 const resolutionBox = () => screen.queryByRole("combobox", { name: "resolution" });
 const doorButton = () => screen.getByRole("button", { name: "Advanced settings" });
@@ -219,268 +229,301 @@ const ROWS: Row[] = [
   },
 ];
 
-describe("the lists and the rows the settings view draws, for every project", () => {
-  describe.each(["the open project's canvas", "the dialog's snapshot of it"] as const)(
-    "read from %s",
-    (source) => {
-      it.each(ROWS)("$name", async (row) => {
-        if (source === "the open project's canvas") {
-          setCanvas(row.width, row.height, row.fps);
-          mount(null);
-        } else {
-          mount(workloadOf(row.width, row.height, row.fps));
-        }
-        await settle();
-        // the Resolution row is in the normal view
-        const sizes = resolutionBox();
-        if (row.sizes === null) expect(sizes).toBeNull();
-        else {
-          expect(sizes).toBeVisible();
-          expect(optionNames(sizes!)).toEqual(row.sizes);
-          expect(sizes).toHaveValue("source");
-        }
-        // the Frame rate row is behind the door: nothing of it can be reached until the door is open
-        expect(rateBox()).toBeNull();
-        await userEvent.setup().click(doorButton());
-        const rates = rateBox();
-        if (row.rates === null) expect(rates).toBeNull();
-        else {
-          expect(rates).toBeVisible();
-          expect(optionNames(rates!)).toEqual(row.rates);
-          expect(rates).toHaveValue("");
-        }
-        // Quality is always offered, by names only, on Medium
-        const quality = screen.getByRole("combobox", { name: "quality" });
-        expect(optionNames(quality)).toEqual(["High", "Medium", "Low"]);
-        expect(quality).toHaveValue("medium");
-      });
-    },
-  );
+const STATES = [
+  { state: "without the choice row (fastChoice false)", row: false },
+  { state: "with the choice row (the default)", row: true },
+] as const;
 
-  it("draws neither the Resolution row nor the Frame rate row when there is no project", async () => {
-    mount(null);
-    expect(resolutionBox()).toBeNull();
-    await userEvent.setup().click(doorButton());
-    expect(rateBox()).toBeNull();
-    expect(screen.getByRole("combobox", { name: "quality" })).toHaveValue("medium");
-    expect(screen.getAllByRole("combobox")).toHaveLength(1);
+describe.each(STATES)("$state", ({ row }) => {
+  beforeEach(() => {
+    withRow = row;
   });
 
-  it("never offers a size at or above the project's short side, whatever the shape", () => {
-    // a vertical 1080 x 1920 project has a short side of 1080: 720p and 480p only
-    setCanvas(1080, 1920, 30);
-    const vertical = mount(null);
-    expect(optionNames(resolutionBox()!)).not.toContain("1080p");
-    expect(optionNames(resolutionBox()!)).not.toContain("1440p");
-    vertical.unmount();
-    // a horizontal 1920 x 1080 one has the same short side: the same two, not the sizes below its width
-    setCanvas(1920, 1080, 30);
-    mount(null);
-    expect(optionNames(resolutionBox()!)).toEqual([
-      "Same as project (1920 x 1080)",
-      "720p",
-      "480p",
-    ]);
-  });
-
-  it("follows the project as it is now, not the snapshot the dialog took when it opened", () => {
-    setCanvas(1280, 720, 25);
-    mount(workloadOf(1920, 1080, 30));
-    expect(optionNames(resolutionBox()!)).toEqual(["Same as project (1280 x 720)", "480p"]);
-  });
-
-  it("follows the project when it changes while the view is open", async () => {
-    setCanvas(1920, 1080, 30);
-    mount(null);
-    expect(optionNames(resolutionBox()!)).toEqual([
-      "Same as project (1920 x 1080)",
-      "720p",
-      "480p",
-    ]);
-    await userEvent.setup().click(doorButton());
-    expect(optionNames(rateBox()!)).toEqual(["Same as project (30 fps)", "25 fps", "24 fps"]);
-    act(() => setCanvas(854, 480, 24));
-    expect(resolutionBox()).toBeNull();
-    expect(rateBox()).toBeNull();
-    act(() => setCanvas(3840, 2160, 60));
-    expect(optionNames(resolutionBox()!)).toEqual([
-      "Same as project (3840 x 2160)",
-      "1440p",
-      "1080p",
-      "720p",
-      "480p",
-    ]);
-    expect(optionNames(rateBox()!)).toEqual([
-      "Same as project (60 fps)",
-      "50 fps",
-      "30 fps",
-      "25 fps",
-      "24 fps",
-    ]);
-  });
-});
-
-const FASTER =
-  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
-const PROJECT = workloadOf(1080, 1920, 30);
-
-describe("the faster-setting line", () => {
-  const withLook = (answer: Partial<ExportEncoderDecision>) =>
-    vi.mocked(decideExportEncoder).mockImplementation(async () => decision(answer));
-
-  it("is behind the door, in 0.28.0's words, where the app will use the faster setting and no Mode row would be drawn", async () => {
-    withLook({ faster: true });
-    mount(PROJECT);
-    await settle();
-    // in the page but not on screen: the region is hidden while the door is closed
-    expect(screen.getByText(FASTER)).not.toBeVisible();
-    await userEvent.setup().click(doorButton());
-    expect(screen.getByText(FASTER)).toBeVisible();
-    expect(screen.getAllByText(FASTER)).toHaveLength(1);
-  });
-
-  it.each([
-    ["an answer without it", () => withLook({})],
-    [
-      "an answer that wants a Mode row (which this view never draws)",
-      () => withLook({ faster: true, showRow: true }),
-    ],
-    [
-      "an answer that has not come",
-      () => vi.mocked(decideExportEncoder).mockImplementation(() => new Promise(() => undefined)),
-    ],
-    [
-      "a look that failed",
-      () =>
-        vi
-          .mocked(decideExportEncoder)
-          .mockImplementation(async () => Promise.reject(new Error("no"))),
-    ],
-  ])("is not drawn for %s, door open or closed", async (_name, arrange) => {
-    arrange();
-    mount(PROJECT);
-    await settle();
-    expect(screen.queryByText(FASTER)).toBeNull();
-    await userEvent.setup().click(doorButton());
-    expect(screen.queryByText(FASTER)).toBeNull();
-  });
-
-  it("is not drawn, and the app is not asked, with no project", async () => {
-    withLook({ faster: true });
-    mount(null);
-    await settle();
-    await userEvent.setup().click(doorButton());
-    expect(screen.queryByText(FASTER)).toBeNull();
-    expect(decideExportEncoder).not.toHaveBeenCalled();
-  });
-
-  it("goes with the answer: gone again once the app no longer says it", async () => {
-    const answers: Partial<ExportEncoderDecision>[] = [{ faster: true }, {}];
-    vi.mocked(decideExportEncoder).mockImplementation(async () => decision(answers.shift() ?? {}));
-    mount(PROJECT);
-    await settle();
-    const user = userEvent.setup();
-    await user.click(doorButton());
-    expect(screen.getByText(FASTER)).toBeVisible();
-    // a change the app is asked about again (the quality) brings the second answer
-    await user.selectOptions(screen.getByRole("combobox", { name: "quality" }), "High");
-    await settle();
-    expect(screen.queryByText(FASTER)).toBeNull();
-  });
-});
-
-describe("what the settings view never draws", () => {
-  // Nothing of the 0.28.0 Mode row, estimate, "Never upscales" note or quality hints, nothing of the Fast choice and no question, in the whole page (hidden or not), door closed and open.
-  const FORBIDDEN_TEXT: [string, RegExp][] = [
-    ["Expected:", /Expected:/],
-    ["a rough guess", /rough guess/i],
-    ["Never upscales", /Never upscales/i],
-    ["Full quality", /Full quality/],
-    ["the word Fast", /\bFast\b/],
-    ["would take", /would take/i],
-    ["Near-lossless", /Near-lossless/],
-    ["The usual delivery trade-off", /The usual delivery trade-off/],
-    ["Small file, visible compression", /Small file, visible compression/],
-    ["a time or a size (min, MB)", /\d\s*(min|MB)\b/i],
-    ["the word example", /example/i],
-    ["the question", /Are you sure\?/],
-  ];
-  const expectNothingOfIt = () => {
-    for (const [name, words] of FORBIDDEN_TEXT)
-      expect(document.body.textContent, name).not.toMatch(words);
-    expect(screen.queryByLabelText("export estimate")).toBeNull();
-    expect(screen.queryByTestId("estimate-much-longer")).toBeNull();
-    for (const group of ["export mode", "export choice"])
-      expect(screen.queryByRole("radiogroup", { name: group, hidden: true }), group).toBeNull();
-    for (const name of ["Quality", "Fast", "Full quality"])
-      expect(screen.queryByRole("radio", { name, hidden: true }), name).toBeNull();
-    expect(screen.queryByRole("alertdialog", { hidden: true })).toBeNull();
-    expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
-  };
-
-  it.each([
-    ["no project", () => mount(null)],
-    ["a project", () => mount(PROJECT)],
-    ["a 4K 60 project", () => mount(workloadOf(3840, 2160, 60))],
-    [
-      "an answer that wants the Mode row, with no chip on the PC",
-      () => {
-        vi.mocked(decideExportEncoder).mockImplementation(async () =>
-          decision({
-            showRow: true,
-            defaultMode: "fast",
-            reason: "over_minute",
-            fullSeconds: 720,
-            fastSeconds: 240,
-          }),
-        );
-        return mount(PROJECT);
+  describe("the lists and the rows the settings view draws, for every project", () => {
+    describe.each(["the open project's canvas", "the dialog's snapshot of it"] as const)(
+      "read from %s",
+      (source) => {
+        it.each(ROWS)("$name", async (row) => {
+          if (source === "the open project's canvas") {
+            setCanvas(row.width, row.height, row.fps);
+            mount(null);
+          } else {
+            mount(workloadOf(row.width, row.height, row.fps));
+          }
+          await settle();
+          // the Resolution row is in the normal view
+          const sizes = resolutionBox();
+          if (row.sizes === null) expect(sizes).toBeNull();
+          else {
+            expect(sizes).toBeVisible();
+            expect(optionNames(sizes!)).toEqual(row.sizes);
+            expect(sizes).toHaveValue("source");
+          }
+          // the Frame rate row is behind the door: nothing of it can be reached until the door is open
+          expect(rateBox()).toBeNull();
+          await userEvent.setup().click(doorButton());
+          const rates = rateBox();
+          if (row.rates === null) expect(rates).toBeNull();
+          else {
+            expect(rates).toBeVisible();
+            expect(optionNames(rates!)).toEqual(row.rates);
+            expect(rates).toHaveValue("");
+          }
+          // Quality is always offered, by names only, on Medium
+          const quality = screen.getByRole("combobox", { name: "quality" });
+          expect(optionNames(quality)).toEqual(["High", "Medium", "Low"]);
+          expect(quality).toHaveValue("medium");
+        });
       },
-    ],
-    [
-      "an answer for the faster setting",
-      () => {
-        vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true }));
-        return mount(PROJECT);
-      },
-    ],
-  ])("is not in the page for %s, door closed or open", async (_name, show) => {
-    show();
-    await settle();
-    expectNothingOfIt();
-    await userEvent.setup().click(doorButton());
-    await settle();
-    expectNothingOfIt();
+    );
+
+    it("draws neither the Resolution row nor the Frame rate row when there is no project", async () => {
+      mount(null);
+      expect(resolutionBox()).toBeNull();
+      await userEvent.setup().click(doorButton());
+      expect(rateBox()).toBeNull();
+      expect(screen.getByRole("combobox", { name: "quality" })).toHaveValue("medium");
+      expect(screen.getAllByRole("combobox")).toHaveLength(1);
+    });
+
+    it("never offers a size at or above the project's short side, whatever the shape", () => {
+      // a vertical 1080 x 1920 project has a short side of 1080: 720p and 480p only
+      setCanvas(1080, 1920, 30);
+      const vertical = mount(null);
+      expect(optionNames(resolutionBox()!)).not.toContain("1080p");
+      expect(optionNames(resolutionBox()!)).not.toContain("1440p");
+      vertical.unmount();
+      // a horizontal 1920 x 1080 one has the same short side: the same two, not the sizes below its width
+      setCanvas(1920, 1080, 30);
+      mount(null);
+      expect(optionNames(resolutionBox()!)).toEqual([
+        "Same as project (1920 x 1080)",
+        "720p",
+        "480p",
+      ]);
+    });
+
+    it("follows the project as it is now, not the snapshot the dialog took when it opened", () => {
+      setCanvas(1280, 720, 25);
+      mount(workloadOf(1920, 1080, 30));
+      expect(optionNames(resolutionBox()!)).toEqual(["Same as project (1280 x 720)", "480p"]);
+    });
+
+    it("follows the project when it changes while the view is open", async () => {
+      setCanvas(1920, 1080, 30);
+      mount(null);
+      expect(optionNames(resolutionBox()!)).toEqual([
+        "Same as project (1920 x 1080)",
+        "720p",
+        "480p",
+      ]);
+      await userEvent.setup().click(doorButton());
+      expect(optionNames(rateBox()!)).toEqual(["Same as project (30 fps)", "25 fps", "24 fps"]);
+      act(() => setCanvas(854, 480, 24));
+      expect(resolutionBox()).toBeNull();
+      expect(rateBox()).toBeNull();
+      act(() => setCanvas(3840, 2160, 60));
+      expect(optionNames(resolutionBox()!)).toEqual([
+        "Same as project (3840 x 2160)",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+      ]);
+      expect(optionNames(rateBox()!)).toEqual([
+        "Same as project (60 fps)",
+        "50 fps",
+        "30 fps",
+        "25 fps",
+        "24 fps",
+      ]);
+    });
   });
 
-  it("is not in the page where a chip has proven itself and the app wants the Mode row, with the chip row drawn", async () => {
-    pcWith([amd]);
-    vi.mocked(decideExportEncoder).mockImplementation(async () =>
-      decision({
-        showRow: true,
-        defaultMode: "fast",
-        reason: "over_minute",
-        fullSeconds: 720,
-        fastSeconds: 240,
-      }),
-    );
-    mount(PROJECT);
-    await userEvent.setup().click(doorButton());
-    expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
-    await settle();
-    expectNothingOfIt();
+  const LIGHT =
+    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+  const PROJECT = workloadOf(1080, 1920, 30);
+
+  describe("the light-compression line", () => {
+    const withLook = (answer: Partial<ExportEncoderDecision>) =>
+      vi.mocked(decideExportEncoder).mockImplementation(async () => decision(answer));
+
+    it("is behind the door, in the dialog's own words, where the app will use the lighter setting and no Mode row would be drawn", async () => {
+      withLook({ faster: true });
+      mount(PROJECT);
+      await settle();
+      // in the page but not on screen: the region is hidden while the door is closed
+      expect(screen.getByText(LIGHT)).not.toBeVisible();
+      await userEvent.setup().click(doorButton());
+      expect(screen.getByText(LIGHT)).toBeVisible();
+      expect(screen.getAllByText(LIGHT)).toHaveLength(1);
+    });
+
+    it.each([
+      ["an answer without it", () => withLook({})],
+      [
+        "an answer that wants a Mode row (which this view never draws)",
+        () => withLook({ faster: true, showRow: true }),
+      ],
+      [
+        "an answer that has not come",
+        () => vi.mocked(decideExportEncoder).mockImplementation(() => new Promise(() => undefined)),
+      ],
+      [
+        "a look that failed",
+        () =>
+          vi
+            .mocked(decideExportEncoder)
+            .mockImplementation(async () => Promise.reject(new Error("no"))),
+      ],
+    ])("is not drawn for %s, door open or closed", async (_name, arrange) => {
+      arrange();
+      mount(PROJECT);
+      await settle();
+      expect(screen.queryByText(LIGHT)).toBeNull();
+      await userEvent.setup().click(doorButton());
+      expect(screen.queryByText(LIGHT)).toBeNull();
+    });
+
+    it("is not drawn, and the app is not asked, with no project", async () => {
+      withLook({ faster: true });
+      mount(null);
+      await settle();
+      await userEvent.setup().click(doorButton());
+      expect(screen.queryByText(LIGHT)).toBeNull();
+      expect(decideExportEncoder).not.toHaveBeenCalled();
+    });
+
+    it("goes with the answer: gone again once the app no longer says it", async () => {
+      const answers: Partial<ExportEncoderDecision>[] = [{ faster: true }, {}];
+      vi.mocked(decideExportEncoder).mockImplementation(async () =>
+        decision(answers.shift() ?? {}),
+      );
+      mount(PROJECT);
+      await settle();
+      const user = userEvent.setup();
+      await user.click(doorButton());
+      expect(screen.getByText(LIGHT)).toBeVisible();
+      // a change the app is asked about again (the quality) brings the second answer
+      await user.selectOptions(screen.getByRole("combobox", { name: "quality" }), "High");
+      await settle();
+      expect(screen.queryByText(LIGHT)).toBeNull();
+    });
   });
 
-  it("holds exactly the words the normal view is allowed with the door closed: the row, the door and the two buttons", async () => {
-    setCanvas(1080, 1920, 30);
-    const view = mount(null);
-    // the region behind the door is in the page but hidden; what a person sees is everything outside it
-    const region = screen.getByTestId("export-advanced");
-    expect(region).not.toBeVisible();
-    const seen = view.container.cloneNode(true) as HTMLElement;
-    seen.querySelector("[data-testid='export-advanced']")!.remove();
-    expect(seen.textContent).toBe(
-      "ResolutionSame as project (1080 x 1920)720p480pAdvanced settingsCancelExport",
-    );
+  describe("what the settings view never draws", () => {
+    // Nothing of the 0.28.0 Mode row, estimate, "Never upscales" note or quality hints, no figure, no tooltip and no question, no retired name, in the whole page (hidden or not), door closed and open. With the
+    // choice row the group "export choice" and its radios "Quality" and "Fast" are the one thing allowed that the Quality-only screen has not.
+    const FORBIDDEN_TEXT: [string, RegExp][] = [
+      ["Expected:", /Expected:/],
+      ["a rough guess", /rough guess/i],
+      ["Never upscales", /Never upscales/i],
+      ["Full quality", /Full quality/],
+      ["would take", /would take/i],
+      ["Near-lossless", /Near-lossless/],
+      ["The usual delivery trade-off", /The usual delivery trade-off/],
+      ["Small file, visible compression", /Small file, visible compression/],
+      ["a time or a size (min, MB)", /\d\s*(min|MB)\b/i],
+      ["the word example", /example/i],
+      ["the question", /Are you sure\?/],
+      ["a figure like (4x)", /\(\s*\d+(\.\d+)?\s*x\s*\)/],
+      ["a speed-up", /speed-up|times faster/i],
+    ];
+    const expectNothingOfIt = () => {
+      const page = document.body.textContent ?? "";
+      for (const [name, words] of FORBIDDEN_TEXT) expect(page, name).not.toMatch(words);
+      // read line by line, so that a name cannot hide by standing next to another word
+      const lines = (node: Node): string[] =>
+        node.nodeType === 3
+          ? [node.textContent ?? ""]
+          : Array.from(node.childNodes).flatMap((child) => lines(child));
+      expect(retiredIn(lines(document.body).join("\n")), "a retired name").toEqual([]);
+      expect(screen.queryByLabelText("export estimate")).toBeNull();
+      expect(screen.queryByTestId("estimate-much-longer")).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "export mode", hidden: true })).toBeNull();
+      expect(screen.queryByRole("radio", { name: "Full quality", hidden: true })).toBeNull();
+      expect(screen.queryByRole("alertdialog", { hidden: true })).toBeNull();
+      expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
+      const group = screen.queryByRole("radiogroup", { name: "export choice", hidden: true });
+      if (withRow) {
+        expect(group).not.toBeNull();
+        expect(within(group!).getAllByRole("radio", { hidden: true })).toHaveLength(2);
+        // the word Fast is the row's alone
+        const rest = document.body.cloneNode(true) as HTMLElement;
+        rest.querySelector("[data-testid='export-choice']")!.remove();
+        expect(rest.textContent).not.toMatch(/\bFast\b/);
+      } else {
+        expect(group).toBeNull();
+        expect(page).not.toMatch(/\bFast\b/);
+        for (const name of ["Quality", "Fast"])
+          expect(screen.queryByRole("radio", { name, hidden: true }), name).toBeNull();
+      }
+    };
+
+    it.each([
+      ["no project", () => mount(null)],
+      ["a project", () => mount(PROJECT)],
+      ["a 4K 60 project", () => mount(workloadOf(3840, 2160, 60))],
+      [
+        "an answer that wants the Mode row, with no chip on the PC",
+        () => {
+          vi.mocked(decideExportEncoder).mockImplementation(async () =>
+            decision({
+              showRow: true,
+              defaultMode: "fast",
+              reason: "over_minute",
+              fullSeconds: 720,
+              fastSeconds: 240,
+            }),
+          );
+          return mount(PROJECT);
+        },
+      ],
+      [
+        "an answer for the lighter setting",
+        () => {
+          vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true }));
+          return mount(PROJECT);
+        },
+      ],
+    ])("is not in the page for %s, door closed or open", async (_name, show) => {
+      show();
+      await settle();
+      expectNothingOfIt();
+      await userEvent.setup().click(doorButton());
+      await settle();
+      expectNothingOfIt();
+    });
+
+    it("is not in the page where a chip has proven itself and the app wants the Mode row, with the chip row drawn", async () => {
+      pcWith([amd]);
+      vi.mocked(decideExportEncoder).mockImplementation(async () =>
+        decision({
+          showRow: true,
+          defaultMode: "fast",
+          reason: "over_minute",
+          fullSeconds: 720,
+          fastSeconds: 240,
+        }),
+      );
+      mount(PROJECT);
+      await userEvent.setup().click(doorButton());
+      expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
+      await settle();
+      expectNothingOfIt();
+    });
+
+    it("holds exactly the words the normal view is allowed with the door closed: the choice row (where drawn), the row, the door and the two buttons", async () => {
+      setCanvas(1080, 1920, 30);
+      const view = mount(null);
+      // the region behind the door is in the page but hidden; what a person sees is everything outside it
+      const region = screen.getByTestId("export-advanced");
+      expect(region).not.toBeVisible();
+      const seen = view.container.cloneNode(true) as HTMLElement;
+      seen.querySelector("[data-testid='export-advanced']")!.remove();
+      expect(seen.textContent).toBe(
+        `${withRow ? "QualityFast" : ""}ResolutionSame as project (1080 x 1920)720p480pAdvanced settingsCancelExport`,
+      );
+    });
   });
 });

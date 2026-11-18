@@ -19,7 +19,7 @@ import {
   sameAsProjectSize,
   summaryWords,
 } from "./exportChoiceWords";
-import { FASTER_SETTING_LINE } from "./exportWords";
+import type { ExportQuality } from "./exportOptions";
 
 describe("D2_WORDS: the owner's copy, word for word (the spec's strings table)", () => {
   it("holds exactly these words and no others", () => {
@@ -32,15 +32,16 @@ describe("D2_WORDS: the owner's copy, word for word (the spec's strings table)",
       resolutionLabel: "Resolution",
       resolutionName: "resolution",
       door: "Advanced settings",
-      fasterSetting:
-        "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
-      lightCompression: "light compression",
+      lightCompressionLine:
+        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
       rateLabel: "Frame rate",
       rateName: "frame rate",
       qualityLabel: "Quality",
       qualityName: "quality",
       chipNotePassed:
         "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
+      chipNotePassedFast:
+        "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
       cancel: "Cancel",
       exportAction: "Export",
       questionTitle: "Are you sure?",
@@ -54,8 +55,10 @@ describe("D2_WORDS: the owner's copy, word for word (the spec's strings table)",
     });
   });
 
-  it("takes the faster-setting sentence from the 0.28.0 constant itself, not a copy", () => {
-    expect(D2_WORDS.fasterSetting).toBe(FASTER_SETTING_LINE);
+  it("keeps the processor's lighter setting in a sentence of its own: the owner's name for it, and one full stop, at the end", () => {
+    const line = D2_WORDS.lightCompressionLine;
+    expect(line).toContain("light compression");
+    expect(line.indexOf(".")).toBe(line.length - 1);
   });
 
   it("names the sizes and the qualities as the lists show them", () => {
@@ -164,32 +167,104 @@ describe("the Resolution and Frame rate entries", () => {
   });
 });
 
-describe("summaryWords: the line under the door (S11, S12, S13)", () => {
-  it("says the project's size and rate and the quality it was given, for Quality", () => {
-    expect(summaryWords("quality", { smallerSize: true, maxFps: 30, quality: "medium" })).toBe(
-      "Project size and frame rate, Medium quality.",
+describe("summaryWords: the line under the door (S11, S12, S13), built from what is shown", () => {
+  const line = (
+    projectSizeAndRate: boolean,
+    oneSizeSmaller: boolean,
+    upToFps: number | null,
+    quality: ExportQuality,
+  ): string => summaryWords({ projectSizeAndRate, oneSizeSmaller, upToFps, quality });
+
+  // The lines a person can read, written out: [the size and the rate are the project's own, one size smaller, the cap or null, the quality, the line].
+  const LINES: [boolean, boolean, number | null, ExportQuality, string][] = [
+    [true, false, null, "medium", "Project size and frame rate, Medium quality."],
+    [true, false, null, "high", "Project size and frame rate, High quality."],
+    [true, false, null, "low", "Project size and frame rate, Low quality."],
+    [false, true, null, "medium", "One size smaller, Medium quality."],
+    [false, true, 30, "medium", "One size smaller, up to 30 frames a second, Medium quality."],
+    [false, true, 30, "high", "One size smaller, up to 30 frames a second, High quality."],
+    [false, false, 30, "medium", "Up to 30 frames a second, Medium quality."],
+    [false, false, null, "medium", "Medium quality."],
+    [false, false, null, "high", "High quality."],
+    [false, false, null, "low", "Low quality."],
+    [true, false, 30, "low", "Project size and frame rate, up to 30 frames a second, Low quality."],
+  ];
+
+  it.each(LINES)(
+    "(project's own size and rate %s, one size smaller %s, cap %s, %s) is read as %j",
+    (own, smaller, cap, quality, expected) => {
+      expect(line(own, smaller, cap, quality)).toBe(expected);
+    },
+  );
+
+  it("writes the cap it is given, as a person reads a rate (whole as 24, otherwise at most two decimals)", () => {
+    expect(line(false, true, 24, "low")).toBe(
+      "One size smaller, up to 24 frames a second, Low quality.",
     );
-    expect(summaryWords("quality", { smallerSize: false, maxFps: 24, quality: "high" })).toBe(
-      "Project size and frame rate, High quality.",
+    expect(line(false, false, 29.97, "high")).toBe("Up to 29.97 frames a second, High quality.");
+    expect(line(false, false, 23.976, "medium")).toBe(
+      "Up to 23.98 frames a second, Medium quality.",
     );
+    expect(line(false, false, 60, "high")).toBe("Up to 60 frames a second, High quality.");
   });
 
-  it("says one size smaller where there is one, the cap, the quality and the light compression, for Fast", () => {
-    expect(summaryWords("fast", { smallerSize: true, maxFps: 30, quality: "medium" })).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
-    );
-    expect(summaryWords("fast", { smallerSize: false, maxFps: 30, quality: "medium" })).toBe(
-      "Up to 30 frames a second, Medium quality, light compression.",
-    );
+  // Every input the dialog can give it: the size and the rate are the project's own, or one size smaller, or neither; no cap or a cap; each quality.
+  const QUALITY_NAME = { high: "High", medium: "Medium", low: "Low" } as const;
+  const SIZE_CLAUSES: [boolean, boolean][] = [
+    [true, false],
+    [false, true],
+    [false, false],
+  ];
+  const EVERY_INPUT = SIZE_CLAUSES.flatMap(([own, smaller]) =>
+    [null, 24, 30].flatMap((cap) =>
+      (["high", "medium", "low"] as const).map((quality) => ({
+        projectSizeAndRate: own,
+        oneSizeSmaller: smaller,
+        upToFps: cap,
+        quality,
+      })),
+    ),
+  );
+  const clausesOf = (text: string): string[] => text.slice(0, -1).split(", ");
+
+  it("writes a clause only where it was given it, and the quality's own name last", () => {
+    expect(EVERY_INPUT).toHaveLength(27);
+    for (const input of EVERY_INPUT) {
+      const where = JSON.stringify(input);
+      const text = summaryWords(input);
+      const clauses = clausesOf(text);
+      expect(text.includes("Project size and frame rate"), where).toBe(input.projectSizeAndRate);
+      expect(text.includes("One size smaller"), where).toBe(input.oneSizeSmaller);
+      expect(/up to \d+ frames a second/i.test(text), where).toBe(input.upToFps !== null);
+      expect(clauses[clauses.length - 1], where).toBe(`${QUALITY_NAME[input.quality]} quality`);
+    }
   });
 
-  it("writes the numbers it is given, not 30 and Medium", () => {
-    expect(summaryWords("fast", { smallerSize: true, maxFps: 24, quality: "low" })).toBe(
-      "One size smaller, up to 24 frames a second, Low quality, light compression.",
-    );
-    expect(summaryWords("fast", { smallerSize: false, maxFps: 29.97, quality: "high" })).toBe(
-      "Up to 29.97 frames a second, High quality, light compression.",
-    );
+  it("starts with a capital letter, ends with one full stop and joins its clauses with a comma and a space", () => {
+    for (const input of EVERY_INPUT) {
+      const where = JSON.stringify(input);
+      const text = summaryWords(input);
+      expect(text, where).toMatch(/^[A-Z]/);
+      expect(text.indexOf("."), where).toBe(text.length - 1);
+      const clauses = clausesOf(text);
+      expect(
+        clauses.every((clause) => clause !== "" && clause === clause.trim()),
+        where,
+      ).toBe(true);
+      const given = [input.projectSizeAndRate, input.oneSizeSmaller, input.upToFps !== null];
+      expect(clauses, where).toHaveLength(1 + given.filter(Boolean).length);
+    }
+  });
+
+  it("says nothing of the encoder, the graphics chip or the compression, and its only number is the cap", () => {
+    for (const input of EVERY_INPUT) {
+      const where = JSON.stringify(input);
+      const text = summaryWords(input);
+      expect(text, where).not.toMatch(/compression|chip|graphics|processor|faster|quick|full/i);
+      expect(text.match(/\d+(\.\d+)?/g) ?? [], where).toEqual(
+        input.upToFps === null ? [] : [String(input.upToFps)],
+      );
+    }
   });
 });
 

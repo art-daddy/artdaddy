@@ -228,6 +228,8 @@ export default function MenuBar() {
           transcriptId: "",
           // What the person picked in the Mode row; nothing picked is the app's own choice (exportChoice.ts).
           exportMode: settings.mode ?? undefined,
+          // The new dialog's Fast, with the settings the person set (the key is there for Fast only, so a Quality export's options are the 0.28.0 ones).
+          ...(settings.route ? { exportRoute: settings.route } : {}),
         },
       )) as {
         ok?: boolean;
