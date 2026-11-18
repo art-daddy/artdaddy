@@ -74,6 +74,7 @@ vi.mock("../store/jobNotes", async (importOriginal) => ({
 
 // Unrelated to Save As — just satisfies MenuBar's Clerk imports so it can mount.
 import MenuBar from "./MenuBar";
+import { __setExportFlag } from "../api/exportFlags";
 import { useExportJob } from "../store/exportJob";
 import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
 import { plainFailure } from "../timeline/exportWords";
@@ -111,6 +112,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   useExportJob.getState().reset();
+  __setExportFlag("quick_route", false); // the cases here mean the 0.28.0 dialog; MenuBar.quickRoute.test.tsx has the new view's
   __resetExportQueue();
   save.mockResolvedValue("D:/Client Work/hero cut.mp4");
   runTool.mockResolvedValue({ ok: true, saved_to: "hero cut.mp4" });

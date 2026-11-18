@@ -67,6 +67,7 @@ import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
 import { useMcpPanel } from "../store/mcpPanel";
 import { unknownParams } from "../contract/params";
 import { plainFailure } from "../timeline/exportWords";
+import { __setExportFlag } from "../api/exportFlags";
 
 type ToolReply = {
   ok: boolean;
@@ -111,6 +112,7 @@ beforeEach(() => {
   ed.dirty = false;
   authState.status = "locked";
   useExportJob.getState().reset(); // a module-level job would leak a finished render between tests
+  __setExportFlag("quick_route", false); // the cases here mean the 0.28.0 dialog; MenuBar.quickRoute.test.tsx has the new view's
   __resetSpeechJobs();
   proj.create.mockResolvedValue({ id: "pNew" });
 });

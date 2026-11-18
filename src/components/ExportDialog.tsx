@@ -35,6 +35,7 @@ import {
 } from "../timeline/exportWords";
 import { flags3cNow } from "../timeline/flags3c";
 import type { RenderWorkload } from "../timeline/renderPlan";
+import type { ExportRouteSlot } from "../tools/context";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
 import ExportProgressBar from "./ExportProgressBar";
@@ -43,6 +44,7 @@ import ExportHelpBanner from "./ExportHelpBanner";
 import SpeedCheckLine from "./SpeedCheckLine";
 import { useSpeedCheck } from "./useSpeedCheck";
 import ChipRow from "./ChipRow";
+import ExportSettingsView from "./ExportSettingsView";
 
 export interface ExportSettings {
   resolution: ExportResolution;
@@ -51,6 +53,8 @@ export interface ExportSettings {
   /** What the person picked in the Mode row, or null when they did not: the app then decides, as it does for every
    *  other way an export starts (exportChoice.ts). */
   mode: ExportMode | null;
+  /** Set only when the person chose Fast (the Quality / Fast view): Quality sends no route, so its settings are the 0.28.0 ones key for key. */
+  route?: ExportRouteSlot;
 }
 
 /** The words for every preset, in the order the list shows them. Which of them a project is offered is `resolutionChoices`' to say (exportOptions.ts). */
@@ -80,6 +84,7 @@ export default function ExportDialog({
   onCancel,
   onStart,
   workload = null,
+  quickRoute = false,
 }: {
   open: boolean;
   onCancel: () => void;
@@ -87,6 +92,8 @@ export default function ExportDialog({
   /** The open project's size and layers, to say roughly how long the export will take and how big
    *  the file will be before the person clicks. Absent: the dialog says nothing about either. */
   workload?: RenderWorkload | null;
+  /** Draw the new settings view (ExportSettingsView) instead of the 0.28.0 settings; the caller reads the switch once per opening. */
+  quickRoute?: boolean;
 }): JSX.Element | null {
   // What the person picked in the Resolution list, which the list may no longer hold: it follows the project's size.
   const [pickedResolution, setPickedResolution] = useState<ExportResolution>("source");
@@ -215,8 +222,9 @@ export default function ExportDialog({
 
   // The app is asked as the dialog opens and whenever the settings change (a chip's test, if it has not been done on this
   // PC yet, runs now, in the seconds the person spends choosing). A look: the test's results are left for the export.
+  // Not while the new settings view is drawn: it asks the app itself, and a second look behind it would ask twice.
   useEffect(() => {
-    if (!open || phase !== "idle" || !workload) {
+    if (!open || phase !== "idle" || !workload || quickRoute) {
       setAnswer(null);
       return;
     }
@@ -238,7 +246,7 @@ export default function ExportDialog({
     return () => {
       stale = true;
     };
-  }, [open, phase, workload, resolution, quality, fps, calibrations, askedFor]);
+  }, [open, phase, workload, resolution, quality, fps, calibrations, askedFor, quickRoute]);
 
   // A pick is for one opening of the dialog.
   useEffect(() => {
@@ -269,6 +277,8 @@ export default function ExportDialog({
 
   if (!open) return null;
   const running = phase === "preparing" || phase === "rendering";
+  // While idle the new settings view stands in for the settings, the queue pane and the footer below (it draws its own, in the same order); a render, a result and the 0.28.0 view are drawn as ever.
+  const quickView = quickRoute && phase === "idle";
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-6">
@@ -280,7 +290,9 @@ export default function ExportDialog({
       >
         <h2 className="text-sm font-semibold tracking-tight">Export video</h2>
 
-        {running || phase === "done" || phase === "failed" || phase === "cancelled" ? (
+        {quickView ? (
+          <ExportSettingsView workload={workload} onCancel={onCancel} onStart={onStart} />
+        ) : running || phase === "done" || phase === "failed" || phase === "cancelled" ? (
           <Progress
             phase={phase}
             jobId={jobId}
@@ -402,67 +414,73 @@ export default function ExportDialog({
           </div>
         )}
 
-        <ExportQueuePane />
+        {!quickView && <ExportQueuePane />}
 
-        <div className="mt-5 flex justify-end gap-2">
-          {running ? (
-            <>
-              <button type="button" onClick={onCancel} className={ghostCls}>
-                Hide
-              </button>
-              <button
-                type="button"
-                onClick={() => abort?.()}
-                disabled={!abort}
-                className="rounded-md px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-40"
-              >
-                Cancel render
-              </button>
-            </>
-          ) : phase === "done" || phase === "failed" || phase === "cancelled" ? (
-            <button
-              type="button"
-              onClick={() => {
-                reset();
-                onCancel();
-              }}
-              className={primaryCls}
-            >
-              Close
-            </button>
-          ) : (
-            <>
-              <button type="button" onClick={onCancel} className={ghostCls}>
-                Cancel
-              </button>
+        {!quickView && (
+          <div className="mt-5 flex justify-end gap-2">
+            {running ? (
+              <>
+                <button type="button" onClick={onCancel} className={ghostCls}>
+                  Hide
+                </button>
+                <button
+                  type="button"
+                  onClick={() => abort?.()}
+                  disabled={!abort}
+                  className="rounded-md px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-40"
+                >
+                  Cancel render
+                </button>
+              </>
+            ) : phase === "done" || phase === "failed" || phase === "cancelled" ? (
               <button
                 type="button"
                 onClick={() => {
-                  // The request is on its way: a speed check in progress stops now and the export starts on a labelled rough guess.
-                  holdExportAsk();
-                  // What the dialog showed: the export's record of the Mode row says "shown" only if it was (timeline/render.ts).
-                  useExportJob.getState().setModeRowOnScreen(modeRowShown);
-                  onStart({
-                    resolution,
-                    quality,
-                    fps,
-                    // What the person chose, never more. Only an answer that is in, for exactly what is on screen, is
-                    // one the person has seen: then the row's pick if the row is on screen, else nothing (the app
-                    // decides, and said so under the settings: the Mode row, or the chip row in its place). Without one
-                    // (no project to ask about, the look failed, it has not come back, or the history changed under it)
-                    // the person has been offered nothing, so the app does not choose for them: Full quality, or what
-                    // they had picked.
-                    mode:
-                      workload && offered ? (modeRowShown ? picked : null) : (picked ?? "quality"),
-                  });
+                  reset();
+                  onCancel();
                 }}
                 className={primaryCls}
               >
-                Export
+                Close
               </button>
-            </>
-          )}
-        </div>
+            ) : (
+              <>
+                <button type="button" onClick={onCancel} className={ghostCls}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // The request is on its way: a speed check in progress stops now and the export starts on a labelled rough guess.
+                    holdExportAsk();
+                    // What the dialog showed: the export's record of the Mode row says "shown" only if it was (timeline/render.ts).
+                    useExportJob.getState().setModeRowOnScreen(modeRowShown);
+                    onStart({
+                      resolution,
+                      quality,
+                      fps,
+                      // What the person chose, never more. Only an answer that is in, for exactly what is on screen, is
+                      // one the person has seen: then the row's pick if the row is on screen, else nothing (the app
+                      // decides, and said so under the settings: the Mode row, or the chip row in its place). Without one
+                      // (no project to ask about, the look failed, it has not come back, or the history changed under it)
+                      // the person has been offered nothing, so the app does not choose for them: Full quality, or what
+                      // they had picked.
+                      mode:
+                        workload && offered
+                          ? modeRowShown
+                            ? picked
+                            : null
+                          : (picked ?? "quality"),
+                    });
+                  }}
+                  className={primaryCls}
+                >
+                  Export
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

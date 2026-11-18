@@ -10,7 +10,7 @@ import { exportFlag } from "../api/exportFlags";
 import { processorName } from "../platform/host";
 import { chipAdvice } from "../timeline/chipAdvice";
 import { readChipPref, writeChipPref, type ChipPref } from "../timeline/chipPref";
-import { chipRowModel } from "../timeline/chipRow";
+import { chipRowModel, type ChipRowState } from "../timeline/chipRow";
 import { chipStatusOf, findChip, liftChipSetAside, type ChipStatus } from "../timeline/chipTest";
 import { sizeClassOf, type SizeClass } from "../timeline/exportEncoder";
 import { deliveredPicture, type ExportResolution } from "../timeline/exportOptions";
@@ -47,6 +47,7 @@ export default function ChipRow({
   fps = null,
   onChange,
   onDrawn,
+  notes,
 }: {
   /** The project's picture, which with the settings below says the size the chip is tested at. Absent: 1080p. */
   workload?: { width: number; height: number; fps: number } | null;
@@ -58,6 +59,9 @@ export default function ChipRow({
   /** Whether the row is on screen, told once its first look has answered (never before: until then nothing is known, and "not drawn yet" must not be
    *  taken for "not drawn") and again whenever that changes. Told before the browser paints, so the dialog never shows this row and the old Mode row together. */
   onDrawn?: (drawn: boolean) => void;
+  /** Words to draw as the note of a state in place of the row's own (`CHIP_ROW_NOTES`); a state not named keeps its own. Only the words change: whether the row is drawn, what it
+   *  asks of the PC and what it tells `onDrawn` stay as they are. */
+  notes?: Partial<Record<Exclude<ChipRowState, "none">, string>>;
 }): JSX.Element | null {
   const sizeClass = sizeClassFor(workload, resolution, fps);
   const [pref, setPref] = useState<ChipPref>(() => readChipPref(storage()));
@@ -148,7 +152,8 @@ export default function ChipRow({
           processor,
         })
       : null;
-  const link = model.action === "try_again_now" && model.note.endsWith(TRY_AGAIN);
+  const shownNote = (model.state === "none" ? undefined : notes?.[model.state]) ?? model.note;
+  const link = model.action === "try_again_now" && shownNote.endsWith(TRY_AGAIN);
 
   return (
     <div className="text-xs text-neutral-400" data-testid="chip-row">
@@ -177,7 +182,7 @@ export default function ChipRow({
       <p data-testid="chip-row-note" className="mt-0.5 pl-[5.75rem] leading-snug">
         {link ? (
           <>
-            {model.note.slice(0, model.note.length - TRY_AGAIN.length)}
+            {shownNote.slice(0, shownNote.length - TRY_AGAIN.length)}
             <button
               type="button"
               onClick={tryAgain}
@@ -187,7 +192,7 @@ export default function ChipRow({
             </button>
           </>
         ) : (
-          model.note
+          shownNote
         )}
       </p>
       {hint && (
