@@ -678,6 +678,40 @@ describe("a render made in 4 parts, the last being the final encode (a real run'
       "enough runs have a final encode long enough to open its gate",
     ).toBeGreaterThanOrEqual(5);
   });
+
+  it("9b at a part before the last nothing is said even when a figure is stored for the feed, and at the final encode the stored figure is said again", () => {
+    vi.useFakeTimers({ now: START, toFake: ["Date"] });
+    try {
+      const { run, beats } = PLAYED().find(({ beats }) =>
+        beats.some((b) => b.share >= 0.4 && isFigureWords(b.said)),
+      ) as Played;
+      const at = beats.findIndex((b) => b.share >= 0.4 && isFigureWords(b.said));
+      begin("run");
+      const next = player(run);
+      let last = next(0);
+      for (let i = 1; i <= at; i++) last = next(i);
+      expect(isFigureWords(last.said), "a figure is said before any part is named").toBe(true);
+      // The feed's own answer is a figure; only its part changes (whatever put the figure there, an earlier part has no time left to say).
+      const inPart = (step: number): void =>
+        useExportJob.setState((s) => ({
+          live: s.live ? { ...s.live, step, steps: PARTS } : null,
+        }));
+      for (const step of [0, 1, 2]) {
+        inPart(step);
+        const b = read("run");
+        expect([b.said, b.panel.timeLeft, b.shown], `at part ${step + 1}`).toEqual(["", "", null]);
+      }
+      inPart(PARTS - 1);
+      const final = read("run");
+      expect([final.said, final.panel.timeLeft, final.shown]).toEqual([
+        last.said,
+        last.said,
+        last.shown,
+      ]);
+    } finally {
+      end("run");
+    }
+  });
 });
 
 // ── a frozen export ────────────────────────────────────────────────────────────────────────────────────────────────────
