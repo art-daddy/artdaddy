@@ -12,6 +12,7 @@ import {
   ownLevers,
   payloadFor,
   rateEntries,
+  rateEntriesFor,
   rateOptions,
   resolveChoice,
   sizeEntries,
@@ -85,18 +86,28 @@ const ownOf = (
 /** What a pick must hold to survive: a size in the list, a rate that is null or an entry of the Frame rate list (a ladder rate below the project's, or Fast's own rate), a quality of the three. */
 const sizeInRange = (r: ExportResolution, f: ProjectFacts | null): boolean =>
   r === "source" || (f !== null && isPreset(r) && PRESET_SHORT_SIDE[r] < shortSideOf(f));
-const rateInList = (v: unknown, f: ProjectFacts | null, bundle: QuickBundle): boolean => {
+const rateInList = (
+  v: unknown,
+  f: ProjectFacts | null,
+  bundle: QuickBundle,
+  fastOffered: boolean,
+): boolean => {
   if (v === null) return true;
   if (f === null || typeof v !== "number" || !(v >= 1 && v < f.fps)) return false;
-  return RATE_LADDER.includes(v) || v === fastOwn(f, bundle).fps;
+  return RATE_LADDER.includes(v) || (fastOffered && v === fastOwn(f, bundle).fps);
 };
 const qualityInRange = (q: unknown): boolean => q === "high" || q === "medium" || q === "low";
 
-/** The picks that survive the clamp, worked out from the rules above. */
-const keptOracle = (o: Overrides, f: ProjectFacts | null, bundle = QUICK_BUNDLE): Overrides => {
+/** The picks that survive the clamp, worked out from the rules above (`fastOffered`: the dialog draws Fast's own rate in the Frame rate list). */
+const keptOracle = (
+  o: Overrides,
+  f: ProjectFacts | null,
+  bundle = QUICK_BUNDLE,
+  fastOffered = true,
+): Overrides => {
   const kept: Overrides = {};
   if (o.resolution !== undefined && sizeInRange(o.resolution, f)) kept.resolution = o.resolution;
-  if (o.fps !== undefined && rateInList(o.fps, f, bundle)) kept.fps = o.fps;
+  if (o.fps !== undefined && rateInList(o.fps, f, bundle, fastOffered)) kept.fps = o.fps;
   if (o.quality !== undefined && qualityInRange(o.quality)) kept.quality = o.quality;
   return kept;
 };
@@ -363,19 +374,39 @@ describe("T15 (d) clampOverrides", () => {
 
   it("never keeps a size outside sizeOptions, a rate that is not an entry of the Frame rate list, or a number that is not finite", () => {
     fc.assert(
-      fc.property(maybeProject, overridesOrGarbage, (f, o) => {
-        const result = clampOverrides(o, f);
+      fc.property(maybeProject, overridesOrGarbage, fc.boolean(), (f, o, fastOffered) => {
+        const result = clampOverrides(o, f, undefined, fastOffered);
         if (result.resolution !== undefined) expect(sizeOptions(f)).toContain(result.resolution);
         if (typeof result.fps === "number") {
           expect(Number.isFinite(result.fps)).toBe(true);
           expect(f).not.toBeNull();
           expect(result.fps).toBeGreaterThanOrEqual(1);
           expect(result.fps).toBeLessThan((f as ProjectFacts).fps);
-          // what is kept is what the select can show: an entry of the list a dialog that offers Fast draws
-          expect(rateOptions(f, ownLevers("fast", f).fps)).toContain(result.fps);
         }
+        // what is kept is what the select can show: an entry of the list the dialog draws (the one `rateEntriesFor` makes for the same `fastOffered`)
+        if (result.fps !== undefined)
+          expect(rateEntriesFor(f, fastOffered).map((entry) => entry.value)).toContain(
+            result.fps,
+          );
         if (result.quality !== undefined)
           expect(["high", "medium", "low"]).toContain(result.quality);
+      }),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("keeps exactly the picks of the list the dialog draws: with Fast offered the list has Fast's own rate, without it the ladder alone", () => {
+    fc.assert(
+      fc.property(maybeProject, overridesOrGarbage, anyBundle, (f, o, b) => {
+        expect(clampOverrides(o, f, b, true)).toEqual(keptOracle(o, f, b, true));
+        expect(clampOverrides(o, f, b, false)).toEqual(keptOracle(o, f, b, false));
+        // and the views of one set of facts agree with the clamp, whichever way the dialog is built
+        for (const choice of ["quality", "fast"] as const)
+          for (const fastOffered of [true, false]) {
+            const resolved = resolveChoice(choice, o, f, b, fastOffered);
+            expect(resolved.kept).toEqual(keptOracle(o, f, b, fastOffered));
+            expect(leversShown(choice, o, f, b, fastOffered)).toEqual(resolved.shown);
+          }
       }),
       { numRuns: RUNS },
     );

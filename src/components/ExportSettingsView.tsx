@@ -74,14 +74,19 @@ export default function ExportSettingsView({
   const height = useEditor((s) => s.timeline?.canvas?.height);
   const fps = useEditor((s) => s.timeline?.canvas?.fps);
   const facts = factsOf(width, height, fps, workload);
-  const { shown } = resolveChoice(choice, overrides, facts);
+  const { shown } = resolveChoice(choice, overrides, facts, undefined, fastChoice);
   const look = useEncoderLook(workload, shown);
 
   // A pick the project no longer holds is dropped for good, so it does not come back if the project grows again.
   useEffect(() => {
-    const kept = clampOverrides(overrides, factsOf(width, height, fps, workload));
+    const kept = clampOverrides(
+      overrides,
+      factsOf(width, height, fps, workload),
+      undefined,
+      fastChoice,
+    );
     if (kept !== overrides) setOverrides(kept);
-  }, [overrides, width, height, fps, workload]);
+  }, [overrides, width, height, fps, workload, fastChoice]);
 
   const pick = (change: Overrides) => setOverrides((before) => ({ ...before, ...change }));
   // Picking a choice puts that choice's own values back, the one already picked included.
@@ -96,7 +101,7 @@ export default function ExportSettingsView({
     const canvas = useEditor.getState().timeline?.canvas;
     const now = factsOf(canvas?.width, canvas?.height, canvas?.fps, workload);
     const { choice: chosen, overrides: set } = latest.current;
-    const sent = resolveChoice(chosen, set, now);
+    const sent = resolveChoice(chosen, set, now, undefined, fastChoice);
     onStart(payloadFor(chosen, sent.shown, sent.kept, workload && look.offered ? null : "quality"));
   };
 

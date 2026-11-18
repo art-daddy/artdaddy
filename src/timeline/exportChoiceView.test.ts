@@ -591,6 +591,15 @@ describe("clampOverrides: a pick the project no longer holds is dropped", () => 
     expect(resolveChoice("quality", { fps: 18 }, P72, capped).shown).toEqual(QUALITY_OWN);
   });
 
+  it("keeps Fast's own off-ladder rate only where the dialog offers Fast: without Fast the list is the ladder alone", () => {
+    expect(clampOverrides({ fps: 18 }, P72, QUICK_BUNDLE, true)).toEqual({ fps: 18 });
+    expect(clampOverrides({ fps: 18 }, P72, QUICK_BUNDLE, false)).toEqual({});
+    expect(clampOverrides({ fps: 24 }, P72, QUICK_BUNDLE, false)).toEqual({ fps: 24 });
+    expect(leversShown("quality", { fps: 18 }, P72, QUICK_BUNDLE, false)).toEqual(QUALITY_OWN);
+    expect(resolveChoice("quality", { fps: 18 }, P72, undefined, false).kept).toEqual({});
+    expect(resolveChoice("quality", { fps: 18 }, P72, undefined, true).kept).toEqual({ fps: 18 });
+  });
+
   it("keeps what is in range and drops only what is not, without touching the object it was given", () => {
     const picks: Overrides = { resolution: "2160p", fps: 24, quality: "high" };
     const result = clampOverrides(picks, A);

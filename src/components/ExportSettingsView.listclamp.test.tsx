@@ -99,13 +99,15 @@ async function open72(choice: "quality" | "fast") {
   setCanvas(1920, 1080, 72);
   const onStart = vi.fn<(settings: ExportSettings) => void>();
   const user = userEvent.setup();
-  render(
-    <ExportSettingsView
-      workload={workloadOf(1920, 1080, 72)}
-      onCancel={() => undefined}
-      onStart={onStart}
-    />,
-  );
+  const props = {
+    workload: workloadOf(1920, 1080, 72),
+    onCancel: () => undefined,
+    onStart,
+  };
+  const view = render(<ExportSettingsView {...props} />);
+  // the same mounted view told to offer Fast or not (no build does this while a dialog is open: it is how the list of a view without the row is held to the clamp)
+  const offerFast = (offered: boolean) =>
+    view.rerender(<ExportSettingsView {...props} fastChoice={offered} />);
   if (choice === "fast") await user.click(screen.getByRole("radio", { name: "Fast" }));
   await user.click(screen.getByRole("button", { name: "Advanced settings" }));
   const box = () =>
@@ -121,7 +123,7 @@ async function open72(choice: "quality" | "fast") {
     expect(onStart).toHaveBeenCalledTimes(1);
     return onStart.mock.calls[0]![0];
   };
-  return { box, listed, pick, sent };
+  return { box, listed, pick, sent, offerFast };
 }
 
 describe("the Frame rate select and Export agree after the project's rate changed under the dialog", () => {
@@ -175,7 +177,7 @@ describe("the Frame rate select and Export agree after the project's rate change
       expect(box().value).toBe("24");
       const settings = await sent();
       expect(settings.fps).toBe(24);
-      if (choice === "fast") expect(settings.route?.explicit.fps).toBe(true);
+      if (choice === "fast") expect(settings.route?.explicit).toMatchObject({ fps: true });
     },
   );
 
@@ -188,5 +190,33 @@ describe("the Frame rate select and Export agree after the project's rate change
       route: "quick",
       explicit: { size: false, fps: true, quality: false },
     });
+  });
+
+  it("a view that stops offering Fast drops Fast's own off-ladder rate: the select cannot show it, so Export does not send it", async () => {
+    const { box, listed, pick, sent, offerFast } = await open72("fast");
+    await pick("18 fps");
+    expect(box().value).toBe("18");
+    act(() => offerFast(false));
+    // the list is the ladder alone and the choice is Quality: Same as project is shown, and that is what is sent
+    expect(listed()).toEqual([
+      "Same as project (72 fps)",
+      "60 fps",
+      "50 fps",
+      "30 fps",
+      "25 fps",
+      "24 fps",
+    ]);
+    expect(box().value).toBe("");
+    const settings = await sent();
+    expect(settings.fps).toBeNull();
+    expect("route" in settings).toBe(false);
+  });
+
+  it("a view that stops offering Fast keeps a rate of the ladder that was picked", async () => {
+    const { box, pick, sent, offerFast } = await open72("fast");
+    await pick("30 fps");
+    act(() => offerFast(false));
+    expect(box().value).toBe("30");
+    expect((await sent()).fps).toBe(30);
   });
 });

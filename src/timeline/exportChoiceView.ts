@@ -114,6 +114,11 @@ export function sizeOptions(facts: ProjectFacts | null): ExportResolution[] {
   return facts === null ? ["source"] : quickSizeChoices(facts);
 }
 
+/** Fast's own rate where a dialog that offers Fast adds it to the Frame rate list (72 gives 18, 32 gives 16): the one derivation of the list's extra entry, for what is drawn and for what is kept. */
+function fastRateExtra(facts: ProjectFacts | null, fastOffered: boolean, bundle: QuickBundle): number | null {
+  return fastOffered ? ownLevers("fast", facts, bundle).fps : null;
+}
+
 /** The Frame rate list as the dialog draws it: the project's own rate and the lower rates of the ladder, and Fast's own rate too where the ladder has not got it (72 gives 18, 32 gives 16),
  *  so that what Fast shows is always an entry of the list. Only a dialog that offers Fast passes `fastOffered`. */
 export function rateEntriesFor(
@@ -121,7 +126,7 @@ export function rateEntriesFor(
   fastOffered: boolean,
   bundle: QuickBundle = QUICK_BUNDLE,
 ): { value: number | null; label: string }[] {
-  return rateEntries(facts, fastOffered ? ownLevers("fast", facts, bundle).fps : null);
+  return rateEntries(facts, fastRateExtra(facts, fastOffered, bundle));
 }
 
 /** The Frame rate list: `null` (the project's own rate), then every rate of the ladder strictly below the project's, then `extra` where the ladder has not got it, highest first. Never a rate at or
@@ -176,14 +181,15 @@ export function qualityEntries(): { value: ExportQuality; label: string }[] {
   return QUALITIES.map((value) => ({ value, label: QUALITY_WORDS[value] }));
 }
 
-/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or an entry of the Frame rate list (the ladder below the project's rate and Fast's
- *  own rate, the list a dialog that offers Fast draws and a superset of any other), a quality that is not one of the three. A value the select cannot show is never sent. With no readable project
- *  numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object where nothing was dropped (so a state that
+/** Drops every override the project does not hold: a size that is not in the Resolution list, a rate that is not `null` or an entry of the Frame rate list as the dialog draws it (the ladder below the
+ *  project's rate, and Fast's own rate where `fastOffered`: `rateEntriesFor` has the same list), a quality that is not one of the three. A value the select cannot show is never sent. With no
+ *  readable project numbers cannot be checked, so a size other than the project's and any rate other than `null` go; `null` and a quality stay. Returns the SAME object where nothing was dropped (so a state that
  *  writes it back cannot loop). */
 export function clampOverrides(
   o: Overrides,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
 ): Overrides {
   const kept: Overrides = {};
   let dropped = false;
@@ -192,7 +198,8 @@ export function clampOverrides(
     else dropped = true;
   }
   if (o.fps !== undefined) {
-    if (rateOptions(facts, ownLevers("fast", facts, bundle).fps).includes(o.fps)) kept.fps = o.fps;
+    if (rateOptions(facts, fastRateExtra(facts, fastOffered, bundle)).includes(o.fps))
+      kept.fps = o.fps;
     else dropped = true;
   }
   if (o.quality !== undefined) {
@@ -208,9 +215,10 @@ export function leversShown(
   overrides: Overrides,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
 ): Levers {
   const own = ownLevers(choice, facts, bundle);
-  const kept = clampOverrides(overrides, facts, bundle);
+  const kept = clampOverrides(overrides, facts, bundle, fastOffered);
   return {
     resolution: kept.resolution ?? own.resolution,
     fps: kept.fps !== undefined ? kept.fps : own.fps,
@@ -322,9 +330,10 @@ export function resolveChoice(
   overrides: Overrides,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
+  fastOffered = true,
 ): Resolved {
-  const kept = clampOverrides(overrides, facts, bundle);
-  const shown = leversShown(choice, kept, facts, bundle);
+  const kept = clampOverrides(overrides, facts, bundle, fastOffered);
+  const shown = leversShown(choice, kept, facts, bundle, fastOffered);
   return {
     kept,
     shown,
