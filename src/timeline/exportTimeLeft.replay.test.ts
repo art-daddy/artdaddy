@@ -3,7 +3,7 @@
 //
 // The fixture (`__fixtures__/timeLeftRuns.json`) holds the ffmpeg progress positions of real runs kept by the export-timing
 // lab, with the time each report arrived. Every run is fed through the rule's public API, one report per sample, and what the
-// rule said at each report is checked against the owner's accepted rule and against what the run really went on to take:
+// rule said at each report is checked against the accepted rule and against what the run really went on to take:
 //   C1  the gate: no figure before 20 s of rendering and (15 % made or 60 s of rendering); none at all for a run under 20 s;
 //   C2  finishing: from 90 % made, and never before, and held;       C3  a figure never flickers back to nothing;
 //   C4  a figure is on the rounding grid;                             C5  the figures are right (see below);
@@ -11,7 +11,7 @@
 //   C7  a shifted clock changes nothing and a coarser report cadence keeps C1 to C4;
 //   C8  slowdowns built from real feeds (the lab has no genuinely slow run): a 3 times slower tail is caught, a 1.2 times one is not;
 //   C9  the words do not flap: a figure that changes does not go back to the figure it left within a few reports.
-// Every oracle is computed here from the raw samples and the owner's numbers, never from the rule's own constants or state: a
+// Every oracle is computed here from the raw samples and the accepted rule's numbers, never from the rule's own constants or state: a
 // claim that read the rule's constant could not notice that the constant had been changed.
 //
 // `REPLAY_REPORT=<file>` also writes a markdown report of the whole replay (per run, per checkpoint, per kind) to that file.
@@ -32,7 +32,7 @@ import { roundTimeLeft, type TimeLeft } from "./exportTimeLeft";
 
 // ── the numbers of the claims ──────────────────────────────────────────────────────────────────────────────────────────
 
-// The owner's accepted rule, written out again on purpose (see the header).
+// The accepted rule, written out again on purpose (see the header).
 const RULE_GATE_RENDERED_SECONDS = 20;
 const RULE_GATE_SHARE = 0.15;
 const RULE_GATE_RENDERED_ALONE_SECONDS = 60;
@@ -49,7 +49,9 @@ const LIVE_MIN_SHARE_WITH_FIGURE = 1;
 
 // C5: at each checkpoint (the last report at or below that share of the video), of the runs that show a figure and have at
 // least this long really left, the share whose figure is right must be at least this, wherever at least this many runs show one.
-const C5_CHECKPOINTS = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85];
+const C5_CHECKPOINTS = [
+  0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85,
+];
 const C5_MIN_REAL_LEFT_SECONDS = 5;
 const C5_MIN_RUNS_SHOWING = 10;
 const C5_MIN_RIGHT_SHARE = 0.8;
@@ -127,10 +129,12 @@ const pct = (x: number): string => `${(x * 100).toFixed(1)} %`;
 const pct0 = (x: number): string => `${Math.round(x * 100)} %`;
 const n1 = (x: number): string => x.toFixed(1);
 const isFigure = (v: TimeLeft): v is Extract<TimeLeft, { kind: "left" }> => v.kind === "left";
-const say = (v: TimeLeft): string => (v.kind === "left" ? String(v.seconds) : v.kind === "none" ? "-" : v.kind);
-const firstOf = (f: Facts, test: (v: TimeLeft) => boolean): number => f.recs.findIndex((rec) => test(rec.value));
+const say = (v: TimeLeft): string =>
+  v.kind === "left" ? String(v.seconds) : v.kind === "none" ? "-" : v.kind;
+const firstOf = (f: Facts, test: (v: TimeLeft) => boolean): number =>
+  f.recs.findIndex((rec) => test(rec.value));
 
-/** The grid a person reads, written from the owner's words and not from the rule's rounding function. */
+/** The grid a person reads, written from the accepted wording of the bands and not from the rule's rounding function. */
 function onTheGrid(seconds: number): boolean {
   if (seconds === UNDER_A_MINUTE_FIGURE) return true;
   if (seconds >= 60 && seconds <= 600) return seconds % 60 === 0;
@@ -147,7 +151,8 @@ function gateViolations(f: Facts): string[] {
   const rendered = f.rendered[first];
   const share = f.share[first];
   const out: string[] = [];
-  if (rendered < RULE_GATE_RENDERED_SECONDS) out.push(`${f.run.id}: a figure after only ${n1(rendered)} s of rendering`);
+  if (rendered < RULE_GATE_RENDERED_SECONDS)
+    out.push(`${f.run.id}: a figure after only ${n1(rendered)} s of rendering`);
   if (!(share >= RULE_GATE_SHARE || rendered >= RULE_GATE_RENDERED_ALONE_SECONDS)) {
     out.push(`${f.run.id}: a figure at ${pct(share)} made and ${n1(rendered)} s of rendering`);
   }
@@ -159,11 +164,15 @@ function finishingViolations(f: Facts): string[] {
   const out: string[] = [];
   const first = firstOf(f, (v) => v.kind === "finishing");
   if (first >= 0) {
-    if (f.share[first] < RULE_FINISHING_SHARE) out.push(`${f.run.id}: finishing at ${pct(f.share[first])} made`);
+    if (f.share[first] < RULE_FINISHING_SHARE)
+      out.push(`${f.run.id}: finishing at ${pct(f.share[first])} made`);
     const back = f.recs.findIndex((rec, i) => i > first && rec.value.kind !== "finishing");
-    if (back >= 0) out.push(`${f.run.id}: ${f.recs[back].value.kind} after finishing (report ${back})`);
+    if (back >= 0)
+      out.push(`${f.run.id}: ${f.recs[back].value.kind} after finishing (report ${back})`);
   }
-  const late = f.recs.findIndex((rec, i) => f.share[i] >= RULE_FINISHING_SHARE && rec.value.kind !== "finishing");
+  const late = f.recs.findIndex(
+    (rec, i) => f.share[i] >= RULE_FINISHING_SHARE && rec.value.kind !== "finishing",
+  );
   if (late >= 0) out.push(`${f.run.id}: ${say(f.recs[late].value)} at ${pct(f.share[late])} made`);
   return out;
 }
@@ -173,7 +182,9 @@ function flickerViolations(f: Facts): string[] {
   const first = firstOf(f, isFigure);
   if (first < 0) return [];
   const back = f.recs.findIndex((rec, i) => i > first && rec.value.kind === "none");
-  return back < 0 ? [] : [`${f.run.id}: nothing said at report ${back} after a figure at report ${first}`];
+  return back < 0
+    ? []
+    : [`${f.run.id}: nothing said at report ${back} after a figure at report ${first}`];
 }
 
 /** C4: every figure is finite, not negative and on the rounding grid. */
@@ -184,7 +195,8 @@ function gridViolations(f: Facts): string[] {
     if (!isFigure(v)) continue;
     const s = v.seconds;
     if (!Number.isFinite(s) || s < 0) out.push(`${f.run.id}: figure ${s} at report ${i}`);
-    else if (roundTimeLeft(s) !== s || !onTheGrid(s)) out.push(`${f.run.id}: ${s} s is not on the grid (report ${i})`);
+    else if (roundTimeLeft(s) !== s || !onTheGrid(s))
+      out.push(`${f.run.id}: ${s} s is not on the grid (report ${i})`);
   }
   return out;
 }
@@ -193,11 +205,15 @@ function gridViolations(f: Facts): string[] {
 function longerViolations(f: Facts): string[] {
   const out: string[] = [];
   const first = firstOf(f, (v) => v.kind === "left" || v.kind === "longer");
-  if (first >= 0 && f.recs[first].value.kind === "longer") out.push(`${f.run.id}: "longer" before any figure`);
+  if (first >= 0 && f.recs[first].value.kind === "longer")
+    out.push(`${f.run.id}: "longer" before any figure`);
   const longer = firstOf(f, (v) => v.kind === "longer");
   if (longer >= 0) {
-    const back = f.recs.findIndex((rec, i) => i > longer && rec.value.kind !== "longer" && rec.value.kind !== "finishing");
-    if (back >= 0) out.push(`${f.run.id}: ${say(f.recs[back].value)} after "longer" (report ${back})`);
+    const back = f.recs.findIndex(
+      (rec, i) => i > longer && rec.value.kind !== "longer" && rec.value.kind !== "finishing",
+    );
+    if (back >= 0)
+      out.push(`${f.run.id}: ${say(f.recs[back].value)} after "longer" (report ${back})`);
   }
   return out;
 }
@@ -218,7 +234,8 @@ function flapViolations(f: Facts): string[] {
     const now = figure[i];
     if (was === null || now === null || was === now) continue;
     const back = figure.slice(i + 1, i + 1 + FLAP_WINDOW_REPORTS).indexOf(was);
-    if (back >= 0) out.push(`${f.run.id}: ${was} -> ${now} -> ${was} within ${back + 2} reports (report ${i})`);
+    if (back >= 0)
+      out.push(`${f.run.id}: ${was} -> ${now} -> ${was} within ${back + 2} reports (report ${i})`);
   }
   return out;
 }
@@ -257,7 +274,9 @@ interface Point {
 function pointAt(f: Facts, checkpoint: number): Point | null {
   let at = -1;
   for (let i = 0; i < f.share.length && f.share[i] <= checkpoint + 1e-9; i++) at = i;
-  return at < 0 ? null : { facts: f, checkpoint, index: at, value: f.recs[at].value, real: f.recs[at].realLeft };
+  return at < 0
+    ? null
+    : { facts: f, checkpoint, index: at, value: f.recs[at].value, real: f.recs[at].realLeft };
 }
 
 /** Is a shown figure right? "Under a minute" is true whenever less than a minute is left; any other figure must be 0.5 to 1.5 times the
@@ -310,8 +329,19 @@ interface LongerCase {
 const LONGER_CASES: readonly LongerCase[] = ALL.flatMap((f) => {
   const at = firstOf(f, (v) => v.kind === "longer");
   if (at < 0) return [];
-  const before = f.recs.slice(0, at).reverse().find((rec) => isFigure(rec.value));
-  return [{ id: f.run.id, kind: f.run.kind, share: f.share[at], figureBefore: before ? say(before.value) : "-", real: f.recs[at].realLeft }];
+  const before = f.recs
+    .slice(0, at)
+    .reverse()
+    .find((rec) => isFigure(rec.value));
+  return [
+    {
+      id: f.run.id,
+      kind: f.run.kind,
+      share: f.share[at],
+      figureBefore: before ? say(before.value) : "-",
+      real: f.recs[at].realLeft,
+    },
+  ];
 });
 
 // C8: a run that is real until 40 % and then `factor` times slower; did the rule say "longer" while under 90 %?
@@ -323,14 +353,20 @@ interface SlowOutcome {
 function slowOutcomes(factor: number): SlowOutcome[] {
   return ALL.filter((f) => f.run.endMs / 1000 >= C8_MIN_RENDER_SECONDS).map((f) => {
     const slow = factsOf(slowedFrom(f.run, C8_SLOW_FROM_SHARE, factor));
-    const at = slow.recs.findIndex((rec, i) => rec.value.kind === "longer" && slow.share[i] < RULE_FINISHING_SHARE);
+    const at = slow.recs.findIndex(
+      (rec, i) => rec.value.kind === "longer" && slow.share[i] < RULE_FINISHING_SHARE,
+    );
     return { id: f.run.id, caughtAt: at < 0 ? null : slow.share[at] };
   });
 }
 const SLOW_BY_FACTOR = new Map<number, SlowOutcome[]>(
-  [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].map((factor) => [factor, slowOutcomes(factor)]),
+  [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].map((factor) => [
+    factor,
+    slowOutcomes(factor),
+  ]),
 );
-const caughtShare = (outcomes: readonly SlowOutcome[]): number => outcomes.filter((o) => o.caughtAt !== null).length / outcomes.length;
+const caughtShare = (outcomes: readonly SlowOutcome[]): number =>
+  outcomes.filter((o) => o.caughtAt !== null).length / outcomes.length;
 
 // ── the report ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -383,19 +419,34 @@ function buildReport(): string {
   L.push("## Claims");
   L.push("");
   const violations = (check: (f: Facts) => string[]): number => ALL.flatMap(check).length;
-  L.push(`- C1 gate: ${violations(gateViolations)} violations. C2 finishing: ${violations(finishingViolations)}. C3 flicker: ${violations(flickerViolations)}. C4 grid: ${violations(gridViolations)}. C6 longer (order and hold): ${violations(longerViolations)}. C9 flapping: ${violations(flapViolations)}.`);
-  const fail = ROWS.filter((r) => r.shown.length >= C5_MIN_RUNS_SHOWING && r.right.length / r.shown.length < C5_MIN_RIGHT_SHARE);
-  L.push(`- C5 accuracy: ${fail.length === 0 ? "holds at every checkpoint with 10 or more figures" : `FAILS at ${fail.map((r) => pct0(r.checkpoint)).join(", ")}`} (table below).`);
+  L.push(
+    `- C1 gate: ${violations(gateViolations)} violations. C2 finishing: ${violations(finishingViolations)}. C3 flicker: ${violations(flickerViolations)}. C4 grid: ${violations(gridViolations)}. C6 longer (order and hold): ${violations(longerViolations)}. C9 flapping: ${violations(flapViolations)}.`,
+  );
+  const fail = ROWS.filter(
+    (r) =>
+      r.shown.length >= C5_MIN_RUNS_SHOWING && r.right.length / r.shown.length < C5_MIN_RIGHT_SHARE,
+  );
+  L.push(
+    `- C5 accuracy: ${fail.length === 0 ? "holds at every checkpoint with 10 or more figures" : `FAILS at ${fail.map((r) => pct0(r.checkpoint)).join(", ")}`} (table below).`,
+  );
   const slow3 = SLOW_BY_FACTOR.get(C8_SLOW_FACTOR) ?? [];
   const slow12 = SLOW_BY_FACTOR.get(C8_HEALTHY_FACTOR) ?? [];
-  L.push(`- C8 slowdowns: 3x slower from 40 %: "taking longer" before 90 % in ${slow3.filter((o) => o.caughtAt !== null).length} of ${slow3.length} runs; 1.2x: in ${slow12.filter((o) => o.caughtAt !== null).length} of ${slow12.length}.`);
+  L.push(
+    `- C8 slowdowns: 3x slower from 40 %: "taking longer" before 90 % in ${slow3.filter((o) => o.caughtAt !== null).length} of ${slow3.length} runs; 1.2x: in ${slow12.filter((o) => o.caughtAt !== null).length} of ${slow12.length}.`,
+  );
   const firsts = LONG.map((f) => ({ f, at: firstOf(f, isFigure) })).filter((x) => x.at >= 0);
   const secs = firsts.map((x) => x.f.rendered[x.at]);
   const shares = firsts.map((x) => x.f.share[x.at]);
-  L.push(`- First figure (${firsts.length} of ${LONG.length} long runs get one): after ${n1(median(secs) ?? 0)} s of rendering at the median (90th percentile ${n1(quantile(secs, 0.9) ?? 0)} s, latest ${n1(Math.max(...secs))} s), at ${pct0(median(shares) ?? 0)} made at the median (range ${pct0(Math.min(...shares))} to ${pct0(Math.max(...shares))}).`);
-  const rooms = ALL.map((f) => ({ id: f.run.id, room: headroom(f) })).filter((x): x is { id: string; room: number } => x.room !== null);
+  L.push(
+    `- First figure (${firsts.length} of ${LONG.length} long runs get one): after ${n1(median(secs) ?? 0)} s of rendering at the median (90th percentile ${n1(quantile(secs, 0.9) ?? 0)} s, latest ${n1(Math.max(...secs))} s), at ${pct0(median(shares) ?? 0)} made at the median (range ${pct0(Math.min(...shares))} to ${pct0(Math.max(...shares))}).`,
+  );
+  const rooms = ALL.map((f) => ({ id: f.run.id, room: headroom(f) })).filter(
+    (x): x is { id: string; room: number } => x.room !== null,
+  );
   const top = [...rooms].sort((a, b) => b.room - a.room)[0];
-  L.push(`- Headroom to the "taking longer" alarm (highest total implied by the average pace after the first figure, as a multiple of the first one; the alarm is at 1.5): median ${(median(rooms.map((x) => x.room)) ?? 0).toFixed(2)}, ${rooms.filter((x) => x.room >= 1.3).length} of ${rooms.length} runs reach 1.3 or more, ${rooms.filter((x) => x.room >= 1.4).length} reach 1.4 or more, the highest is ${top.room.toFixed(2)} (${top.id}).`);
+  L.push(
+    `- Headroom to the "taking longer" alarm (highest total implied by the average pace after the first figure, as a multiple of the first one; the alarm is at 1.5): median ${(median(rooms.map((x) => x.room)) ?? 0).toFixed(2)}, ${rooms.filter((x) => x.room >= 1.3).length} of ${rooms.length} runs reach 1.3 or more, ${rooms.filter((x) => x.room >= 1.4).length} reach 1.4 or more, the highest is ${top.room.toFixed(2)} (${top.id}).`,
+  );
   L.push("");
   L.push("## C5: are the figures right? (by how far the export has got)");
   L.push("");
@@ -404,7 +455,9 @@ function buildReport(): string {
       '"All in play" counts a run without a figure as a miss (runs that rendered 20 s or more in all, 5 s or more left). "Other reading" is the real time left within 50 % of the figure; "within 25 %" is 0.75 to 1.25 times.',
   );
   L.push("");
-  L.push("| done | runs in play | showing a figure | RIGHT (within 50 %) | RIGHT share | share of all in play | other reading | within 25 % |");
+  L.push(
+    "| done | runs in play | showing a figure | RIGHT (within 50 %) | RIGHT share | share of all in play | other reading | within 25 % |",
+  );
   L.push("|---:|---:|---:|---:|---:|---:|---:|---:|");
   for (const r of ROWS) {
     const share = (n: number, d: number): string => (d === 0 ? "-" : pct0(n / d));
@@ -413,7 +466,9 @@ function buildReport(): string {
     );
   }
   L.push("");
-  L.push("### By project kind (RIGHT within 50 %, figures shown; at 20 %, 50 %, 80 % and pooled over 15 % to 85 %)");
+  L.push(
+    "### By project kind (RIGHT within 50 %, figures shown; at 20 %, 50 %, 80 % and pooled over 15 % to 85 %)",
+  );
   L.push("");
   L.push("| kind | runs | 20 % | 50 % | 80 % | pooled 15-85 % |");
   L.push("|---|---:|---|---|---|---:|");
@@ -426,20 +481,28 @@ function buildReport(): string {
     const pooled = C5_CHECKPOINTS.map((c) => checkpointRow(group, c));
     const shown = pooled.reduce((n, r) => n + r.shown.length, 0);
     const right = pooled.reduce((n, r) => n + r.right.length, 0);
-    L.push(`| ${kind} | ${group.length} | ${cell(0.2)} | ${cell(0.5)} | ${cell(0.8)} | ${shown === 0 ? "-" : `${pct0(right / shown)} (${right}/${shown})`} |`);
+    L.push(
+      `| ${kind} | ${group.length} | ${cell(0.2)} | ${cell(0.5)} | ${cell(0.8)} | ${shown === 0 ? "-" : `${pct0(right / shown)} (${right}/${shown})`} |`,
+    );
   }
   L.push("");
   L.push("### Figures that were not right");
   L.push("");
   const wrongs = ROWS.flatMap((r) => r.wrong);
-  L.push(wrongs.length === 0 ? "None." : `${wrongs.length} wrong figures over all checkpoints (figure in seconds, real time left in seconds, ratio figure / real):`);
+  L.push(
+    wrongs.length === 0
+      ? "None."
+      : `${wrongs.length} wrong figures over all checkpoints (figure in seconds, real time left in seconds, ratio figure / real):`,
+  );
   L.push("");
   if (wrongs.length > 0) {
     L.push("| done | run | kind | route | PC | figure | real left | ratio |");
     L.push("|---:|---|---|---|---|---:|---:|---:|");
     for (const p of wrongs.slice(0, 120)) {
       const fig = isFigure(p.value) ? p.value.seconds : NaN;
-      L.push(`| ${pct0(p.checkpoint)} | ${p.facts.run.id} | ${p.facts.run.kind} | ${p.facts.run.route} | ${p.facts.run.pc} | ${fig} | ${n1(p.real)} | ${(fig / p.real).toFixed(2)} |`);
+      L.push(
+        `| ${pct0(p.checkpoint)} | ${p.facts.run.id} | ${p.facts.run.kind} | ${p.facts.run.route} | ${p.facts.run.pc} | ${fig} | ${n1(p.real)} | ${(fig / p.real).toFixed(2)} |`,
+      );
     }
     if (wrongs.length > 120) L.push(`| ... | ${wrongs.length - 120} more | | | | | | |`);
   }
@@ -453,30 +516,45 @@ function buildReport(): string {
   );
   L.push("");
   if (LONGER_CASES.length > 0) {
-    L.push("| run | kind | share made when said | figure just before (s) | real time left then (s) |");
+    L.push(
+      "| run | kind | share made when said | figure just before (s) | real time left then (s) |",
+    );
     L.push("|---|---|---:|---:|---:|");
-    for (const c of LONGER_CASES) L.push(`| ${c.id} | ${c.kind} | ${pct0(c.share)} | ${c.figureBefore} | ${n1(c.real)} |`);
+    for (const c of LONGER_CASES)
+      L.push(`| ${c.id} | ${c.kind} | ${pct0(c.share)} | ${c.figureBefore} | ${n1(c.real)} |`);
   }
   L.push("");
   L.push("## C8: slowdowns built from real feeds");
   L.push("");
-  L.push(`Each run with ${C8_MIN_RENDER_SECONDS} s or more of rendering is real until ${pct0(C8_SLOW_FROM_SHARE)} made, then its time axis is stretched by the factor (positions kept). "Caught" = the rule said "taking longer" while under 90 % made.`);
+  L.push(
+    `Each run with ${C8_MIN_RENDER_SECONDS} s or more of rendering is real until ${pct0(C8_SLOW_FROM_SHARE)} made, then its time axis is stretched by the factor (positions kept). "Caught" = the rule said "taking longer" while under 90 % made.`,
+  );
   L.push("");
-  L.push("| factor | runs | caught before 90 % | share caught | median share made when caught | not caught |");
+  L.push(
+    "| factor | runs | caught before 90 % | share caught | median share made when caught | not caught |",
+  );
   L.push("|---:|---:|---:|---:|---:|---|");
-  for (const factor of [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].sort((a, b) => a - b)) {
+  for (const factor of [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR].sort(
+    (a, b) => a - b,
+  )) {
     const outcomes = SLOW_BY_FACTOR.get(factor) ?? [];
     const caught = outcomes.filter((o) => o.caughtAt !== null);
     const med = median(caught.map((o) => o.caughtAt as number));
     const missed = outcomes.filter((o) => o.caughtAt === null).map((o) => o.id);
-    L.push(`| ${factor} | ${outcomes.length} | ${caught.length} | ${pct0(caught.length / outcomes.length)} | ${med === null ? "-" : pct0(med)} | ${missed.length === 0 ? "-" : missed.slice(0, 12).join(", ") + (missed.length > 12 ? `, ... (${missed.length} in all)` : "")} |`);
+    L.push(
+      `| ${factor} | ${outcomes.length} | ${caught.length} | ${pct0(caught.length / outcomes.length)} | ${med === null ? "-" : pct0(med)} | ${missed.length === 0 ? "-" : missed.slice(0, 12).join(", ") + (missed.length > 12 ? `, ... (${missed.length} in all)` : "")} |`,
+    );
   }
   L.push("");
   L.push("## Every run");
   L.push("");
-  L.push("Figure / real time left (both in seconds) at the last report at or below 20 %, 50 % and 80 % made; `-` = nothing said. First figure: seconds since the run's first report, and the share made then.");
+  L.push(
+    "Figure / real time left (both in seconds) at the last report at or below 20 %, 50 % and 80 % made; `-` = nothing said. First figure: seconds since the run's first report, and the share made then.",
+  );
   L.push("");
-  L.push("| run | kind | route | PC | video s | render s | first figure at | at 20 % | at 50 % | at 80 % | finishing from | highest total / first total |");
+  L.push(
+    "| run | kind | route | PC | video s | render s | first figure at | at 20 % | at 50 % | at 80 % | finishing from | highest total / first total |",
+  );
   L.push("|---|---|---|---|---:|---:|---|---|---|---|---:|---:|");
   for (const f of ALL) L.push(`| ${perRunRow(f)} |`);
   L.push("");
@@ -492,10 +570,19 @@ describe("the recorded runs", () => {
     for (const run of REPLAY_RUNS) {
       const at = run.samples.map((s) => s[0]);
       const out = run.samples.map((s) => s[1]);
-      expect(at.every((t, i) => Number.isInteger(t) && (i === 0 || t > at[i - 1])), run.id).toBe(true);
-      expect(out.every((o) => Number.isFinite(o) && o >= 0), run.id).toBe(true);
+      expect(
+        at.every((t, i) => Number.isInteger(t) && (i === 0 || t > at[i - 1])),
+        run.id,
+      ).toBe(true);
+      expect(
+        out.every((o) => Number.isFinite(o) && o >= 0),
+        run.id,
+      ).toBe(true);
       expect(at[at.length - 1], `${run.id}: the last report is the run's end`).toBe(run.endMs);
-      expect(Math.max(...out), `${run.id}: the run reached the end of the video`).toBeGreaterThanOrEqual(run.videoSeconds * 1000 * 0.99);
+      expect(
+        Math.max(...out),
+        `${run.id}: the run reached the end of the video`,
+      ).toBeGreaterThanOrEqual(run.videoSeconds * 1000 * 0.99);
       expect(Math.max(...out), run.id).toBeLessThanOrEqual(run.videoSeconds * 1000 * 1.01);
       expect(ROUTES, run.id).toContain(run.route);
       expect(run.source.startsWith("runs/"), run.id).toBe(true);
@@ -503,9 +590,15 @@ describe("the recorded runs", () => {
     expect(LONG.length).toBeGreaterThanOrEqual(FIXTURE_MIN_LONG_RUNS);
     expect(SHORT.length).toBeGreaterThanOrEqual(FIXTURE_MIN_SHORT_RUNS);
     expect(statSync(FIXTURE_FILE).size).toBeLessThan(FIXTURE_MAX_BYTES);
-    expect(new Set(REPLAY_RUNS.map((r) => r.pc)).size, "every PC profile the lab has run").toBeGreaterThanOrEqual(2);
+    expect(
+      new Set(REPLAY_RUNS.map((r) => r.pc)).size,
+      "every PC profile the lab has run",
+    ).toBeGreaterThanOrEqual(2);
     expect(new Set(REPLAY_RUNS.map((r) => r.route))).toEqual(new Set(ROUTES));
-    expect(new Set(REPLAY_RUNS.map((r) => r.kind)).size, "every project kind of the lab").toBeGreaterThanOrEqual(9);
+    expect(
+      new Set(REPLAY_RUNS.map((r) => r.kind)).size,
+      "every project kind of the lab",
+    ).toBeGreaterThanOrEqual(9);
     expect(new Set(REPLAY_RUNS.map((r) => r.choice))).toEqual(new Set(["quality", "fast", null]));
   });
 
@@ -515,7 +608,9 @@ describe("the recorded runs", () => {
 
   it("C1 gate: a run that renders for under 20 s never shows a figure", () => {
     expect(SHORT.length).toBeGreaterThanOrEqual(FIXTURE_MIN_SHORT_RUNS);
-    const shown = SHORT.filter((f) => f.recs.some((rec) => rec.value.kind === "left" || rec.value.kind === "longer"));
+    const shown = SHORT.filter((f) =>
+      f.recs.some((rec) => rec.value.kind === "left" || rec.value.kind === "longer"),
+    );
     expect(shown.map((f) => f.run.id)).toEqual([]);
   });
 
@@ -531,7 +626,7 @@ describe("the recorded runs", () => {
     ).toBeGreaterThanOrEqual(LIVE_MIN_SHARE_WITH_FIGURE);
   });
 
-  it('C2 finishing: said from 90 % made and never before, and never replaced by a number', () => {
+  it("C2 finishing: said from 90 % made and never before, and never replaced by a number", () => {
     expect(ALL.flatMap(finishingViolations)).toEqual([]);
   });
 
@@ -546,18 +641,23 @@ describe("the recorded runs", () => {
 
   it("C5 accuracy: from 15 % to 85 % done, at least 80 % of the shown figures are right wherever 10 or more runs show one", () => {
     const judged = ROWS.filter((r) => r.shown.length >= C5_MIN_RUNS_SHOWING);
-    expect(judged.length, "the claim has points to judge").toBeGreaterThanOrEqual(C5_CHECKPOINTS.length - 3);
+    expect(judged.length, "the claim has points to judge").toBeGreaterThanOrEqual(
+      C5_CHECKPOINTS.length - 3,
+    );
     const failing = judged
       .filter((r) => r.right.length / r.shown.length < C5_MIN_RIGHT_SHARE)
-      .map((r) => `${pct0(r.checkpoint)}: ${r.right.length} of ${r.shown.length} right (${r.wrong.map((p) => p.facts.run.id).join(", ")})`);
+      .map(
+        (r) =>
+          `${pct0(r.checkpoint)}: ${r.right.length} of ${r.shown.length} right (${r.wrong.map((p) => p.facts.run.id).join(", ")})`,
+      );
     expect(failing).toEqual([]);
   });
 
-  it('C6 taking longer: never the first thing said, and held; where it appears on a healthy run is in the report', () => {
+  it("C6 taking longer: never the first thing said, and held; where it appears on a healthy run is in the report", () => {
     expect(ALL.flatMap(longerViolations)).toEqual([]);
   });
 
-  it('C6 taking longer: no real, healthy run is ever said to be taking longer', () => {
+  it("C6 taking longer: no real, healthy run is ever said to be taking longer", () => {
     expect(
       LONGER_CASES.map((c) => `${c.id}@${pct0(c.share)}`),
       "false alarms on healthy runs",
@@ -571,7 +671,9 @@ describe("the recorded runs", () => {
     });
     expect(stalled.map((s) => s.facts).flatMap(basicViolations)).toEqual([]);
     expect(stalled.map((s) => s.facts).flatMap(longerViolations)).toEqual([]);
-    const bitten = stalled.filter((s) => s.facts.recs[s.pivot + STALL_SECONDS]?.value.kind === "left");
+    const bitten = stalled.filter(
+      (s) => s.facts.recs[s.pivot + STALL_SECONDS]?.value.kind === "left",
+    );
     expect(bitten.length).toBeGreaterThanOrEqual(STALL_MIN_RUNS_WITH_FIGURE_AT_ITS_END);
   });
 
@@ -583,7 +685,10 @@ describe("the recorded runs", () => {
     for (const f of ALL) {
       const values = f.recs.map((rec) => rec.value);
       for (const by of [987_654, 1_700_000_000_000]) {
-        expect(replayRun(shifted(f.run, by)).map((rec) => rec.value), `${f.run.id} +${by} ms`).toEqual(values);
+        expect(
+          replayRun(shifted(f.run, by)).map((rec) => rec.value),
+          `${f.run.id} +${by} ms`,
+        ).toEqual(values);
       }
     }
   });
@@ -599,18 +704,26 @@ describe("the recorded runs", () => {
     const outcomes = SLOW_BY_FACTOR.get(C8_SLOW_FACTOR) ?? [];
     expect(outcomes.length).toBeGreaterThanOrEqual(30);
     const missed = outcomes.filter((o) => o.caughtAt === null).map((o) => o.id);
-    expect(caughtShare(outcomes), `not caught: ${missed.join(", ")}`).toBeGreaterThanOrEqual(C8_MIN_CAUGHT_SHARE);
+    expect(caughtShare(outcomes), `not caught: ${missed.join(", ")}`).toBeGreaterThanOrEqual(
+      C8_MIN_CAUGHT_SHARE,
+    );
   });
 
   it("C8 a run that turns only 1.2 times slower is hardly ever said to be taking longer (the claim is never: see C8_HEALTHY_MAX_CAUGHT)", () => {
     const outcomes = SLOW_BY_FACTOR.get(C8_HEALTHY_FACTOR) ?? [];
     expect(outcomes.length).toBeGreaterThanOrEqual(30);
-    const caught = outcomes.filter((o) => o.caughtAt !== null).map((o) => `${o.id}@${pct0(o.caughtAt ?? 0)}`);
-    expect(caught.length, `said "taking longer": ${caught.join(", ")}`).toBeLessThanOrEqual(C8_HEALTHY_MAX_CAUGHT);
+    const caught = outcomes
+      .filter((o) => o.caughtAt !== null)
+      .map((o) => `${o.id}@${pct0(o.caughtAt ?? 0)}`);
+    expect(caught.length, `said "taking longer": ${caught.join(", ")}`).toBeLessThanOrEqual(
+      C8_HEALTHY_MAX_CAUGHT,
+    );
   });
 
   it("C8 the slowdown does not break C1 to C4 (3 times slower, from 40 %)", () => {
-    const slowed = ALL.filter((f) => f.run.endMs / 1000 >= C8_MIN_RENDER_SECONDS).map((f) => factsOf(slowedFrom(f.run, C8_SLOW_FROM_SHARE, C8_SLOW_FACTOR)));
+    const slowed = ALL.filter((f) => f.run.endMs / 1000 >= C8_MIN_RENDER_SECONDS).map((f) =>
+      factsOf(slowedFrom(f.run, C8_SLOW_FROM_SHARE, C8_SLOW_FACTOR)),
+    );
     expect(slowed.flatMap(basicViolations)).toEqual([]);
     expect(slowed.flatMap(longerViolations)).toEqual([]);
   });
