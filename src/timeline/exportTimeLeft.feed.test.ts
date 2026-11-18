@@ -249,6 +249,36 @@ describe("recorded real runs through the reader, the reporter, the store, the ca
     expect(shownTimeLeftSeconds(second, Date.now())).toBeNull();
   });
 
+  it("says no time once the render is over (the file is being checked or saved), though the last answer was a figure, and says nothing of the time in the dialog either", () => {
+    const run = REPLAY_RUNS.find((r) => r.endMs > 100_000 && r.route === "x264")!;
+    const pure = replayRun(run);
+    const upTo = pure.findIndex((r) => r.value.kind === "left" && r.fraction > 0.5);
+    expect(upTo).toBeGreaterThan(0);
+    const partial: ReplayRun = { ...run, samples: run.samples.slice(0, upTo + 1) };
+    const seen = play(partial, "after-render");
+    expect(seen[seen.length - 1].card).toMatch(/ left$/);
+    for (const stage of ["checking", "saving"] as const) {
+      useExportJob.getState().setLiveStage("after-render", stage);
+      const live = liveFeedOf(useExportJob.getState(), "after-render")!;
+      const now = Date.now();
+      expect(describeLiveStatus(live, now)).not.toMatch(/ left$|Finishing$|taking longer/);
+      expect(shownTimeLeftSeconds(live, now)).toBeNull();
+      expect(
+        describeDialogProgress(
+          {
+            own: live,
+            place: null,
+            phase: "rendering",
+            fraction: 0.6,
+            timeLeft: live.timeLeft!,
+            speed: 1,
+          },
+          now,
+        ).timeLeft,
+      ).toBe("");
+    }
+  });
+
   it("a render made in parts (the streamed engine's feed through the real sequence reader) says no time in its parts, and ends in 'Finishing'", () => {
     // three producers of 30 s of video each, then the final encode of the whole 90 s: the share is made over 90 + 90 s of work
     const parts = [30, 30, 30];
