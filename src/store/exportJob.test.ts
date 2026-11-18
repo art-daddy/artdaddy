@@ -687,6 +687,40 @@ describe("the time left of the running export, as the store keeps it", () => {
       expect(state().phase).toBe("preparing");
     });
 
+    // The gap between two attempts: the first has ended and the restart waits for its turn, so the dialog has no feed of its own to read and falls back on the job.
+    it("clears the job's answer when the feed it followed ends, so the gap before a restart does not say what the last attempt latched", () => {
+      state().begin(null);
+      begin("a");
+      playSteady(report, { total: 100, from: 0, to: 95, origin: ORIGIN });
+      expect(state().timeLeft).toEqual(FINISHING);
+      state().endLive("a");
+      expect(state().timeLeft).toEqual(NO_TIME_LEFT);
+      expect(state().pace).toEqual(startPace());
+      const gap = describeDialogProgress(
+        {
+          own: null,
+          place: null,
+          phase: "rendering",
+          fraction: state().fraction,
+          timeLeft: state().timeLeft,
+          speed: state().speed,
+        },
+        Date.now(),
+      );
+      expect(gap.timeLeft).toBe("");
+    });
+
+    it("keeps the job's answer when only an export that is finishing ends: the job follows the feed that is live", () => {
+      state().begin(null);
+      begin("a");
+      begin("b"); // a is finishing now
+      playSteady(report, { total: 300, from: 0, to: 60, origin: ORIGIN });
+      expect(state().timeLeft).toEqual({ kind: "left", seconds: 240 });
+      state().endLive("a");
+      expect(live().jobId).toBe("b");
+      expect(state().timeLeft).toEqual({ kind: "left", seconds: 240 });
+    });
+
     it.each(["done", "failed", "cancelled"] as const)(
       "is moved by a report only while it is preparing or rendering: a late one after it is %s changes nothing",
       (phase) => {

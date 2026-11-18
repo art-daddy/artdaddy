@@ -56,7 +56,6 @@ const PARTS = 4;
 
 // ── the harness: the real store, driven report by report, read by the real consumers ───────────────────────────────────
 
-type Patch = Parameters<ReturnType<typeof useExportJob.getState>["update"]>[0];
 interface Part {
   readonly step: number;
   readonly steps: number;

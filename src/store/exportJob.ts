@@ -333,7 +333,13 @@ export const useExportJob = create<ExportState>((set, get) => ({
       if (!ending && !(jobId in s.finishing)) return s;
       const rest = { ...s.finishing };
       delete rest[jobId];
-      return { live: ending ? null : s.live, finishing: rest };
+      return {
+        live: ending ? null : s.live,
+        finishing: rest,
+        // The dialog's own job follows whichever export renders (see `update`): when that feed has ended its answer is no one's, and the next
+        // attempt's (a restart waits for its turn) must not be told what the last one latched.
+        ...(ending ? { timeLeft: NO_TIME_LEFT, pace: startPace() } : {}),
+      };
     }),
   setLiveBusy: (jobId, busy) =>
     set((s) => {
