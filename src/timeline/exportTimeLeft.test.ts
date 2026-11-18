@@ -1304,6 +1304,23 @@ describe("R8 a render in parts", () => {
     ]);
   });
 
+  it("restarts the clock and the gate when only the number of parts changes", () => {
+    // the final encode of a plan of 4 (a figure from 20 s), 5 s of a plan of 5 (3 of 5 is a part before the last),
+    // then the final encode of 4 again: it waits for its own 20 s, the figure then is 55 s, a minute
+    const reps = [
+      ...inPart(line(0, 30, 1, 0.5, 0.004), 3, 4),
+      ...inPart(line(31, 35, 1, 0.2, 0), 3, 5),
+      ...inPart(line(36, 70, 1, 0.7, 0.004), 3, 4),
+    ];
+    expect(shows(reps)).toEqual([
+      ...Array(20).fill("none"),
+      ...Array(11).fill("left 120"),
+      ...Array(5).fill("none"),
+      ...Array(20).fill("none"),
+      ...Array(15).fill("left 60"),
+    ]);
+  });
+
   it("keeps the highest share seen across a change of part: a final encode that reports less stands still and says nothing", () => {
     const reps = [
       ...inPart(line(0, 30, 1, 0.5, 0.004), 3, 4),
