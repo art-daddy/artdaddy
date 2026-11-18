@@ -324,7 +324,7 @@ describe("the encoder an export runs on, in words", () => {
       );
     }
     expect(describeEncoder("x264_fast", "promise_line")).toBe(
-      "Using a faster setting to save time · the picture may be slightly softer",
+      "Using light compression to save time · the picture may be slightly softer",
     );
   });
 
