@@ -1,7 +1,9 @@
 // The one place that decides what time left a running export may say. Pure: no store, no clock, no I/O. The progress
 // reporter hands it each report of one run (when it arrived and the share of the whole render made) and publishes the
-// answer; the card, the Export dialog, the assistant's export list and the slow banner only read that answer, so they can
-// never disagree. It works on the share made, never on ffmpeg's own `speed=` (a whole-run average that counts start-up).
+// answer; the card, the Export dialog and the assistant's export list (`time_left_s`) only read that answer, so they can
+// never disagree. The slow banner and the assistant's `projected_total_s` do not read it: they need the render's raw,
+// unrounded pace and keep reading that on purpose. It works on the share made, never on ffmpeg's own `speed=` (a
+// whole-run average that counts start-up).
 //
 // The rule, in the order it is applied to every report:
 //  - from 90 % done the answer is "finishing", for good: the last tenth is the end of the render and the file's write, and
