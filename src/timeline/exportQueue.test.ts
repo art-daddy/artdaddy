@@ -37,6 +37,7 @@ import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
 import { formatActivityMark } from "./exportActivity";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
+import { roundTimeLeft } from "./exportTimeLeft";
 import * as options from "./exportOptions";
 import type { ExportQuestionKind } from "./exportQuestions";
 import { FakeJobs } from "../test/fakeJobs";
@@ -2500,70 +2501,84 @@ describe("what a running export publishes for the chat card", () => {
 
   it("keeps saying where an export is while the next one renders (its file is still being checked)", async () => {
     const { fs, store, jobs } = await fresh();
-    let finishCheck!: () => void;
-    const checking = new Promise<void>((resolve) => (finishCheck = resolve));
-    let finishSecond!: () => void;
-    const secondRuns = new Promise<void>((resolve) => (finishSecond = resolve));
-    let secondQueued!: () => void;
-    const queued = new Promise<void>((resolve) => (secondQueued = resolve));
-    const SECOND = "C:/out/second.mp4";
-    const first = await submitExport({
-      store,
-      supervisor: jobs,
-      origin: AGENT,
-      destPath: DEST,
-      stagePath: STAGE,
-      filename: "first.mp4",
-      meta,
-      run: async (_, id) => {
-        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-        jobs.stdout(id, block(1800, 60_000));
-        useExportJob.getState().update({ fraction: 1, etaSec: 0, frame: 1800, speed: 1 });
-        await queued; // the second is waiting behind it in the supervisor's line
-        jobs.exit(id, 0, ""); // the render is over: the second one starts while this file is checked
-        await checking;
-        await fs.writeBytes(STAGE, new Uint8Array([1]));
-        return {};
-      },
-    });
-    const second = await submitExport({
-      store,
-      supervisor: jobs,
-      origin: AGENT,
-      destPath: SECOND,
-      stagePath: `${SECOND}.part`,
-      filename: "second.mp4",
-      meta,
-      run: async (_, id) => {
-        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-        secondQueued();
-        await vi.waitFor(() => expect(jobs.started).toContain(id));
-        jobs.stdout(id, block(180, 6_000));
-        useExportJob.getState().update({ fraction: 0.1, etaSec: 90, frame: 180, speed: 1 });
-        await secondRuns;
-        jobs.exit(id, 0, "");
-        await fs.writeBytes(`${SECOND}.part`, new Uint8Array([2]));
-        return {};
-      },
-    });
-    await vi.waitFor(() => expect(live()?.jobId).toBe(second.job_id));
-    await vi.waitFor(() => expect(live()?.fraction).toBe(0.1));
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      let finishCheck!: () => void;
+      const checking = new Promise<void>((resolve) => (finishCheck = resolve));
+      let finishSecond!: () => void;
+      const secondRuns = new Promise<void>((resolve) => (finishSecond = resolve));
+      let secondQueued!: () => void;
+      const queued = new Promise<void>((resolve) => (secondQueued = resolve));
+      const SECOND = "C:/out/second.mp4";
+      const first = await submitExport({
+        store,
+        supervisor: jobs,
+        origin: AGENT,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "first.mp4",
+        meta,
+        run: async (_, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          jobs.stdout(id, block(1800, 60_000));
+          useExportJob.getState().update({ fraction: 1, etaSec: 0, frame: 1800, speed: 1 });
+          await queued; // the second is waiting behind it in the supervisor's line
+          jobs.exit(id, 0, ""); // the render is over: the second one starts while this file is checked
+          await checking;
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      });
+      const second = await submitExport({
+        store,
+        supervisor: jobs,
+        origin: AGENT,
+        destPath: SECOND,
+        stagePath: `${SECOND}.part`,
+        filename: "second.mp4",
+        meta,
+        run: async (_, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          secondQueued();
+          await vi.waitFor(() => expect(jobs.started).toContain(id));
+          // A render of 200 s in all, a report every second for 40 s: the rule has had its 20 s and a fifth of the video (one report is no longer
+          // enough to be told a time left), and the render's own raw guess says the same as the share.
+          const began = Date.now();
+          for (let t = 1; t <= 40; t++) {
+            vi.setSystemTime(began + t * 1000);
+            jobs.stdout(id, block(t * 9, t * 300));
+            useExportJob
+              .getState()
+              .update({ fraction: t / 200, etaSec: 200 - t, frame: t * 9, speed: 1 });
+          }
+          await secondRuns;
+          jobs.exit(id, 0, "");
+          await fs.writeBytes(`${SECOND}.part`, new Uint8Array([2]));
+          return {};
+        },
+      });
+      await vi.waitFor(() => expect(live()?.jobId).toBe(second.job_id));
+      await vi.waitFor(() => expect(live()?.fraction).toBe(0.2));
 
-    const rows = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
-    expect(rows.map((r) => [r.job_id, r.state, r.stage])).toEqual([
-      [first.job_id, "running", "checking"], // not "no news": it is still being checked
-      [second.job_id, "running", "rendering"],
-    ]);
-    expect(rows[1]).toMatchObject({ progress_percent: 10, time_left_s: 90 });
-    expect(rows[0]).not.toHaveProperty("time_left_s"); // the render is over: nothing left to time
+      const rows = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
+      expect(rows.map((r) => [r.job_id, r.state, r.stage])).toEqual([
+        [first.job_id, "running", "checking"], // not "no news": it is still being checked
+        [second.job_id, "running", "rendering"],
+      ]);
+      // 40 s into a render of 200 s: 160 s left; under ten minutes the grid is whole minutes, and 160 s is 2 min 40 s, so the nearest is 3 min = 180 s
+      expect(rows[1]).toMatchObject({ progress_percent: 20, time_left_s: 180 });
+      expect(rows[0]).not.toHaveProperty("time_left_s"); // the render is over: nothing left to time
 
-    finishCheck();
-    await vi.waitFor(() => expect(listExportRecords()[0].state).toBe("done"));
-    expect(live()?.jobId).toBe(second.job_id); // the first one settling does not end the second one's feed
-    finishSecond();
-    await whenExportsSettle();
-    expect(live()).toBeNull();
-    expect(useExportJob.getState().finishing).toEqual({}); // nothing is left behind
+      finishCheck();
+      await vi.waitFor(() => expect(listExportRecords()[0].state).toBe("done"));
+      expect(live()?.jobId).toBe(second.job_id); // the first one settling does not end the second one's feed
+      finishSecond();
+      await whenExportsSettle();
+      expect(live()).toBeNull();
+      expect(useExportJob.getState().finishing).toEqual({}); // nothing is left behind
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("begins when the export's turn comes, follows its stage, and ends when it settles (no menu involved)", async () => {
@@ -2815,35 +2830,48 @@ describe("what a running export publishes for the chat card", () => {
 
     it("says the stage, how far and how long is left for the running export", async () => {
       const { fs, store, jobs } = await fresh();
-      let rows: Any[] = [];
-      await submitExport({
-        store,
-        supervisor: jobs,
-        destPath: DEST,
-        stagePath: STAGE,
-        filename: "final.mp4",
-        meta,
-        run: async (_, id) => {
-          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-          jobs.stdout(id, block(100, 15_000));
-          useExportJob.getState().update({ fraction: 0.25, etaSec: 92, frame: 100, speed: 1 });
-          rows = await list();
-          jobs.exit(id, 0, "");
-          await fs.writeBytes(STAGE, new Uint8Array([1]));
-          return {};
-        },
-      });
-      await whenExportsSettle();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        state: "running",
-        stage: "rendering",
-        progress_percent: 25,
-        time_left_s: 92,
-      });
-      expect(rows[0]).not.toHaveProperty("queue_position");
-      expect(rows[0]).not.toHaveProperty("stalled_for_s");
-      expect(rows[0]).not.toHaveProperty("setting"); // the normal setting needs no mention
+      vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+      try {
+        let rows: Any[] = [];
+        await submitExport({
+          store,
+          supervisor: jobs,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          meta,
+          run: async (_, id) => {
+            await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+            // A render of 160 s in all, a report every second for 40 s: a quarter made and 40 s rendered, so the rule has a time to say. The render's own raw
+            // guess (start-up counted) says five minutes: the row follows the share made, not that guess.
+            for (let t = 1; t <= 40; t++) {
+              vi.setSystemTime(1_000_000 + t * 1000);
+              jobs.stdout(id, block(t * 10, t * 375));
+              useExportJob
+                .getState()
+                .update({ fraction: t / 160, etaSec: 300, frame: t * 10, speed: 1 });
+            }
+            rows = await list();
+            jobs.exit(id, 0, "");
+            await fs.writeBytes(STAGE, new Uint8Array([1]));
+            return {};
+          },
+        });
+        await whenExportsSettle();
+        expect(rows).toHaveLength(1);
+        // 40 s into a render of 160 s: 120 s left, which is exactly 2 min on the grid of whole minutes
+        expect(rows[0]).toMatchObject({
+          state: "running",
+          stage: "rendering",
+          progress_percent: 25,
+          time_left_s: 120,
+        });
+        expect(rows[0]).not.toHaveProperty("queue_position");
+        expect(rows[0]).not.toHaveProperty("stalled_for_s");
+        expect(rows[0]).not.toHaveProperty("setting"); // the normal setting needs no mention
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("says which setting an export runs at when it is not the normal one, so an assistant can explain a slower export", async () => {
@@ -2919,11 +2947,15 @@ describe("what a running export publishes for the chat card", () => {
           meta,
           run: async (_, id) => {
             await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-            jobs.stdout(id, block(100, 3300));
-            useExportJob.getState().update({ fraction: 0.05, etaSec: 100, frame: 100 });
+            // A render of 160 s in all, a report every second for 40 s: it has a time left to say
+            for (let t = 1; t <= 40; t++) {
+              vi.setSystemTime(1_000_000 + t * 1000);
+              jobs.stdout(id, block(t * 10, t * 375));
+              useExportJob.getState().update({ fraction: t / 160, etaSec: 160 - t, frame: t * 10 });
+            }
             before = await list(); // it just moved: the time left is something to say
-            vi.setSystemTime(1_000_000 + 75_000); // the same block, again and again, for 75 s
-            useExportJob.getState().update({ fraction: 0.05, etaSec: 100, frame: 100 });
+            vi.setSystemTime(1_000_000 + 40_000 + 75_000); // the same block, again and again, for 75 s
+            useExportJob.getState().update({ fraction: 0.25, etaSec: 120, frame: 400 });
             rows = await list();
             jobs.exit(id, 0, "");
             await fs.writeBytes(STAGE, new Uint8Array([1]));
@@ -2931,7 +2963,8 @@ describe("what a running export publishes for the chat card", () => {
           },
         });
         await whenExportsSettle();
-        expect(before[0]).toMatchObject({ time_left_s: 100 });
+        // 40 s into a render of 160 s: 120 s left, which is exactly 2 min on the grid of whole minutes
+        expect(before[0]).toMatchObject({ time_left_s: 120 });
         expect(rows[0]).toMatchObject({ state: "running", stalled_for_s: 75 });
         // The card says "no progress" and no time left (a render that is not moving has no ETA worth
         // reading), and the list says the same.
@@ -2941,36 +2974,66 @@ describe("what a running export publishes for the chat card", () => {
       }
     });
 
-    it("does not give a time left that cannot be one (more than two days, not a number)", async () => {
+    it("does not give a time left that cannot be one (not a number, a pace so slow it is over two days, a share that goes backwards)", async () => {
       const { fs, store, jobs } = await fresh();
-      const seen: Any[] = [];
-      await submitExport({
-        store,
-        supervisor: jobs,
-        destPath: DEST,
-        stagePath: STAGE,
-        filename: "final.mp4",
-        meta,
-        run: async (_, id) => {
-          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-          jobs.stdout(id, block(100, 3300));
-          for (const etaSec of [49 * 3600, Number.POSITIVE_INFINITY, Number.NaN, -3, 90]) {
-            useExportJob.getState().update({ fraction: 0.05, etaSec, frame: 100 });
-            seen.push((await list())[0]);
-          }
-          jobs.exit(id, 0, "");
-          await fs.writeBytes(STAGE, new Uint8Array([1]));
-          return {};
-        },
-      });
-      await whenExportsSettle();
-      expect(seen.map((row) => row.time_left_s)).toEqual([
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        90,
-      ]);
+      vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+      try {
+        const seen: Array<{ at: number; time_left_s: unknown }> = [];
+        await submitExport({
+          store,
+          supervisor: jobs,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          meta,
+          run: async (_, id) => {
+            await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+            jobs.stdout(id, block(100, 3300));
+            let frame = 100;
+            // The render's own raw guess is garbage throughout (the old figure read it; the new one must not).
+            const raw = [49 * 3600, Number.POSITIVE_INFINITY, Number.NaN, -3, 90];
+            const say = async (at: number, fraction: number) => {
+              vi.setSystemTime(1_000_000 + at * 1000);
+              useExportJob
+                .getState()
+                .update({ fraction, etaSec: raw[at % raw.length], frame: frame++ });
+              seen.push({ at, time_left_s: (await list())[0].time_left_s });
+            };
+            // not a number, infinite, below zero: not a report at all
+            for (const [at, fraction] of [
+              [1, Number.NaN],
+              [2, Number.POSITIVE_INFINITY],
+              [3, Number.NEGATIVE_INFINITY],
+              [4, -3],
+            ])
+              await say(at, fraction);
+            // a pace of a ten-millionth of the video a second: over a hundred days left, with a minute and a half rendered
+            for (let at = 5; at <= 90; at++) await say(at, at * 1e-7);
+            // a share that goes backwards stands still
+            await say(91, 0);
+            // then a render with a sane pace: a two-hundredth of the video a second, so after 20 s a tenth is made and 180 s are left
+            for (let at = 92; at <= 111; at++) await say(at, 0.005 * (at - 91));
+            jobs.exit(id, 0, "");
+            await fs.writeBytes(STAGE, new Uint8Array([1]));
+            return {};
+          },
+        });
+        await whenExportsSettle();
+        const onTheGrid = (x: unknown) =>
+          x === undefined ||
+          (typeof x === "number" &&
+            Number.isInteger(x) &&
+            x > 0 &&
+            x <= 48 * 3600 &&
+            roundTimeLeft(x) === x);
+        expect(seen.filter((s) => !onTheGrid(s.time_left_s))).toEqual([]);
+        // nothing before the sane render: garbage and an absurd pace make no figure, even after a minute and a half of rendering
+        expect(seen.filter((s) => s.at <= 91 && s.time_left_s !== undefined)).toEqual([]);
+        // the sane render does: 0.1 made over the last 20 s at 0.005 a second leaves 0.9 / 0.005 = 180 s, which is 3 min on the grid
+        expect(seen.at(-1)).toEqual({ at: 111, time_left_s: 180 });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("says how long an export itself took in duration_s, not how long it waited in line behind another", async () => {
