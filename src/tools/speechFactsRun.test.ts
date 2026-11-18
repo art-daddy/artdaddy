@@ -33,6 +33,7 @@ import {
 import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
 import { __resetSpeechSession } from "./speechAdmission";
 import { holdCpuOnly } from "./speechBackend";
+import { DEFAULT_BEAM } from "./speechDecoding";
 import { __resetSpeechFactsShipped, __setSpeechFactsShipped } from "./speechFacts";
 import { modelKeyOfPath } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
@@ -68,6 +69,17 @@ const BATCH_ON_CHIP = fixture("batch3");
 const NEW_KEYS = new Set(["ng", "held", "mf", "net", "dtw", "lead", "gpu", "lang"]);
 const factsOf = (reason: string): string[] =>
   reason.split(" ").filter((token) => NEW_KEYS.has(token.split("=")[0]));
+
+/** The beam a launch was given: the engine's own default when its arguments do not name one. */
+const beamOf = (args: readonly string[]): number =>
+  args.includes("-bs") ? Number(flagValues(args, "-bs")[0]) : DEFAULT_BEAM;
+/** What 0.28.0 sends for the run the logs above describe (ten minutes of audio in 66.1 seconds, eight threads): the older
+ *  figures and nothing more. The beam is the one the launch was given. */
+const OLD_SAMPLE = (beam: number): string =>
+  `audio_s=600.0 wall_s=66.1 x=9.08 model=small threads=8 beam=${beam}`;
+/** whisper's output for one clip that says one word. */
+const A_WORD =
+  '{"result":{"language":"en"},"transcription":[{"offsets":{"from":0,"to":1000},"text":" a","tokens":[{"text":" a","offsets":{"from":0,"to":1000},"p":0.9}]}]}';
 
 let sent: Record<string, unknown>[] = [];
 
@@ -230,6 +242,32 @@ describe("what the sample says about how a run was made", () => {
     expect(factsOf(got.reason)).toEqual(["mf=small", "dtw=r", "lead=gt1", "gpu=amd", "lang=en"]);
   });
 
+  it("a chip that crashed, retried on the processor: the retry says it carried -ng, and it is not a held chip (the hold is for the next run)", async () => {
+    const got = await transcribed({
+      voiceAtMs: 400,
+      engine: async (launch) =>
+        launch === 0 ? { code: CRASH, stderr: ON_CHIP } : { code: 0, stderr: ON_PROCESSOR },
+    });
+    expect(got.launches).toHaveLength(2);
+    expect(got.launches[0]).not.toContain("-ng");
+    expect(got.launches[1]).toContain("-ng");
+    expect(factsOf(got.reason)).toEqual(["ng=1", "mf=small", "lead=le1", "lang=en"]);
+  });
+
+  it("an aligned launch that crashed on the chip, the plain retry that crashed too, then the processor: redone, with where the voice started kept from the first", async () => {
+    const got = await transcribed({
+      voiceAtMs: 1360,
+      engine: async (launch) =>
+        launch < 2 ? { code: CRASH, stderr: ON_CHIP } : { code: 0, stderr: ON_PROCESSOR },
+    });
+    expect(got.launches).toHaveLength(3);
+    expect(got.launches[0]).toContain("-dtw");
+    expect(got.launches[1]).not.toContain("-dtw");
+    expect(got.launches[2]).toContain("-ng");
+    expect(got.launches[2]).not.toContain("-dtw");
+    expect(factsOf(got.reason)).toEqual(["ng=1", "mf=small", "dtw=r", "lead=gt1", "lang=en"]);
+  });
+
   it("the language it was asked for, as the engine takes it: a code, or auto", async () => {
     expect(factsOf((await transcribed({ language: "hi" })).reason)).toContain("lang=hi");
     expect(factsOf((await transcribed({ language: "auto" })).reason)).toContain("lang=auto");
@@ -286,6 +324,8 @@ describe("a build that keeps the facts dark", () => {
     __setSpeechFactsShipped(false);
     const off = await transcribed({ voiceAtMs: 1360, hold: true, log: ON_PROCESSOR });
     expect(factsOf(off.reason)).toEqual([]);
+    // exactly what 0.28.0 sends for this run, not only free of the new words: a word under any other name would show here
+    expect(off.reason).toBe(OLD_SAMPLE(beamOf(off.launches.at(-1)!)));
     expect(factsOf(on.reason).length).toBeGreaterThan(0);
     expect(on.reason.startsWith(off.reason)).toBe(true);
     expect(on.reason.slice(off.reason.length).trim().split(" ")).toEqual(factsOf(on.reason));
@@ -305,10 +345,7 @@ describe("a build that keeps the facts dark", () => {
         void setTimeout(() => {
           const out = `${spec.args[spec.args.indexOf("-of") + 1]}.json`;
           rig.files.add(out);
-          rig.texts.set(
-            out,
-            '{"result":{"language":"en"},"transcription":[{"offsets":{"from":0,"to":1000},"text":" a","tokens":[{"text":" a","offsets":{"from":0,"to":1000},"p":0.9}]}]}',
-          );
+          rig.texts.set(out, A_WORD);
           jobs.exit(spec.id, 0, ON_PROCESSOR);
         }, 0);
       await runWhisper(rig.ctx(), freshSource(), "small", "en");
@@ -327,18 +364,63 @@ describe("a build that keeps the facts dark", () => {
     expect(lit[0].meta.notes).not.toHaveProperty("lang");
     expect(lit[0].meta.notes).not.toHaveProperty("net");
   });
+
+  it("writes no mark of the net run on its record when dark, and the mark on the run that went on when lit", async () => {
+    const netRun = async (gate: boolean) => {
+      localStorage.clear();
+      // a run that went on with the full-size file keeps the smaller one out of the plan for the rest of the session
+      __resetSmallerFileFailure();
+      __setSpeechFactsShipped(gate);
+      recordSpeechRun(60, 120, "cpu");
+      const jobs = new FakeJobs();
+      __setJobSupervisor(jobs);
+      const rig = speechRig({});
+      installModels(rig, ["small", "small_q8_0"]);
+      jobs.onStart = (spec) =>
+        void setTimeout(() => {
+          const smaller = modelKeyOfPath(flagValues(spec.args, "-m")[0]) === "small_q8_0";
+          if (!smaller) {
+            const out = `${spec.args[spec.args.indexOf("-of") + 1]}.json`;
+            rig.files.add(out);
+            rig.texts.set(out, A_WORD);
+          }
+          jobs.exit(
+            spec.id,
+            smaller ? 1 : 0,
+            smaller ? "whisper-cli: the model could not be used" : ON_PROCESSOR,
+          );
+        }, 0);
+      await runWhisper(rig.ctx(), freshSource(), "small", "en");
+      return jobs.submitted.filter((s) => s.program === "whisper-cli");
+    };
+    const dark = await netRun(false);
+    expect(dark).toHaveLength(2);
+    for (const spec of dark) expect(spec.meta).not.toHaveProperty("notes");
+    const lit = await netRun(true);
+    expect(lit).toHaveLength(2);
+    expect(modelKeyOfPath(flagValues(lit[0].args, "-m")[0])).toBe("small_q8_0");
+    expect(modelKeyOfPath(flagValues(lit[1].args, "-m")[0])).toBe("small");
+    expect(lit[0].meta.notes).toMatchObject({ ng: true, mf: "small_q8_0" });
+    expect(lit[0].meta.notes).not.toHaveProperty("net");
+    expect(lit[1].meta.notes).toMatchObject({ net: true, mf: "small" });
+  });
 });
 
 describe("a run a crashed page left in the app process", () => {
-  const OUTPUT =
-    '{"result":{"language":"en"},"transcription":[{"offsets":{"from":0,"to":1000},"text":" a","tokens":[{"text":" a","offsets":{"from":0,"to":1000},"p":0.9}]}]}';
-
   /** The first page launches a run (alone on the processor with the chip held off, or two files in one launch on the chip) and
    *  dies; the next page, a module graph of its own that knows nothing but what the job's record says, takes the run over and
-   *  reports it. */
+   *  reports it. The record the next page reads is the one that was serialised when the job was submitted, as the app
+   *  process's own supervisor keeps it (the stand-in keeps the live object, which a launch could still be writing to), and
+   *  what the first page left in the browser's own storage (the hold on the chip) is gone. */
   async function reportedByTheNextPage(gate: boolean, several = false) {
     const jobs = new FakeJobs();
     __setJobSupervisor(jobs);
+    const serialised = new Map<string, Record<string, unknown>>();
+    const submit = jobs.submit.bind(jobs);
+    jobs.submit = async (spec) => {
+      serialised.set(spec.id, JSON.parse(JSON.stringify(spec.meta)) as Record<string, unknown>);
+      return submit(spec);
+    };
     if (!several) holdCpuOnly(CRASH);
     __setSpeechFactsShipped(gate);
     const rig = speechRig({ ...(several ? {} : { audio: () => wavWithVoiceAt(1360) }) });
@@ -348,7 +430,11 @@ describe("a run a crashed page left in the app process", () => {
       await new Promise((r) => setTimeout(r, 2));
     expect(jobs.started).toHaveLength(1);
     const [spec] = jobs.submitted.filter((s) => s.program === "whisper-cli");
+    const record = serialised.get(spec.id)!;
     jobs.pageDied();
+    localStorage.clear();
+    const [view] = (await jobs.list()).filter((v) => v.id === spec.id);
+    jobs.restoreJob({ ...view, meta: JSON.parse(JSON.stringify(record)) as Record<string, unknown> });
     vi.resetModules();
     const [transcribe, supervisor, wordTimes, flags, facts, auth, session] = await Promise.all([
       import("./transcribe"),
@@ -375,16 +461,21 @@ describe("a run a crashed page left in the app process", () => {
     expect(await transcribe.adoptTranscriptions(io as never)).toBe(1);
     for (const base of flagValues(spec.args, "-of")) {
       rig.files.add(`${base}.json`);
-      rig.texts.set(`${base}.json`, OUTPUT);
+      rig.texts.set(`${base}.json`, A_WORD);
     }
     jobs.exit(spec.id, 0, several ? BATCH_ON_CHIP : ON_PROCESSOR);
-    return { spec, sample: await theSample() };
+    return { spec, record, sample: await theSample() };
   }
 
   it("is reported by the next page with the facts of the launch that made it, read from the job's own record", async () => {
-    const { spec, sample } = await reportedByTheNextPage(true);
+    const { spec, record, sample } = await reportedByTheNextPage(true);
     expect(spec.args).toContain("-ng");
     expect(spec.args).toContain("-dtw");
+    // what the app process was handed when the job was made: the launch's facts were already on it
+    expect(record).toMatchObject({
+      kind: "transcript",
+      notes: { ng: true, held: true, mf: "small", dtw: "1", lead: "gt1" },
+    });
     expect(factsOf(sample.reason)).toEqual([
       "ng=1",
       "held=1",
@@ -396,16 +487,19 @@ describe("a run a crashed page left in the app process", () => {
   });
 
   it("is reported by the next page as it would have been by the first, for one launch over several files too", async () => {
-    const { spec, sample } = await reportedByTheNextPage(true, true);
+    const { spec, record, sample } = await reportedByTheNextPage(true, true);
     expect(flagValues(spec.args, "-f")).toHaveLength(2);
+    const items = (record as { items: Array<{ notes?: unknown }> }).items;
+    expect(items).toHaveLength(2);
+    for (const item of items) expect(item.notes).toMatchObject({ mf: "small" });
     expect(sample.reason).toContain("files=2");
     expect(factsOf(sample.reason)).toEqual(["mf=small", "gpu=amd", "lang=en"]);
   });
 
   it("is reported as the sample always was when the build keeps the facts dark", async () => {
-    const { spec, sample } = await reportedByTheNextPage(false);
-    expect(spec.meta).not.toHaveProperty("notes");
+    const { spec, record, sample } = await reportedByTheNextPage(false);
+    expect(record).not.toHaveProperty("notes");
     expect(factsOf(sample.reason)).toEqual([]);
-    expect(sample.reason).toMatch(/^audio_s=600\.0 wall_s=66\.1 x=9\.08 model=small threads=8/);
+    expect(sample.reason).toBe(OLD_SAMPLE(beamOf(spec.args)));
   });
 });
