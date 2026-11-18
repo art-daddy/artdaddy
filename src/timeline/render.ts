@@ -4287,7 +4287,7 @@ async function onProvenEncoder(
   const back = rebuildOnProcessor(job.plan);
   if (!back)
     throw new Error(
-      "the graphics chip is not available for this export any more. Choose Full quality and export again.",
+      "the graphics chip is not available for this export any more. Choose Quality and export again.",
     );
   return { ...job, plan: back };
 }

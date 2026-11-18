@@ -97,12 +97,23 @@ function literalsIn(file: string): Literal[] {
   return found;
 }
 
+/** Sentences of other surfaces that carry the owner's name for the processor's lighter setting inside their own words: the chat card's line says "light compression" too, in a sentence of its own. They are not copies of
+ *  the view's words, so the literals counted for a name's fragment leave them out. Each is named with its file, so a change to the line shows here. */
+const OTHER_SURFACES: readonly { file: string; text: string }[] = [
+  {
+    file: "timeline/exportWords.ts",
+    text: "Using light compression to save time · the picture may be slightly softer",
+  },
+];
+
 /** The literals of every shipped file that mentions any of the texts (a file that does not cannot carry them, and parsing all of src would be slow for nothing). */
 function literalsMentioning(texts: string[]): Literal[] {
-  return shipped().flatMap((file) => {
-    const source = readFileSync(file, "utf8");
-    return texts.some((text) => source.includes(text)) ? literalsIn(file) : [];
-  });
+  return shipped()
+    .flatMap((file) => {
+      const source = readFileSync(file, "utf8");
+      return texts.some((text) => source.includes(text)) ? literalsIn(file) : [];
+    })
+    .filter((l) => !OTHER_SURFACES.some((o) => o.file === l.file && o.text === l.text));
 }
 
 /** Every string a value holds: itself, or those of a table or a list, at any depth. */
