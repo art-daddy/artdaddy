@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The PC's class from the hidden speed test: the pure rules (the class from a ratio, the cut-offs' band) and the local store of the check's own answer for each probe.
 // The cut-offs themselves are the server's (`pcClass()` of the flags reader, in memory only); this module keeps no copy of them. Nothing here reads the PC, builds a command or
 // returns a speed, a thread count, a preset or an encoder: the class only decides who is warned and who has Quick preselected.

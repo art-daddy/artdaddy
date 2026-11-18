@@ -110,6 +110,14 @@
 // fit n1-202611170115: 24 % of the judged cells within 2 times against 90 %, 0 of 11 weak-profile cells, 85 % of the measured times inside the shown range against 90 %, five cells 4 times or
 // more under-estimated without "could take much longer"), and the speed check did not meet its (P1: the class and the reading against the reference export; P2: the disturbance of a running
 // export; PROBE-VERDICT n1), so the numbers they would show cannot be backed. The code is in the build and every other behaviour above runs, except `quick_route` (next).
+// HELD, NOT DELETED, ON PURPOSE (owner decision 2026-11-18): the 29 files marked "HELD OFF, NOT DELETED" at their top stay with their tests. Nobody should delete them as "dead code".
+// Three things still run while they are held off: (1) the PC check service starts at launch in the desktop app (main.tsx:64, the dynamic import of timeline/estimateStart);
+// (2) the chip test takes its turn in the PC check's slot (the gate in timeline/chipTest.ts:446-472, installed by timeline/pcCheckStart.ts:125); (3) the memory-shape prior's start setting,
+// `shapeStart`, is worked out at an export's start when this PC has no measured peak for the shape, and thrown away (timeline/exportRung.ts:106-118; the picture gate's answers are all
+// pending, and `memory_shape` is not in OFF_IN_THIS_BUILD). Line numbers are as of the commit that wrote this note.
+// To light the estimate and the speed check again: remove their names from OFF_IN_THIS_BUILD (one line each, with exportFlags.test.ts, which pins the list) AND bring new evidence that the numbers
+// they show can be backed (the bar and the miss are above: 24 % of the judged cells within 2 times against 90 %). The memory-shape prior also needs the owner's picture-gate answers (timeline/pictureGate.ts).
+// The long version is in docs/EXPORTER_ARCHITECTURE.md, section "Deferred Export Speed And Settings Work", row IDEA-EXPORT-ESTIMATOR-DEFERRED-001.
 //
 // THIS BUILD ALSO SHIPS `quick_route` OFF, whatever the server says: the Fast choice is built in pieces, and this build has its rules and the export's plumbing but not the Export dialog's choice, its words or its screens, so
 // nothing is there yet to draw it or to start it. The server's file already says true (the switch exists there), so a later build lights the choice by removing the name from OFF_IN_THIS_BUILD in one line, with the test that pins this.

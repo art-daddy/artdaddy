@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The PC check's files port over the app's own file functions (`TauriFs`, `appCacheRoot`): the speed probe makes one small reference clip in a folder of its own,
 // reads its size, renames it into place and removes it. The port is the smallest adapter that gives it `rename` and `size` (the app's file layer reads sizes through `stat`).
 import type { PcCheckFiles } from "./pcCheck";

@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The six NEW report facts of Phase 3c, kept as a LOCAL record per export. The client send is HELD until the owner approves the one privacy text: nothing in this file
 // reaches a report, a request or the network, and `factsForReport` refuses to hand anything out while the constant below is false. Every part of the app that learns
 // a fact (the estimate side, the route side, the help side) notes it here; the record is bounded so an app left open for weeks does not grow it.

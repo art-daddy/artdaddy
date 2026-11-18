@@ -440,6 +440,8 @@ async function runTest(
 
 const inflight = new Map<string, Promise<ChipVerdict | null>>();
 
+// Held off but still runs: `startPcCheck` (pcCheckStart.ts) installs this turn at launch, so each chip test takes its turn in the PC check's slot even while
+// `pc_check` is held off (OFF_IN_THIS_BUILD in `api/exportFlags.ts`). No flag switches it off. Held, not deleted.
 /** The turn a test takes before it runs ffmpeg: the PC check's one slot (`PcCheckService.withSlot`), so the check and the chip test never run side by side. */
 export type ChipTestGate = <T>(
   fn: () => Promise<T>,

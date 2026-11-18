@@ -1,3 +1,8 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`; the memory-shape prior is held instead by the picture gate's
+// pending answers (`pictureGate.ts`), and its own switch `memory_shape` is not in OFF_IN_THIS_BUILD), kept for a later
+// release, so do not remove it as unused; see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // Phase 3c: the memory an export is expected to need, from the project's shape (DESIGN 5). Pure and fail-soft. It stands in only where this PC has
 // no measurement of the shape (the plan's `unmeasured` branch) and is never below one that was passed in. Units are MiB, the peak resident
 // set of the export's processes, the figure the native watcher's cap is about (exportPlan.ts `CEILING_CAP_BYTES`).

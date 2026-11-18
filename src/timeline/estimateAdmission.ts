@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The honest estimate at the admission door, and what the exporter learns when the run ends. The queue calls three things: `withHonestTime` where it already reads its one estimate (0.27.0's
 // numbers with the honest time laid over them), `admitted3c` once the export is admitted (the local record of what was said, and what the pace log will be taught against), and `learnFromRun3c` once the run
 // has ended. Every one of them fails soft: an estimate or a lesson that cannot be made is simply not made, and the export is never told.

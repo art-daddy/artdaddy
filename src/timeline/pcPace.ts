@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The seam between the speed check's stored answer and the estimator's idea of this PC's pace. A finished check is this PC's measured pace; one that could not finish
 // is a weak PC on a rough guess (nothing was measured); no result, a damaged one or a check that is off is no pace, and the estimator then prices the prior PC.
 // The class cut-offs are an argument, always the pair the flags reader holds right now: this module keeps no copy of them.

@@ -1,3 +1,7 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
+// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The PC's speed check as the Export dialog sees it: whether it is running, what it found and when, and the one action it offers (run it again). The dialog never waits for the check and never starts it by opening: this only reads what the
 // check service says and re-reads when it changes. No service (a page without the app), the switch off, or a service that throws is "no check": nothing is shown and nothing is offered.
 import { useSyncExternalStore } from "react";

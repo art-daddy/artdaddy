@@ -1,3 +1,8 @@
+// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
+// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`; the memory-shape prior is held instead by the picture gate's
+// pending answers (this table), and its own switch `memory_shape` is not in OFF_IN_THIS_BUILD), kept for a later
+// release, so do not remove it as unused; see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+//
 // The picture gate's table (the owner's picture rule, read as option A: three guards together). A route that can change a Full quality picture (a graphics chip, the processor's faster setting, a gentler rung) may be made
 // MORE REACHABLE than 0.27.0 made it only when a recorded answer says so; until then its rule keeps reading 0.27.0's numbers. The table keeps, per route, a hash of the route's own arguments beside the guards' results
 // and the owner's answer, so an answer given to one set of arguments is never believed for another (a retuned quality, a new rung cap). Pure: nothing here measures, reads a file or decides what a picture looks like.
