@@ -21,6 +21,7 @@ import {
 } from "../timeline/exportQueue";
 import {
   describeDialogProgress,
+  describeFailureHere,
   describeModeLines,
   failureOf,
   STATUS_REFRESH_MS,
@@ -514,7 +515,7 @@ function Progress({
     liveRow?.attempt && liveRow.attempt > 1
       ? (restartWords(liveRow.restartReason)?.after ?? null)
       : null;
-  // What to lower, under the error the dialog has always shown, where there is something true to say.
+  // What to lower, under the sentence the dialog says for the failure, where there is something true to say.
   const failedRow =
     phase === "failed" && jobId
       ? rows.find((row) => row.job_id === attempts.current(jobId))
@@ -563,7 +564,23 @@ function Progress({
           {/[\\/]/.test(savedTo) ? `Saved to ${savedTo}` : `Saved ${savedTo} to Downloads.`}
         </p>
       )}
-      {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+      {error && (
+        <>
+          {/* The card's sentence for why it stopped. The failure's own text (the encoder's log, the app's diagnostics) is not for the face of
+              the dialog: it is one click away, for a report. */}
+          <p data-testid="export-error" className="mt-2 text-xs text-red-300">
+            {describeFailureHere(error, failedRow?.chipFailed === true)}
+          </p>
+          <details data-testid="export-error-details" className="mt-1">
+            <summary className="cursor-pointer text-[11px] text-neutral-500 hover:text-neutral-300">
+              Show details
+            </summary>
+            <pre className="mt-1 max-h-40 select-text overflow-auto whitespace-pre-wrap break-words text-[11px] text-neutral-400">
+              {error}
+            </pre>
+          </details>
+        </>
+      )}
       {lower && (
         <p data-testid="export-lower" className="mt-1 text-xs text-neutral-400">
           {lower}

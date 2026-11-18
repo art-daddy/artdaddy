@@ -17,6 +17,7 @@ import {
   type ExportRecord,
 } from "../timeline/exportQueue";
 import { useExportJob } from "../store/exportJob";
+import { describeFailureHere } from "../timeline/exportWords";
 import { cn } from "./ui";
 
 const LABEL: Record<ExportRecord["state"], string> = {
@@ -102,7 +103,10 @@ export default function ExportQueuePane(): JSX.Element | null {
                   r.state === "failed" ? "text-red-400" : "text-neutral-500",
                 )}
               >
-                {r.state === "failed" && r.error ? r.error : LABEL[r.state]}
+                {/* The card's plain sentence for why it stopped; the failure's own text is on the row's hover text above, not on its face. */}
+                {r.state === "failed" && r.error
+                  ? describeFailureHere(r.error, r.chipFailed === true)
+                  : LABEL[r.state]}
               </span>
             )}
 

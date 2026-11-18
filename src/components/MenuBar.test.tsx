@@ -66,6 +66,7 @@ import { useExportJob } from "../store/exportJob";
 import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
 import { useMcpPanel } from "../store/mcpPanel";
 import { unknownParams } from "../contract/params";
+import { plainFailure } from "../timeline/exportWords";
 
 type ToolReply = {
   ok: boolean;
@@ -387,7 +388,13 @@ describe("MenuBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "File" }));
     fireEvent.click(screen.getByText("Export Video (.mp4)…"));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    await waitFor(() => expect(screen.getByText(/no clips to render/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("export-error").textContent).toBe(plainFailure("render_failed")),
+    );
+    expect(screen.getByTestId("export-error")).toBeVisible();
+    // the text the tool answered with is one click away, under Show details, and not on the face of the dialog
+    expect(screen.getByText("no clips to render")).not.toBeVisible();
+    expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
   });
 
   // Pressing Cancel on a question (not enough memory, say) is the person's own choice: the export

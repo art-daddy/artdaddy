@@ -76,6 +76,7 @@ vi.mock("../store/jobNotes", async (importOriginal) => ({
 import MenuBar from "./MenuBar";
 import { useExportJob } from "../store/exportJob";
 import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
+import { plainFailure } from "../timeline/exportWords";
 import { ExportMemFs } from "../test/timelineKit";
 import { ProjectStoreAccess } from "../tools/store";
 
@@ -193,7 +194,11 @@ describe("Export Video → Save As", () => {
   it("reports a save-dialog failure instead of silently exporting somewhere else", async () => {
     save.mockRejectedValue(new Error("dialog unavailable"));
     startExport();
-    await waitFor(() => expect(screen.getByText(/dialog unavailable/)).toBeInTheDocument());
+    // said in the card's plain words; the dialog's own text for it is one click away
+    await waitFor(() =>
+      expect(screen.getByTestId("export-error").textContent).toBe(plainFailure("unknown")),
+    );
+    expect(screen.getByText("dialog unavailable")).not.toBeVisible();
     expect(runTool).not.toHaveBeenCalled();
   });
 });
@@ -268,7 +273,11 @@ describe("Export Video → Save As: an export moved to another folder", () => {
   it("does not say it was saved anywhere when the export failed, wherever it was going", async () => {
     await startedExport(movedTo, "failed");
     startExport();
-    await waitFor(() => expect(screen.getByText(/Permission denied/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("export-error").textContent).toBe(
+        plainFailure("storage_unavailable"),
+      ),
+    );
     expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
   });
 
