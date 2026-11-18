@@ -5,7 +5,7 @@ import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
 import { __setExportFlag } from "../api/exportFlags";
-import { liveFeedOf, useExportJob } from "../store/exportJob";
+import { liveFeedOf, useExportJob, type ExportLive } from "../store/exportJob";
 import {
   feedOf,
   fresh,
@@ -13,10 +13,11 @@ import {
   startRunAgain,
   steady,
   useKit,
+  waitBehind,
   type Said,
 } from "../test/exportRunKit";
 import { describeExportTime } from "./exportOptions";
-import { listExportOutcomes } from "./exportQueue";
+import { cancelExport, listExportOutcomes } from "./exportQueue";
 import {
   cellOf,
   FINISHING_FROM,
@@ -355,6 +356,73 @@ describe("an export the app starts again", () => {
       await second.end("finish");
     },
   );
+});
+
+describe("the export that begins while the previous one is still being checked", () => {
+  it("has a rule of its own: it never inherits the 'Finishing' the previous export ended on, and the previous one still has no time left", async () => {
+    const first = await startRun({ history: 100 });
+    const secondId = await waitBehind(first); // queued behind the first, in the app process's line
+    const one = feedOf(first);
+    await one.to(95, steady(100));
+    expect(look(first.id).card).toMatch(/ · Finishing$/);
+    const release = first.holdTheCheck();
+    const ended = first.end("finish"); // its render is over and its file is being checked: the second one's turn comes
+    await vi.waitFor(() => expect(first.jobs.started).toContain(secondId));
+    await vi.waitFor(() => expect(rowOf(first.id)?.stage).toBe("checking"));
+
+    // a render of 310 s in all: its own gate opens at 47 s (46 s rendered, 15.2 % made), 263 s left, which is 4 min on the grid
+    const two = feedOf({ id: secondId, jobs: first.jobs });
+    const seen: Array<{ t: number; left: number | undefined }> = [];
+    for (let t = 1; t <= 60; t++) {
+      await two.to(t, steady(310));
+      const { left, card } = look(secondId);
+      expect(card, `${t} s into the second export`).not.toMatch(/Finishing$/);
+      expect(look(first.id).left, "the export still being checked").toBeUndefined();
+      seen.push({ t, left });
+    }
+    expect(seen.filter((s) => s.t <= 46 && s.left !== undefined)).toEqual([]);
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 47, left: 240 });
+    // `end` waits for every export to settle, and the second one only ends when it is cancelled
+    cancelExport(secondId, "assistant");
+    release();
+    await ended;
+  });
+});
+
+describe("what the store holds is read through the rule's own shapes", () => {
+  it("says no time left at a part before the last, nor for an answer that is not a figure on the grid, whatever the store holds", async () => {
+    const run = await startRun({ history: 400 });
+    const feed = feedOf(run);
+    await feed.to(160, steady(400));
+    const held = look(run.id).left;
+    expect(held).toBeDefined();
+    const forge = (patch: Record<string, unknown>) =>
+      useExportJob.setState((s) => ({ live: { ...s.live!, ...patch } as ExportLive }));
+    // the figure the rule gave, found at a part before the last of a render made in parts: not said; at the final encode: said
+    forge({ step: 0, steps: 3 });
+    expect(look(run.id).left).toBeUndefined();
+    forge({ step: 2, steps: 3 });
+    expect(look(run.id).left).toBe(held);
+    forge({ step: null, steps: null });
+    // answers the rule cannot give: a figure off the grid, not a number, below zero, over two days, a kind it does not have
+    const bad = [
+      { kind: "left", seconds: 130 },
+      { kind: "left", seconds: Number.NaN },
+      { kind: "left", seconds: -60 },
+      { kind: "left", seconds: 0 },
+      { kind: "left", seconds: 49 * 3600 },
+      { kind: "soon" },
+      null,
+      120,
+    ];
+    for (const timeLeft of bad) {
+      forge({ timeLeft });
+      expect(look(run.id).left, JSON.stringify(timeLeft)).toBeUndefined();
+    }
+    forge({ timeLeft: { kind: "left", seconds: 120 } });
+    expect(look(run.id).left).toBe(120); // a figure on the grid is said
+    await run.end("fail");
+  });
 });
 
 describe("whatever the render reports, a row never says a time left that cannot be one", () => {
