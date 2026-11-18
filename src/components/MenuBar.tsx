@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
 import { apiBase, defaultApiBase, isApiBaseOverridden, setApiBase } from "../api/config";
+import { exportFlag } from "../api/exportFlags";
 import { BRAND, PACKAGE_EXT } from "../brand";
 import AccountMenu from "./AccountMenu";
 import { useContractVersion } from "../contract/useContractVersion";
@@ -54,6 +55,8 @@ export default function MenuBar() {
   // how long an export will take and how big the file will be. Taken once here rather than subscribed
   // to: the menu bar must not re-render on every timeline edit for a figure nobody is looking at.
   const [exportWorkload, setExportWorkload] = useState<RenderWorkload | null>(null);
+  // Whether the dialog draws the new settings view (the switch `quick_route`), read once as the dialog opens so that it cannot change in the middle of an opening.
+  const [exportQuickRoute, setExportQuickRoute] = useState(false);
   const openExport = () => {
     let workload: RenderWorkload | null = null;
     try {
@@ -63,6 +66,7 @@ export default function MenuBar() {
       workload = null; // a courtesy figure: a project it cannot read just gets none
     }
     setExportWorkload(workload);
+    setExportQuickRoute(exportFlag("quick_route"));
     setExportOpen(true);
   };
   const [toast, setToast] = useState<string | null>(null);
@@ -690,6 +694,7 @@ export default function MenuBar() {
         onCancel={() => setExportOpen(false)}
         onStart={(s) => void exportVideo(s)}
         workload={exportWorkload}
+        quickRoute={exportQuickRoute}
       />
       <RecordDialog
         open={recordOpen}
