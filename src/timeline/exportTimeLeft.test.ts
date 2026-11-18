@@ -207,7 +207,7 @@ function nearEdge(raw: number, shown: number | null): boolean {
   return leaves(down) !== leaves(up);
 }
 
-/** SPEC section 3, steps 1 to 8, for one render in one process (no parts). */
+/** The rule step by step (clean the report, keep the pictures, parts, Finishing, pace, gate, figure, taking longer) for one render in one process. */
 function modelRun(reps: readonly Rep[]): ModelRun {
   const said: Said[] = [];
   const raws: Array<number | null> = [];
