@@ -10,6 +10,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import ts from "typescript";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { EXPORT_REASON_CODES } from "../api/exportReason";
@@ -385,6 +386,52 @@ describe("the scanner tells a reached old name from one nothing reaches", () => 
       "Fast would be quicker",
     ])
       expect(retiredIn(old).length).toBeGreaterThan(0);
+  });
+});
+
+describe("the patterns find an old name wherever it sits, and nothing that is not one", () => {
+  const OLD = [
+    "Full quality",
+    "full quality",
+    "Quick",
+    "Quick export",
+    "quick export",
+    "a faster setting",
+    "faster compression",
+    "quicker",
+    "on the quick setting",
+  ];
+  // The owner's names and plain English that sits close to the old ones: "a quick check", "to go faster", "Switch to another project".
+  const NEW = [
+    "Quality",
+    "Fast",
+    "light compression",
+    "graphics chip",
+    "Medium",
+    "Advanced settings",
+    "export",
+    "a quick check of this PC",
+    "to go faster",
+    "makes exports faster",
+    "Switch to another project",
+    "the settings",
+    "Cancel",
+  ];
+  const text = fc.array(fc.constantFrom(...NEW), { maxLength: 6 }).map((words) => words.join(" "));
+
+  it("finds every old name inside any text made of the others", () => {
+    fc.assert(
+      fc.property(
+        text,
+        fc.constantFrom(...OLD),
+        text,
+        (before, old, after) => retiredIn(`${before} ${old} ${after}`).length > 0,
+      ),
+    );
+  });
+
+  it("finds none in text made only of the new names and plain words", () => {
+    fc.assert(fc.property(text, (words) => retiredIn(words).length === 0));
   });
 });
 
