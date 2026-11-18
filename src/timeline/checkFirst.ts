@@ -1,6 +1,6 @@
-// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
-// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
-// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
 //
 // Whether an export that starts without the Export dialog should first offer to check this PC's speed (the question "Check this PC's speed first?"). Pure: the caller
 // says how the export was asked for and what it knows. The question is asked once per export, only for a heavy export on a PC that has no class and no measured time

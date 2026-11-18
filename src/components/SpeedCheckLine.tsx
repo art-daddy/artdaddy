@@ -1,6 +1,6 @@
-// HELD OFF, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags `estimate_v2`,
-// `pc_check`, both in OFF_IN_THIS_BUILD in `api/exportFlags.ts`), kept for a later release, so do not remove it as unused;
-// see docs/EXPORTER_ARCHITECTURE.md, "Deferred Export Speed And Settings Work".
+// HELD OFF ON PURPOSE, NOT DELETED (owner decision 2026-11-18): part of the held export-time guess machinery (flags
+// `estimate_v2` and `pc_check`, both in OFF_IN_THIS_BUILD). Kept for a later release, so do not remove it as unused.
+// The full note is in src/api/exportFlags.ts.
 //
 // The quiet line under the estimate that says what the PC's speed check found, and the one thing it offers: run it again. It says nothing where there is no check to talk about (never run, switched off, no check service)
 // and while the check runs (the estimate line says that then).
