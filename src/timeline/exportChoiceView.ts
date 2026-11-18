@@ -32,6 +32,10 @@ export { describeFigure } from "./exportChoiceWords";
 /** The two choices as a person reads them. Code maps them to the export's own route kinds (`routeOf`). */
 export type Choice = "quality" | "fast";
 
+/** Whether the dialog draws the Quality | Fast row and the line under the door. The one switch for it: false is the dialog without a choice (the settings view as it was before Fast was wired: Quality
+ *  alone, no line under the door), and nothing else in the dialog changes. */
+export const FAST_CHOICE_OFFERED: boolean = true;
+
 /** The three values the settings carry: the Resolution list's, the Frame rate list's (`null` is the project's own rate) and the Quality list's. */
 export interface Levers {
   resolution: ExportResolution;
@@ -108,6 +112,16 @@ export function ownLevers(
 /** The Resolution list: the project's own size, then every size preset below it, largest first (`quickSizeChoices`). Never a size at or above the project's. */
 export function sizeOptions(facts: ProjectFacts | null): ExportResolution[] {
   return facts === null ? ["source"] : quickSizeChoices(facts);
+}
+
+/** The Frame rate list as the dialog draws it: the project's own rate and the lower rates of the ladder, and Fast's own rate too where the ladder has not got it (72 gives 18, 32 gives 16),
+ *  so that what Fast shows is always an entry of the list. Only a dialog that offers Fast passes `fastOffered`. */
+export function rateEntriesFor(
+  facts: ProjectFacts | null,
+  fastOffered: boolean,
+  bundle: QuickBundle = QUICK_BUNDLE,
+): { value: number | null; label: string }[] {
+  return rateEntries(facts, fastOffered ? ownLevers("fast", facts, bundle).fps : null);
 }
 
 /** The Frame rate list: `null` (the project's own rate), then every rate of the ladder strictly below the project's, then `extra` where the ladder has not got it, highest first. Never a rate at or
@@ -271,16 +285,30 @@ export function payloadFor(
   return { ...base, mode: null, route: { route: "quick", explicit: explicitOf(overrides) } };
 }
 
-/** The line under the door: for the choice, not for the values (the page keeps it when a lever is changed). */
+/** The line under the door, from the values the dialog will send (`shown`), never from the choice: a pick of a size, a rate or a quality changes what it says. Each clause is written only where it is true of
+ *  those values and says nothing of the encoder (the chip or the light compression is decided when the export starts). Empty where the project cannot be read. */
 export function summaryFor(
-  choice: Choice,
+  shown: Levers,
   facts: ProjectFacts | null,
   bundle: QuickBundle = QUICK_BUNDLE,
 ): string {
-  return summaryWords(choice, {
-    smallerSize: facts !== null && quickDefaultSize(facts, bundle) !== null,
-    maxFps: bundle.maxFps,
-    quality: choice === "quality" ? QUALITY_START : bundle.quality,
+  if (facts === null) return "";
+  const size = quickDefaultSize(facts, bundle);
+  // What the export delivers for the shown size and rate: the rate is the project's own where none is shown.
+  const delivered = quickSettings({
+    canvas: facts,
+    requested: { resolution: shown.resolution, fps: shown.fps ?? undefined },
+    explicit: { size: true, fps: true, quality: true },
+    bundle,
+  }).delivered;
+  return summaryWords({
+    projectSizeAndRate: shown.resolution === "source" && shown.fps === null,
+    oneSizeSmaller: size !== null && shown.resolution === size,
+    upToFps:
+      delivered !== null && facts.fps > bundle.maxFps && delivered.fps <= bundle.maxFps
+        ? bundle.maxFps
+        : null,
+    quality: shown.quality,
   });
 }
 

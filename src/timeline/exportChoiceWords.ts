@@ -2,9 +2,9 @@
 // component carries one of these sentences; a component imports them from here (a guard test holds that). Pure: no React, no store, no switch.
 //
 // The ids (S01, S05 ...) are the rows of the UI spec's strings table (section 2), so a word can be traced to its source. A word the page does not carry is marked
-// [A] in the spec and flagged in the lane's report; the strings that are a 0.28.0 constant are imported, never copied, so there is one of each.
+// [A] in the spec and flagged in the lane's report. The processor's lighter setting is "light compression" in everything the new dialog says; the 0.28.0 dialog
+// keeps its own sentence for it (exportWords.ts), which this file never imports.
 import type { ExportQuality } from "./exportOptions";
-import { FASTER_SETTING_LINE } from "./exportWords";
 
 /** The fixed words, by what they are for. A person sees every one of these as it is written here. */
 export const D2_WORDS = {
@@ -22,11 +22,9 @@ export const D2_WORDS = {
   resolutionName: "resolution",
   /** S10 the door. */
   door: "Advanced settings",
-  /** S14 the line for the faster setting, behind the door, Quality only: the 0.28.0 constant itself (OD-6). It still says "a faster setting": that is 0.28.0's name for what the owner calls
-   *  "light compression" since 18 Nov, and the sentence is shared with the 0.28.0 dialog and the export card, whose tests pin it (see the lane's REPORT: where the old name is still wanted). */
-  fasterSetting: FASTER_SETTING_LINE,
-  /** S12, S13 the processor's lighter setting as the summary line names it, in the owner's words of 18 Nov. */
-  lightCompression: "light compression",
+  /** S14 the line behind the door, Quality only, where the app will use the processor's lighter setting for the export (the owner's name for it, and the 0.28.0 sentence with that name). */
+  lightCompressionLine:
+    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
   /** S15 the frame rate row. */
   rateLabel: "Frame rate",
   rateName: "frame rate",
@@ -120,21 +118,28 @@ export function sameAsProjectRate(fps: number): string {
   return `Same as project (${rateEntry(fps)})`;
 }
 
-/** S11, S12, S13 the line under the door. Quality: the project's own size and rate and the quality it starts on. Fast: one size smaller where the project has a smaller size, up to
- *  the rate cap, the quality Fast starts on and the light compression (`D2_WORDS.lightCompression`). Built from the figures it is given, so the lab's bundle is the only place a number lives. */
-export function summaryWords(
-  choice: "quality" | "fast",
-  figures: { smallerSize: boolean; maxFps: number; quality: ExportQuality },
-): string {
-  const quality = `${QUALITY_WORDS[figures.quality]} quality`;
-  if (choice === "quality") return `Project size and frame rate, ${quality}.`;
-  const parts = [
-    ...(figures.smallerSize ? ["One size smaller"] : []),
-    `${figures.smallerSize ? "up" : "Up"} to ${formatRate(figures.maxFps)} frames a second`,
-    quality,
-    D2_WORDS.lightCompression,
+/** What the line under the door says about the values on screen: each clause is written only where it is true of them. */
+export interface SummaryFigures {
+  /** The size and the frame rate are both the project's own. */
+  projectSizeAndRate: boolean;
+  /** The size is the one below the project's that Fast starts on. */
+  oneSizeSmaller: boolean;
+  /** The frame rate is at most this many frames a second where the project runs faster than that; null leaves the clause out. */
+  upToFps: number | null;
+  quality: ExportQuality;
+}
+
+/** S11, S12, S13 the line under the door, from the values the dialog will send (never from the choice): the project's own size and rate, one size smaller, a rate capped at 30, and the
+ *  quality, each clause only where it is true. Says nothing of the encoder: the graphics chip or the processor's light compression is decided when the export starts. */
+export function summaryWords(figures: SummaryFigures): string {
+  const clauses = [
+    ...(figures.projectSizeAndRate ? ["Project size and frame rate"] : []),
+    ...(figures.oneSizeSmaller ? ["One size smaller"] : []),
+    ...(figures.upToFps !== null ? [`up to ${formatRate(figures.upToFps)} frames a second`] : []),
+    `${QUALITY_WORDS[figures.quality]} quality`,
   ];
-  return `${parts.join(", ")}.`;
+  const line = clauses.join(", ");
+  return `${line.charAt(0).toUpperCase()}${line.slice(1)}.`;
 }
 
 /** S22, S23, S24 the sentence of the question. (a) is asked of Quality: with a figure it says how much quicker Fast would be, without one (a size or a rate was changed, so the figure
