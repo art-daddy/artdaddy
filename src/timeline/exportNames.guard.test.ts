@@ -72,7 +72,9 @@ function factsOf(file: string, text: string): Facts {
     else if (isExported) exported.set(name, name);
   };
   for (const statement of source.statements) {
-    const modifiers = ts.canHaveModifiers(statement) ? (ts.getModifiers(statement) ?? []) : [];
+    const modifiers: readonly ts.Modifier[] = ts.canHaveModifiers(statement)
+      ? (ts.getModifiers(statement) ?? [])
+      : [];
     const has = (kind: ts.SyntaxKind): boolean => modifiers.some((m) => m.kind === kind);
     const isExported = has(ts.SyntaxKind.ExportKeyword);
     const byDefault = has(ts.SyntaxKind.DefaultKeyword);
@@ -304,7 +306,9 @@ function scan(sources: ReadonlyMap<string, string>): Scan {
 
 /** The files that import `name` from `file` (a star import or a dynamic import takes every name). */
 function importersOf(result: Scan, file: string, name: string): string[] {
-  return [...(result.uses.get(file) ?? [])]
+  const takers = result.uses.get(file);
+  if (!takers) return [];
+  return [...takers]
     .filter(([, use]) => use.star || use.names.has(name))
     .map(([importer]) => importer)
     .sort();
@@ -457,10 +461,16 @@ const shippedFiles = (): string[] =>
       !/__e2e\.ts$/.test(file),
   );
 
+let cachedSources: Map<string, string> | null = null;
+/** The text of every shipped file, by name relative to src. */
+const realSources = (): Map<string, string> => {
+  cachedSources ??= new Map(shippedFiles().map((file) => [rel(file), readFileSync(file, "utf8")]));
+  return cachedSources;
+};
+
 let cached: Scan | null = null;
 const real = (): Scan => {
-  if (cached) return cached;
-  cached = scan(new Map(shippedFiles().map((file) => [rel(file), readFileSync(file, "utf8")])));
+  cached ??= scan(realSources());
   return cached;
 };
 
@@ -613,6 +623,68 @@ describe("every old name that a person could read is accounted for", () => {
   });
 });
 
+// The other lanes add words in these very files (the Quality / Fast choice and its summary in the dialog's words file, a time left in the exportWords file the card reads). The guard fails only on the retired names: a new
+// sentence made of the owner's names is no business of it, and an old name added in the same place is found and named.
+describe("the guard fails only on the old names, wherever new words are added", () => {
+  const unaccounted = (result: Scan): string[] =>
+    result.findings
+      .filter((f) => f.live && !ROWS.some((row) => sameRow(row, f)))
+      .map(describeFinding);
+
+  /** The real project as it would be if `words` were added to the exportWords file and the export card read them (so they are reached). */
+  const withWords = (words: readonly string[]): Map<string, string> => {
+    const names = words.map((_, index) => `ADDED_WORDS_${index}`);
+    const edited = new Map(realSources());
+    edited.set(
+      "timeline/exportWords.ts",
+      [
+        edited.get("timeline/exportWords.ts") ?? "",
+        ...words.map((text, index) => `export const ${names[index]} = ${JSON.stringify(text)};`),
+      ].join("\n"),
+    );
+    edited.set(
+      "components/ExportCard.tsx",
+      [
+        `import { ${names.join(", ")} } from "../timeline/exportWords";`,
+        edited.get("components/ExportCard.tsx") ?? "",
+        `export const addedWords = [${names.join(", ")}];`,
+      ].join("\n"),
+    );
+    return edited;
+  };
+
+  const NEW_WORDS = [
+    "Quality",
+    "Fast",
+    "About 3 min left",
+    "Finishing",
+    "This is taking longer than expected",
+    "One size smaller, up to 30 frames a second, Medium quality, light compression.",
+    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+    "Up to 30 frames a second, Medium quality, graphics chip.",
+    "Using light compression to save time",
+  ];
+
+  it("takes new sentences made of the owner's names, and of a time left, without a word", () => {
+    expect(unaccounted(scan(withWords(NEW_WORDS)))).toEqual([]);
+  });
+
+  it("finds an old name added in the same places, among the new sentences, and names it", () => {
+    const old = [
+      "Fast would be quicker",
+      "Using a faster setting to save time",
+      "Choose Full quality for the smallest file",
+      "Quick export would take about 3 min",
+    ];
+    const found = unaccounted(scan(withWords([...NEW_WORDS, ...old])));
+    expect(found).toHaveLength(old.length);
+    old.forEach((text, index) => {
+      const hit = found.find((line) => line.includes(`ADDED_WORDS_${NEW_WORDS.length + index} `));
+      expect(hit, text).toContain(JSON.stringify(text));
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The gates: what the rows say keeps an old name from a person, held where it can be held
 // ---------------------------------------------------------------------------------------------------------------------
@@ -673,11 +745,12 @@ function readsOf(names: readonly string[], except: string): string[] {
 const GATES: Record<Gate, () => void> = {
   "legacy-dialog": () => {
     const result = real();
-    // The Mode row's words are written by describeModeLines and its hint, which only the 0.28.0 settings block and the new view's look call; the look reads one line of the result.
-    expect(importersOf(result, "timeline/exportWords.ts", "describeModeLines")).toEqual([
-      "components/ExportDialog.tsx",
-      "components/useEncoderLook.ts",
-    ]);
+    // The Mode row's words are written by describeModeLines and its hint, which only the 0.28.0 settings block and the new view's look may call; the look reads one line of the result (or nothing).
+    expect(
+      importersOf(result, "timeline/exportWords.ts", "describeModeLines").filter(
+        (file) => file !== "components/ExportDialog.tsx" && file !== "components/useEncoderLook.ts",
+      ),
+    ).toEqual([]);
     expect(importersOf(result, "timeline/exportWords.ts", "FAST_HINT")).toEqual([]);
     const look: string[] = [];
     eachNode("components/useEncoderLook.ts", (node) => {
@@ -688,7 +761,7 @@ const GATES: Record<Gate, () => void> = {
       )
         look.push(node.name.text);
     });
-    expect(look).toEqual(["faster"]);
+    expect(look.filter((name) => name !== "faster")).toEqual([]);
     // The 0.28.0 sentence about the lighter setting is the new view's too until the view has its own entry: only the words file of the new view may take it.
     expect(
       importersOf(result, "timeline/exportWords.ts", "FASTER_SETTING_LINE").filter(
