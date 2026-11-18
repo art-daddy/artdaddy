@@ -1,0 +1,459 @@
+// T3 and T4 of the D2 UI spec (section 5): the words of the settings view, as a whole-screen WHITELIST and not a search, and the words that must never be drawn.
+// T3: with the door closed the visible text of the view is exactly Resolution (where the list has two entries), the select's own text, "Advanced settings", Cancel and Export (VIEW-CONTRACT section 3); with the door
+//     open it gains only the faster-setting line (where the app's look says it will use that setting), Frame rate and its select (where drawn), Quality and Medium, and the chip row where a chip was found. The expected
+//     lists are written out below, by hand, for each project.
+// T4: nothing of the contract's "never drawn" list is in the DOM at all, hidden or not, closed or open: the Mode row, the estimate line, "Never upscales", the 0.28.0 quality hints, any figure of minutes or MB, the
+//     word "example", the choice row, any radio named Quality or Fast, the question.
+// Mutants this file must kill: an extra sentence in the normal view; the 0.28.0 Mode row, estimate or hints drawn; a Resolution row for a project with no smaller size; the faster line drawn where the look does not want it.
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { __setExportFlag, type ExportFlagName } from "../api/exportFlags";
+import {
+  processorName,
+  resolveExportResources,
+  runCapabilityProbe,
+  type GraphicsAdapter,
+} from "../platform/host";
+import { useEditor } from "../store/editor";
+import { useExportJob } from "../store/exportJob";
+import { amd, harness } from "../test/chipHarness";
+import { __resetChipTests } from "../timeline/chipTest";
+import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
+import type { RenderWorkload } from "../timeline/renderPlan";
+import ExportSettingsView from "./ExportSettingsView";
+
+vi.mock("../timeline/exportChoice", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../timeline/exportChoice")>()),
+  decideExportEncoder: vi.fn(),
+}));
+vi.mock("../platform/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform/host")>()),
+  runCapabilityProbe: vi.fn(),
+  resolveExportResources: vi.fn(),
+  processorName: vi.fn(),
+}));
+vi.mock("../tools/dataRoot", () => ({ appCacheRoot: async () => "C:/cache" }));
+vi.mock("../tools/tauri", () => ({
+  TauriFs: class {
+    async mkdir(): Promise<void> {}
+    async remove(): Promise<void> {}
+  },
+}));
+
+const FLAGS: readonly ExportFlagName[] = [
+  "chip_amd",
+  "chip_nvidia",
+  "chip_intel",
+  "chip_default",
+  "quick_export",
+];
+
+function pcWith(adapters: GraphicsAdapter[]): void {
+  const scripted = harness(adapters);
+  vi.mocked(runCapabilityProbe).mockReset();
+  vi.mocked(runCapabilityProbe).mockImplementation((args, options) =>
+    scripted.deps.probe(args, options),
+  );
+  vi.mocked(resolveExportResources).mockReset();
+  vi.mocked(resolveExportResources).mockResolvedValue({
+    total_memory_bytes: null,
+    available_memory_bytes: null,
+    scratch_free_bytes: null,
+    destination_free_bytes: null,
+    budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+    adapters,
+  });
+  vi.mocked(processorName).mockReset();
+  vi.mocked(processorName).mockResolvedValue(null);
+}
+
+const decision = (over: Partial<ExportEncoderDecision> = {}): ExportEncoderDecision => ({
+  mode: "quality",
+  reason: "none",
+  showRow: false,
+  defaultMode: "quality",
+  fullSeconds: 40,
+  fastSeconds: null,
+  fullGuessed: true,
+  tests: [],
+  facts: { encoder: "x264", reason: "none", tests: [] },
+  ...over,
+});
+/** A chip has proven itself and the export is long: the app wants the old Mode row, on Fast (with its hint, its amber note, its "would take" line). */
+const wantsRow = (): ExportEncoderDecision =>
+  decision({
+    showRow: true,
+    defaultMode: "fast",
+    reason: "over_minute",
+    fullSeconds: 720,
+    fastSeconds: 240,
+    facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
+  });
+
+const sized = (width: number, height: number, fps: number): RenderWorkload => ({
+  width,
+  height,
+  fps,
+  durationSeconds: 120,
+  visualClips: 6,
+  captionClips: 1,
+  audioClips: 1,
+  peakVisualLayers: 2,
+  peakMediaLayers: 2,
+});
+const DEFAULT = sized(1080, 1920, 30);
+
+const FASTER_LINE =
+  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+const CHIP_PASSED_NOTE =
+  "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.";
+
+const settleAll = () =>
+  act(async () => void (await new Promise((resolve) => setTimeout(resolve, 30))));
+const noop = (): void => undefined;
+
+/** The view, on a PC with these chips, with the app's answer to the encoder look; settled, with the door closed. */
+async function show(
+  workload: RenderWorkload | null,
+  look: ExportEncoderDecision = decision(),
+  adapters: GraphicsAdapter[] = [],
+) {
+  localStorage.clear();
+  __resetChipTests();
+  useEditor.setState({ timeline: null });
+  useExportJob.getState().reset();
+  useExportJob.setState({ calibrations: [], modeRowOnScreen: null });
+  pcWith(adapters);
+  vi.mocked(decideExportEncoder).mockReset();
+  vi.mocked(decideExportEncoder).mockImplementation(async () => look);
+  const view = render(<ExportSettingsView workload={workload} onCancel={noop} onStart={noop} />);
+  await settleAll();
+  return { ...view, user: userEvent.setup() };
+}
+
+const door = () => screen.getByRole("button", { name: "Advanced settings" });
+
+/** What a person can read in `root`, in order: the text of everything that is drawn (not `hidden`, not display none), a select as the option it shows, and nothing without a letter or a digit in it (a drawn
+ *  triangle on the door is not a word). */
+function visibleWords(root: Element): string[] {
+  const words: string[] = [];
+  const read = (element: Element): void => {
+    if (element.hasAttribute("hidden") || window.getComputedStyle(element).display === "none")
+      return;
+    if (element.tagName === "SELECT") {
+      const select = element as HTMLSelectElement;
+      const shown = select.options[select.selectedIndex];
+      if (shown) words.push((shown.textContent ?? "").trim());
+      return;
+    }
+    let run = "";
+    const flush = (): void => {
+      const text = run.replace(/\s+/g, " ").trim();
+      if (/[\p{L}\p{N}]/u.test(text)) words.push(text);
+      run = "";
+    };
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType === 3) run += child.textContent ?? "";
+      else if (child.nodeType === 1) {
+        flush();
+        read(child as Element);
+      }
+    }
+    flush();
+  };
+  read(root);
+  return words;
+}
+
+/** The options of a select by its accessible name, hidden or not. Null where the select is not in the DOM at all. */
+function optionsOf(name: string): string[] | null {
+  const select = screen.queryByRole("combobox", { name, hidden: true });
+  if (!select) return null;
+  return within(select)
+    .getAllByRole("option", { hidden: true })
+    .map((option) => option.textContent ?? "");
+}
+
+beforeEach(() => {
+  for (const flag of FLAGS) __setExportFlag(flag, true);
+});
+
+interface Project {
+  name: string;
+  workload: RenderWorkload | null;
+  /** Visible words with the door closed. */
+  closed: string[];
+  /** Visible words with the door open. */
+  open: string[];
+  /** The options of each select, by accessible name; null: the select is not drawn at all. */
+  resolution: string[] | null;
+  rate: string[] | null;
+}
+
+const PROJECTS: Project[] = [
+  {
+    name: "the default project, 1080 x 1920 at 30",
+    workload: DEFAULT,
+    closed: ["Resolution", "Same as project (1080 x 1920)", "Advanced settings", "Cancel", "Export"],
+    open: [
+      "Resolution",
+      "Same as project (1080 x 1920)",
+      "Advanced settings",
+      "Frame rate",
+      "Same as project (30 fps)",
+      "Quality",
+      "Medium",
+      "Cancel",
+      "Export",
+    ],
+    resolution: ["Same as project (1080 x 1920)", "720p", "480p"],
+    rate: ["Same as project (30 fps)", "25 fps", "24 fps"],
+  },
+  {
+    name: "a 4K project at 60",
+    workload: sized(3840, 2160, 60),
+    closed: ["Resolution", "Same as project (3840 x 2160)", "Advanced settings", "Cancel", "Export"],
+    open: [
+      "Resolution",
+      "Same as project (3840 x 2160)",
+      "Advanced settings",
+      "Frame rate",
+      "Same as project (60 fps)",
+      "Quality",
+      "Medium",
+      "Cancel",
+      "Export",
+    ],
+    resolution: ["Same as project (3840 x 2160)", "1440p", "1080p", "720p", "480p"],
+    rate: ["Same as project (60 fps)", "50 fps", "30 fps", "25 fps", "24 fps"],
+  },
+  {
+    name: "a 480p project at 30 (no Resolution row)",
+    workload: sized(854, 480, 30),
+    closed: ["Advanced settings", "Cancel", "Export"],
+    open: [
+      "Advanced settings",
+      "Frame rate",
+      "Same as project (30 fps)",
+      "Quality",
+      "Medium",
+      "Cancel",
+      "Export",
+    ],
+    resolution: null,
+    rate: ["Same as project (30 fps)", "25 fps", "24 fps"],
+  },
+  {
+    name: "a 1080p project at 24 (no Frame rate row)",
+    workload: sized(1920, 1080, 24),
+    closed: ["Resolution", "Same as project (1920 x 1080)", "Advanced settings", "Cancel", "Export"],
+    open: [
+      "Resolution",
+      "Same as project (1920 x 1080)",
+      "Advanced settings",
+      "Quality",
+      "Medium",
+      "Cancel",
+      "Export",
+    ],
+    resolution: ["Same as project (1920 x 1080)", "720p", "480p"],
+    rate: null,
+  },
+  {
+    name: "no project",
+    workload: null,
+    closed: ["Advanced settings", "Cancel", "Export"],
+    open: ["Advanced settings", "Quality", "Medium", "Cancel", "Export"],
+    resolution: null,
+    rate: null,
+  },
+];
+
+describe("T3: the visible words of the view are exactly the whitelist", () => {
+  describe.each(PROJECTS)("$name", (project) => {
+    it("shows, with the door closed, only the Resolution row, the door, Cancel and Export", async () => {
+      const { container } = await show(project.workload);
+      expect(door()).toHaveAttribute("aria-expanded", "false");
+      expect(visibleWords(container)).toEqual(project.closed);
+    });
+
+    it("adds, with the door open, only Frame rate, Quality and their selects", async () => {
+      const { container, user } = await show(project.workload);
+      await user.click(door());
+      expect(door()).toHaveAttribute("aria-expanded", "true");
+      expect(visibleWords(container)).toEqual(project.open);
+    });
+
+    it("offers exactly these sizes and rates (never one at or above the project's) and the three qualities by name", async () => {
+      await show(project.workload);
+      expect(optionsOf("resolution")).toEqual(project.resolution);
+      expect(optionsOf("frame rate")).toEqual(project.rate);
+      expect(optionsOf("quality")).toEqual(["High", "Medium", "Low"]);
+    });
+  });
+
+  it("shows nothing of what a found chip adds while the door is closed, and the chip row's words once it is open", async () => {
+    const { container, user } = await show(DEFAULT, decision(), [amd]);
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(CHIP_PASSED_NOTE),
+    );
+    expect(visibleWords(container)).toEqual(PROJECTS[0].closed);
+    await user.click(door());
+    expect(visibleWords(container)).toEqual([
+      "Resolution",
+      "Same as project (1080 x 1920)",
+      "Advanced settings",
+      "Frame rate",
+      "Same as project (30 fps)",
+      "Quality",
+      "Medium",
+      "Graphics chip",
+      "Auto",
+      "Off",
+      CHIP_PASSED_NOTE,
+      "Cancel",
+      "Export",
+    ]);
+  });
+
+  it("says nothing of a chip that was not found, and the chip row's words are not in the DOM at all", async () => {
+    const { container, user } = await show(DEFAULT, decision(), []);
+    await user.click(door());
+    expect(visibleWords(container)).toEqual(PROJECTS[0].open);
+    expect(container.textContent).not.toContain("Graphics chip");
+  });
+
+  it("draws the faster-setting line, first behind the door, only where the app's look says it will use that setting", async () => {
+    const { container, user } = await show(DEFAULT, decision({ faster: true }));
+    await screen.findByText(FASTER_LINE);
+    expect(visibleWords(container)).toEqual(PROJECTS[0].closed);
+    await user.click(door());
+    expect(visibleWords(container)).toEqual([
+      "Resolution",
+      "Same as project (1080 x 1920)",
+      "Advanced settings",
+      FASTER_LINE,
+      "Frame rate",
+      "Same as project (30 fps)",
+      "Quality",
+      "Medium",
+      "Cancel",
+      "Export",
+    ]);
+  });
+
+  it.each<[string, ExportEncoderDecision]>([
+    ["an ordinary answer", decision()],
+    [
+      "an answer that wants the old Mode row (the row is never drawn, so the line has nothing to say either)",
+      wantsRow(),
+    ],
+  ])("draws no faster-setting line for %s", async (_name, look) => {
+    const { container, user } = await show(DEFAULT, look);
+    expect(container.textContent).not.toContain(FASTER_LINE);
+    await user.click(door());
+    expect(container.textContent).not.toContain(FASTER_LINE);
+    expect(visibleWords(container)).toEqual(PROJECTS[0].open);
+  });
+});
+
+/** Words and names that must be nowhere in the DOM, hidden or not (VIEW-CONTRACT section 3, "Never drawn"; the spec's T4 list). */
+const NEVER_IN_TEXT: RegExp[] = [
+  /Expected:/,
+  /rough guess/i,
+  /Never upscales/i,
+  /would take/i,
+  /Near-lossless/,
+  /The usual delivery trade-off/,
+  /Small file, visible compression/,
+  /example/i,
+  /Are you sure\?/,
+  /Full quality/,
+  /\bFast\b/,
+  /Fast uses your graphics chip/,
+  /Fast is selected because/,
+  /smallest file/,
+  /\d\s*(min|MB|GB)\b/,
+];
+const NEVER_AS_NAME = [
+  "export mode",
+  "export choice",
+  "export estimate",
+  "export-choice",
+  "export-mode",
+  "export-question",
+  "export-fast-tip",
+  "estimate-much-longer",
+];
+
+function expectNeverDrawn(): void {
+  // by role and name (hidden elements included)
+  expect(screen.queryByRole("radiogroup", { name: "export mode", hidden: true })).toBeNull();
+  expect(screen.queryByRole("radiogroup", { name: "export choice", hidden: true })).toBeNull();
+  expect(screen.queryAllByRole("radio", { name: /fast|quality/i, hidden: true })).toHaveLength(0);
+  expect(screen.queryAllByRole("alertdialog", { hidden: true })).toHaveLength(0);
+  expect(screen.queryAllByRole("tooltip", { hidden: true })).toHaveLength(0);
+  expect(screen.queryByLabelText("export estimate")).toBeNull();
+  // by text, over everything in the document
+  const text = document.body.textContent ?? "";
+  for (const never of NEVER_IN_TEXT) expect(text).not.toMatch(never);
+  // by every name an element can carry
+  const carried = Array.from(document.body.querySelectorAll("*")).flatMap((element) =>
+    ["aria-label", "title", "data-testid", "name", "id"].map((attribute) =>
+      element.getAttribute(attribute),
+    ),
+  );
+  for (const name of NEVER_AS_NAME) expect(carried).not.toContain(name);
+  // the quality hints are not part of an option's name either
+  for (const option of screen.queryAllByRole("option", { hidden: true }))
+    expect(option.textContent).not.toMatch(/ — |Near-lossless|trade-off|visible compression/);
+}
+
+describe("T4: what is never drawn, hidden or not, closed or open", () => {
+  const LOOKS: [string, ExportEncoderDecision, GraphicsAdapter[]][] = [
+    ["an answer that wants the old Mode row, on a PC with no chip row", wantsRow(), []],
+    ["an answer that wants the old Mode row, on a PC with a chip", wantsRow(), [amd]],
+    ["an answer for the app's faster setting", decision({ faster: true }), []],
+    ["an ordinary answer", decision(), [amd]],
+  ];
+
+  describe.each(LOOKS)("with %s", (_name, look, adapters) => {
+    it.each<[string, RenderWorkload | null]>([
+      ["the default project", DEFAULT],
+      [
+        "a 4K project at 60 (where the old dialog draws its Mode row for a chip it cannot use)",
+        sized(3840, 2160, 60),
+      ],
+      ["no project", null],
+    ])("for %s, with the door closed", async (_project, workload) => {
+      await show(workload, look, adapters);
+      expectNeverDrawn();
+    });
+
+    it("with the door open", async () => {
+      const { user } = await show(DEFAULT, look, adapters);
+      await user.click(door());
+      expectNeverDrawn();
+    });
+  });
+
+  it("is not satisfied by an empty screen: the check does see the 0.28.0 dialog's words", async () => {
+    // the same checks, pointed at a page that does carry them, must fail: a guard that cannot fail guards nothing
+    render(
+      <div>
+        <div role="radiogroup" aria-label="export mode">
+          <label>
+            <input type="radio" name="m" /> Full quality
+          </label>
+          <label>
+            <input type="radio" name="m" /> Fast
+          </label>
+        </div>
+        <p aria-label="export estimate">Expected: about 12 min</p>
+      </div>,
+    );
+    expect(() => expectNeverDrawn()).toThrow();
+  });
+});
