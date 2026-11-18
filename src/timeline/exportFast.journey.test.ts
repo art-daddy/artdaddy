@@ -18,6 +18,7 @@ import {
   setupExport,
   type Any,
 } from "../test/chipExportKit";
+import { amd, harness } from "../test/chipHarness";
 import { resetTestDocuments } from "../test/timelineKit";
 import { agentToolContext } from "../tools/agentStore";
 import { _resetAppCaches } from "../tools/appCache";
@@ -26,6 +27,7 @@ import { __resetProjectJobs } from "../tools/genJobs";
 import { registerLibraryClip } from "../tools/import";
 import { __resetJobSupervisor, type JobSpec } from "../tools/jobSupervisor";
 import { __resetWorkGate } from "../tools/workGate";
+import { CHIP_PREF_KEY } from "./chipPref";
 import { findChip, markChipSuspect } from "./chipTest";
 import { exportTool } from "./exportItems";
 import type { ExportEngine } from "./exportOptions";
@@ -581,6 +583,24 @@ describe("5. Try again keeps the route (the real tool and the queue's retry)", (
     expect([codecOf(three), outputOf(three)]).toEqual(["libx264", FAST_PICTURE]);
     expect(recordOf(three.id)).toMatchObject({ state: "running", route: "quick" });
   });
+
+  it("(f) the route survives Try again however the context was put together: a slot added after the agent context was made", async () => {
+    const t = await world(UHD60);
+    // The dialog's slot reaches the tool through the host, which puts it in before the context is made; a caller that adds it afterwards must not lose it at Try again.
+    const ctx: ClientToolContext = {
+      ...agentToolContext({ ...t.base }, new AbortController().signal),
+      exportRoute: FAST,
+    };
+    const first = (await exportTool({}, ctx)) as Any;
+    expect(first.ok, JSON.stringify(first)).toBe(true);
+    const one = await t.handedOver(first.job_id);
+    await t.failWith(first.job_id, GRAPH_REFUSED);
+    await retryExport(first.job_id);
+    const two = await t.nth(1);
+    expect([outputOf(one), outputOf(two)]).toEqual([FAST_PICTURE, FAST_PICTURE]);
+    expect(commandOf(two)).toEqual(commandOf(one));
+    expect(recordOf(two.id)).toMatchObject({ state: "running", route: "quick" });
+  });
 });
 
 describe("6. a clip export and a library copy ignore a Fast slot (clip_ids and media_refs)", () => {
@@ -717,5 +737,72 @@ describe("8. two exports started together from one context keep their own route"
     expect(outputOf(await t.handedOver(quality.job_id))).toEqual(OWN_PICTURE);
     expect(recordOf(fast.job_id)).toMatchObject({ route: "quick" });
     expect(recordOf(quality.job_id)).not.toHaveProperty("route");
+  });
+});
+
+describe("9. the person's Graphics chip Off wins in Fast (the real chip lookup, on a scripted PC whose chip passes its test)", () => {
+  // The lookup that runs is the real one, its Off check included: only the PC under it is scripted (an AMD chip that passes the test, and the storage that holds the person's switch).
+  async function fastWith(pc: ReturnType<typeof harness>, pref: "auto" | "off") {
+    if (pref === "off") pc.storage.set(CHIP_PREF_KEY, "off");
+    else pc.storage.delete(CHIP_PREF_KEY);
+    const real = await vi.importActual<typeof import("./chipTest")>("./chipTest");
+    const t = await world(HD30);
+    vi.mocked(findChip).mockImplementation(async (sizeClass, options) =>
+      real.findChip(sizeClass, options, pc.deps),
+    );
+    const reply = await t.call({}, FAST);
+    const spec = await t.handedOver(reply.job_id);
+    const command = commandOf(spec);
+    return {
+      command,
+      codec: after(command, "-c:v"),
+      preset: after(command, "-preset"),
+      output: outputOf(spec),
+      record: recordOf(reply.job_id),
+    };
+  }
+
+  it("with the chip Auto Fast runs on the chip that passed; with it Off Fast runs on the processor with the faster compression, and the chip is never tested", async () => {
+    const auto = harness([amd]);
+    const onChip = await fastWith(auto, "auto");
+    expect([onChip.codec, onChip.preset, onChip.output]).toEqual([
+      "h264_amf",
+      undefined,
+      pic(1280, 720, 30),
+    ]);
+    expect(auto.calls.length, "the chip was tested").toBeGreaterThan(0);
+
+    const off = harness([amd]);
+    const offChip = await fastWith(off, "off");
+    expect([offChip.codec, offChip.preset, offChip.output]).toEqual([
+      "libx264",
+      "veryfast",
+      pic(1280, 720, 30),
+    ]);
+    expect(textOf(offChip.command)).not.toContain("h264_amf");
+    expect(off.calls, "Off is never tested").toEqual([]);
+    // Off changes the encoder and nothing else: the picture, the rate and the quality are Fast's own either way (the typed twin of this export is case 2).
+    expect(after(offChip.command, "-r")).toBe("30");
+    expect(after(offChip.command, "-crf")).toBe("23");
+    expect(offChip.record.route).toBe("quick");
+  });
+
+  it("Off beats a proof the PC already remembered, and Auto brings the chip back without a new test", async () => {
+    const pc = harness([amd]);
+    expect((await fastWith(pc, "auto")).codec).toBe("h264_amf");
+    const tested = pc.calls.length;
+    expect(tested).toBeGreaterThan(0);
+    const off = await fastWith(pc, "off");
+    expect([off.codec, off.preset]).toEqual(["libx264", "veryfast"]);
+    expect(pc.calls.length, "nothing was tested while it was Off").toBe(tested);
+    expect((await fastWith(pc, "auto")).codec).toBe("h264_amf");
+    expect(pc.calls.length, "the remembered proof was used").toBe(tested);
+  });
+
+  it("with the faster compression's own switch off as well, Off gives plain libx264", async () => {
+    __setExportFlag("faster_x264", false);
+    const off = await fastWith(harness([amd]), "off");
+    expect([off.codec, off.preset]).toEqual(["libx264", undefined]);
+    expect(off.output).toEqual(pic(1280, 720, 30));
   });
 });

@@ -4150,6 +4150,9 @@ function retryOf(
 ): ExportRetry {
   const request = { ...args };
   const later = ctx.detach?.() ?? ctx;
+  // The Export dialog's pick of Quality or Fast rides on the detached context. A context put together the other way round (the slot added after its `detach` was made)
+  // does not have it there, so it is also read from the context the export was asked on: a Try again and the app's own restart start on the route the person chose.
+  const route = later.exportRoute ?? ctx.exportRoute;
   return async (minRung, from, options) => {
     const started = Date.now();
     const open = options.store;
@@ -4161,7 +4164,9 @@ function retryOf(
         : later;
     // An export the app starts by itself stops with the signal it is given: a Cancel in the gap before it is admitted
     // reaches every await of its start, as it does for any request.
-    const where: ClientToolContext = options.signal ? { ...alive, signal: options.signal } : alive;
+    const bound: ClientToolContext = options.signal ? { ...alive, signal: options.signal } : alive;
+    const where: ClientToolContext =
+      route && bound.exportRoute === undefined ? { ...bound, exportRoute: route } : bound;
     const { exportTool } = await import("./exportItems");
     const folder = options.saveTo ?? placed?.dir;
     const result = await exportTool(
