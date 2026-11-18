@@ -76,13 +76,15 @@ const fastOwn = (f: ProjectFacts | null, bundle: QuickBundle = QUICK_BUNDLE): Le
     quality: composed.quality ?? bundle.quality,
   };
 };
-const ownOf = (choice: Choice, f: ProjectFacts | null, bundle: QuickBundle = QUICK_BUNDLE): Levers =>
-  choice === "quality" ? QUALITY_OWN : fastOwn(f, bundle);
+const ownOf = (
+  choice: Choice,
+  f: ProjectFacts | null,
+  bundle: QuickBundle = QUICK_BUNDLE,
+): Levers => (choice === "quality" ? QUALITY_OWN : fastOwn(f, bundle));
 
 /** What a pick must hold to survive: a size in the list, a rate that is null or from 1 up to and excluding the project's, a quality of the three. */
 const sizeInRange = (r: ExportResolution, f: ProjectFacts | null): boolean =>
-  r === "source" ||
-  (f !== null && isPreset(r) && PRESET_SHORT_SIDE[r] < shortSideOf(f));
+  r === "source" || (f !== null && isPreset(r) && PRESET_SHORT_SIDE[r] < shortSideOf(f));
 const rateInRange = (v: unknown, f: ProjectFacts | null): boolean =>
   v === null || (f !== null && typeof v === "number" && Number.isFinite(v) && v >= 1 && v < f.fps);
 const qualityInRange = (q: unknown): boolean => q === "high" || q === "medium" || q === "low";
@@ -100,8 +102,8 @@ const keptOracle = (o: Overrides, f: ProjectFacts | null): Overrides => {
 
 /** Sides with weight on the lines of the ladder (each rung and one either side of it, odd and even), and very small ones. */
 const EDGES = [
-  479, 480, 481, 482, 719, 720, 721, 722, 1079, 1080, 1081, 1082, 1439, 1440, 1441, 2159, 2160, 2161,
-  2162, 4319, 4320,
+  479, 480, 481, 482, 719, 720, 721, 722, 1079, 1080, 1081, 1082, 1439, 1440, 1441, 2159, 2160,
+  2161, 2162, 4319, 4320,
 ];
 const side = fc.oneof(
   { weight: 4, arbitrary: fc.integer({ min: 2, max: 9000 }) },
@@ -231,7 +233,9 @@ describe("T15 (a) sizeOptions: Same as project, then only presets below the shor
         const list = sizeOptions(f);
         const short = shortSideOf(f);
         expect(list[0]).toBe("source");
-        expect(list.slice(1)).toEqual(PRESETS_LARGEST_FIRST.filter((p) => PRESET_SHORT_SIDE[p] < short));
+        expect(list.slice(1)).toEqual(
+          PRESETS_LARGEST_FIRST.filter((p) => PRESET_SHORT_SIDE[p] < short),
+        );
         expect(new Set(list).size).toBe(list.length);
         for (const entry of list.slice(1))
           expect(PRESET_SHORT_SIDE[entry as SizePreset]).toBeLessThan(short);
@@ -304,7 +308,8 @@ describe("T15 (c) rateOptions: below the project's rate, highest first, once eac
           expect(typeof entry).toBe("number");
           expect(entry).toBeLessThan(f.fps);
         }
-        for (let i = 1; i < rest.length; i += 1) expect(rest[i]).toBeLessThan(rest[i - 1] as number);
+        for (let i = 1; i < rest.length; i += 1)
+          expect(rest[i]).toBeLessThan(rest[i - 1] as number);
         const wanted = new Set(RATE_LADDER.filter((r) => r < f.fps));
         if (e !== null && e < f.fps && e >= 1) wanted.add(e);
         expect(rest).toEqual([...wanted].sort((a, b) => b - a));
@@ -364,7 +369,8 @@ describe("T15 (d) clampOverrides", () => {
           expect(result.fps).toBeGreaterThanOrEqual(1);
           expect(result.fps).toBeLessThan((f as ProjectFacts).fps);
         }
-        if (result.quality !== undefined) expect(["high", "medium", "low"]).toContain(result.quality);
+        if (result.quality !== undefined)
+          expect(["high", "medium", "low"]).toContain(result.quality);
       }),
       { numRuns: RUNS },
     );
@@ -675,7 +681,9 @@ it("is written for projects of every shape: the generators reach the lines of th
   const seen = new Set<string>();
   fc.assert(
     fc.property(project, (f) => {
-      seen.add(`${shortSideOf(f) >= 2160 ? "big" : "small"}|${f.fps >= 50 ? "fast" : "slow"}|${sizeOptions(f).length}`);
+      seen.add(
+        `${shortSideOf(f) >= 2160 ? "big" : "small"}|${f.fps >= 50 ? "fast" : "slow"}|${sizeOptions(f).length}`,
+      );
     }),
     { numRuns: 2000 },
   );

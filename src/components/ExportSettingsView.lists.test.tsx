@@ -182,14 +182,7 @@ const ROWS: Row[] = [
     width: 7680,
     height: 4320,
     fps: 30,
-    sizes: [
-      "Same as project (7680 x 4320)",
-      "2160p (4K)",
-      "1440p",
-      "1080p",
-      "720p",
-      "480p",
-    ],
+    sizes: ["Same as project (7680 x 4320)", "2160p (4K)", "1440p", "1080p", "720p", "480p"],
     rates: ["Same as project (30 fps)", "25 fps", "24 fps"],
   },
   {
@@ -283,7 +276,11 @@ describe("the lists and the rows the settings view draws, for every project", ()
     // a horizontal 1920 x 1080 one has the same short side: the same two, not the sizes below its width
     setCanvas(1920, 1080, 30);
     mount(null);
-    expect(optionNames(resolutionBox()!)).toEqual(["Same as project (1920 x 1080)", "720p", "480p"]);
+    expect(optionNames(resolutionBox()!)).toEqual([
+      "Same as project (1920 x 1080)",
+      "720p",
+      "480p",
+    ]);
   });
 
   it("follows the project as it is now, not the snapshot the dialog took when it opened", () => {
@@ -295,7 +292,11 @@ describe("the lists and the rows the settings view draws, for every project", ()
   it("follows the project when it changes while the view is open", async () => {
     setCanvas(1920, 1080, 30);
     mount(null);
-    expect(optionNames(resolutionBox()!)).toEqual(["Same as project (1920 x 1080)", "720p", "480p"]);
+    expect(optionNames(resolutionBox()!)).toEqual([
+      "Same as project (1920 x 1080)",
+      "720p",
+      "480p",
+    ]);
     await userEvent.setup().click(doorButton());
     expect(optionNames(rateBox()!)).toEqual(["Same as project (30 fps)", "25 fps", "24 fps"]);
     act(() => setCanvas(854, 480, 24));
@@ -319,7 +320,8 @@ describe("the lists and the rows the settings view draws, for every project", ()
   });
 });
 
-const FASTER = "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+const FASTER =
+  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
 const PROJECT = workloadOf(1080, 1920, 30);
 
 describe("the faster-setting line", () => {
@@ -339,14 +341,20 @@ describe("the faster-setting line", () => {
 
   it.each([
     ["an answer without it", () => withLook({})],
-    ["an answer that wants a Mode row (which this view never draws)", () => withLook({ faster: true, showRow: true })],
+    [
+      "an answer that wants a Mode row (which this view never draws)",
+      () => withLook({ faster: true, showRow: true }),
+    ],
     [
       "an answer that has not come",
       () => vi.mocked(decideExportEncoder).mockImplementation(() => new Promise(() => undefined)),
     ],
     [
       "a look that failed",
-      () => vi.mocked(decideExportEncoder).mockImplementation(async () => Promise.reject(new Error("no"))),
+      () =>
+        vi
+          .mocked(decideExportEncoder)
+          .mockImplementation(async () => Promise.reject(new Error("no"))),
     ],
   ])("is not drawn for %s, door open or closed", async (_name, arrange) => {
     arrange();
@@ -418,7 +426,13 @@ describe("what the settings view never draws", () => {
       "an answer that wants the Mode row, with no chip on the PC",
       () => {
         vi.mocked(decideExportEncoder).mockImplementation(async () =>
-          decision({ showRow: true, defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+          decision({
+            showRow: true,
+            defaultMode: "fast",
+            reason: "over_minute",
+            fullSeconds: 720,
+            fastSeconds: 240,
+          }),
         );
         return mount(PROJECT);
       },
@@ -442,7 +456,13 @@ describe("what the settings view never draws", () => {
   it("is not in the page where a chip has proven itself and the app wants the Mode row, with the chip row drawn", async () => {
     pcWith([amd]);
     vi.mocked(decideExportEncoder).mockImplementation(async () =>
-      decision({ showRow: true, defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+      decision({
+        showRow: true,
+        defaultMode: "fast",
+        reason: "over_minute",
+        fullSeconds: 720,
+        fastSeconds: 240,
+      }),
     );
     mount(PROJECT);
     await userEvent.setup().click(doorButton());

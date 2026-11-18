@@ -149,7 +149,9 @@ const region = () => screen.getByTestId("export-advanced");
 const exportButton = () => screen.getByRole("button", { name: "Export" });
 /** The chip's own test commands (as opposed to the PC's other probes). */
 const chipCalls = () =>
-  vi.mocked(runCapabilityProbe).mock.calls.filter(([, options]) => options.kind.startsWith("chip-test"));
+  vi
+    .mocked(runCapabilityProbe)
+    .mock.calls.filter(([, options]) => options.kind.startsWith("chip-test"));
 const lastSent = (onStart: { mock: { calls: unknown[][] } }): ExportSettings => {
   const calls = onStart.mock.calls;
   return calls[calls.length - 1][0] as ExportSettings;
@@ -173,7 +175,10 @@ beforeEach(() => {
   pcWith([]);
 });
 
-const mount = (workload: RenderWorkload | null = PROJECT, onStart = vi.fn<(settings: ExportSettings) => void>()) => {
+const mount = (
+  workload: RenderWorkload | null = PROJECT,
+  onStart = vi.fn<(settings: ExportSettings) => void>(),
+) => {
   const view = render(<ExportSettingsView workload={workload} onCancel={noop} onStart={onStart} />);
   return { ...view, onStart, user: userEvent.setup() };
 };
@@ -190,7 +195,9 @@ describe("T11: the Graphics chip row sits inside the door, mounted while the doo
     expect(region()).toHaveAttribute("hidden");
     expect(within(region()).getByTestId("chip-row")).toBeInTheDocument();
     expect(screen.queryByRole("radiogroup", { name: "Graphics chip" })).toBeNull();
-    expect(screen.getByRole("radiogroup", { name: "Graphics chip", hidden: true })).toBeInTheDocument();
+    expect(
+      screen.getByRole("radiogroup", { name: "Graphics chip", hidden: true }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("chip-row")).not.toBeVisible();
 
     await user.click(door());
@@ -274,7 +281,9 @@ describe("T11: the chip row's note", () => {
     markChipSuspect(amd);
     mount();
     await waitFor(() => expect(note().textContent).toBe(NOTES.setAside));
-    expect(screen.getByRole("button", { name: "Try it again now", hidden: true })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try it again now", hidden: true }),
+    ).toBeInTheDocument();
   });
 
   it("is 0.28.0's where the person has switched the chip Off", async () => {

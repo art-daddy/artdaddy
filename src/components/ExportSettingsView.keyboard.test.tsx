@@ -130,7 +130,9 @@ async function mount(workload: RenderWorkload | null = DEFAULT, adapters: Graphi
   const onCancel = vi.fn<() => void>();
   render(<ExportSettingsView workload={workload} onCancel={onCancel} onStart={onStart} />);
   if (adapters.length > 0)
-    await waitFor(() => expect(screen.getByTestId("chip-row-note").textContent).toBe(CHIP_PASSED_NOTE));
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(CHIP_PASSED_NOTE),
+    );
   await settleAll();
   return { user: userEvent.setup(), onStart, onCancel };
 }

@@ -171,33 +171,36 @@ const PROJECTS: Project[] = [
 ];
 
 describe("what Export hands over when nothing was changed", () => {
-  it.each(PROJECTS)("$name: the project as it is, at Medium, and the app decides how", async (p) => {
-    // the open project's canvas, and no workload: nothing was asked of the app, so Quality is what is sent
-    setCanvas(p.width, p.height, p.fps);
-    const open = mount(null);
-    await settle();
-    await open.user.click(exportButton());
-    expect(open.onStart).toHaveBeenCalledTimes(1);
-    expect(sentBy(open.onStart)).toStrictEqual({
-      resolution: "source",
-      quality: "medium",
-      fps: null,
-      mode: "quality",
-    });
-    open.unmount();
+  it.each(PROJECTS)(
+    "$name: the project as it is, at Medium, and the app decides how",
+    async (p) => {
+      // the open project's canvas, and no workload: nothing was asked of the app, so Quality is what is sent
+      setCanvas(p.width, p.height, p.fps);
+      const open = mount(null);
+      await settle();
+      await open.user.click(exportButton());
+      expect(open.onStart).toHaveBeenCalledTimes(1);
+      expect(sentBy(open.onStart)).toStrictEqual({
+        resolution: "source",
+        quality: "medium",
+        fps: null,
+        mode: "quality",
+      });
+      open.unmount();
 
-    // the dialog's snapshot alone, the app has answered and offers nothing to choose: nothing is the person's pick
-    useEditor.setState({ timeline: null });
-    const snapshot = mount(workloadOf(p.width, p.height, p.fps));
-    await settle();
-    await snapshot.user.click(exportButton());
-    expect(sentBy(snapshot.onStart)).toStrictEqual({
-      resolution: "source",
-      quality: "medium",
-      fps: null,
-      mode: null,
-    });
-  });
+      // the dialog's snapshot alone, the app has answered and offers nothing to choose: nothing is the person's pick
+      useEditor.setState({ timeline: null });
+      const snapshot = mount(workloadOf(p.width, p.height, p.fps));
+      await settle();
+      await snapshot.user.click(exportButton());
+      expect(sentBy(snapshot.onStart)).toStrictEqual({
+        resolution: "source",
+        quality: "medium",
+        fps: null,
+        mode: null,
+      });
+    },
+  );
 
   it("with no project at all: the same, on Quality", async () => {
     const view = mount(null);
@@ -218,31 +221,75 @@ describe("what Export hands over once the person has picked", () => {
     name: string;
     project: [number, number, number];
     steps: Step[];
-    sent: { resolution: ExportSettings["resolution"]; quality: ExportSettings["quality"]; fps: number | null };
+    sent: {
+      resolution: ExportSettings["resolution"];
+      quality: ExportSettings["quality"];
+      fps: number | null;
+    };
   }
   const CASES: Case[] = [
-    { name: "a size", project: [1080, 1920, 30], steps: [["resolution", "720p"]], sent: { resolution: "720p", quality: "medium", fps: null } },
-    { name: "the smallest size", project: [1080, 1920, 30], steps: [["resolution", "480p"]], sent: { resolution: "480p", quality: "medium", fps: null } },
-    { name: "a rate", project: [1080, 1920, 30], steps: [["frame rate", "24 fps"]], sent: { resolution: "source", quality: "medium", fps: 24 } },
-    { name: "the other rate", project: [1080, 1920, 30], steps: [["frame rate", "25 fps"]], sent: { resolution: "source", quality: "medium", fps: 25 } },
-    { name: "High", project: [1080, 1920, 30], steps: [["quality", "High"]], sent: { resolution: "source", quality: "high", fps: null } },
-    { name: "Low", project: [1080, 1920, 30], steps: [["quality", "Low"]], sent: { resolution: "source", quality: "low", fps: null } },
+    {
+      name: "a size",
+      project: [1080, 1920, 30],
+      steps: [["resolution", "720p"]],
+      sent: { resolution: "720p", quality: "medium", fps: null },
+    },
+    {
+      name: "the smallest size",
+      project: [1080, 1920, 30],
+      steps: [["resolution", "480p"]],
+      sent: { resolution: "480p", quality: "medium", fps: null },
+    },
+    {
+      name: "a rate",
+      project: [1080, 1920, 30],
+      steps: [["frame rate", "24 fps"]],
+      sent: { resolution: "source", quality: "medium", fps: 24 },
+    },
+    {
+      name: "the other rate",
+      project: [1080, 1920, 30],
+      steps: [["frame rate", "25 fps"]],
+      sent: { resolution: "source", quality: "medium", fps: 25 },
+    },
+    {
+      name: "High",
+      project: [1080, 1920, 30],
+      steps: [["quality", "High"]],
+      sent: { resolution: "source", quality: "high", fps: null },
+    },
+    {
+      name: "Low",
+      project: [1080, 1920, 30],
+      steps: [["quality", "Low"]],
+      sent: { resolution: "source", quality: "low", fps: null },
+    },
     {
       name: "a size, a rate and a quality together",
       project: [1080, 1920, 30],
-      steps: [["resolution", "720p"], ["frame rate", "24 fps"], ["quality", "High"]],
+      steps: [
+        ["resolution", "720p"],
+        ["frame rate", "24 fps"],
+        ["quality", "High"],
+      ],
       sent: { resolution: "720p", quality: "high", fps: 24 },
     },
     {
       name: "4K at 60: a size and the rate below the project's",
       project: [3840, 2160, 60],
-      steps: [["resolution", "1440p"], ["frame rate", "50 fps"]],
+      steps: [
+        ["resolution", "1440p"],
+        ["frame rate", "50 fps"],
+      ],
       sent: { resolution: "1440p", quality: "medium", fps: 50 },
     },
     {
       name: "4K at 60: a rate and Low",
       project: [3840, 2160, 60],
-      steps: [["frame rate", "25 fps"], ["quality", "Low"]],
+      steps: [
+        ["frame rate", "25 fps"],
+        ["quality", "Low"],
+      ],
       sent: { resolution: "source", quality: "low", fps: 25 },
     },
     {
@@ -266,19 +313,28 @@ describe("what Export hands over once the person has picked", () => {
     {
       name: "a size, then Same as project again: the project's own size",
       project: [1080, 1920, 30],
-      steps: [["resolution", "720p"], ["resolution", "Same as project (1080 x 1920)"]],
+      steps: [
+        ["resolution", "720p"],
+        ["resolution", "Same as project (1080 x 1920)"],
+      ],
       sent: { resolution: "source", quality: "medium", fps: null },
     },
     {
       name: "a rate, then Same as project again: no rate of its own",
       project: [1080, 1920, 30],
-      steps: [["frame rate", "24 fps"], ["frame rate", "Same as project (30 fps)"]],
+      steps: [
+        ["frame rate", "24 fps"],
+        ["frame rate", "Same as project (30 fps)"],
+      ],
       sent: { resolution: "source", quality: "medium", fps: null },
     },
     {
       name: "High, then Medium again",
       project: [1080, 1920, 30],
-      steps: [["quality", "High"], ["quality", "Medium"]],
+      steps: [
+        ["quality", "High"],
+        ["quality", "Medium"],
+      ],
       sent: { resolution: "source", quality: "medium", fps: null },
     },
   ];
@@ -493,7 +549,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "1080 x 1920 at 30 down to 1280 x 720 at 25: 720p is no smaller than 720, 25 is no lower than 25",
       from: [1080, 1920, 30],
-      steps: [["resolution", "720p"], ["frame rate", "25 fps"]],
+      steps: [
+        ["resolution", "720p"],
+        ["frame rate", "25 fps"],
+      ],
       shows: "720p",
       to: [1280, 720, 25],
       sent: { resolution: "source", fps: null },
@@ -501,7 +560,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "4K at 60 down to 1920 x 1080 at 30: 1080p and 30 are the project's own now",
       from: [3840, 2160, 60],
-      steps: [["resolution", "1080p"], ["frame rate", "30 fps"]],
+      steps: [
+        ["resolution", "1080p"],
+        ["frame rate", "30 fps"],
+      ],
       shows: "1080p",
       to: [1920, 1080, 30],
       sent: { resolution: "source", fps: null },
@@ -509,7 +571,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "4K at 60 down to 1440p at 50: both picks are still smaller than the project",
       from: [3840, 2160, 60],
-      steps: [["resolution", "1080p"], ["frame rate", "30 fps"]],
+      steps: [
+        ["resolution", "1080p"],
+        ["frame rate", "30 fps"],
+      ],
       shows: "1080p",
       to: [2560, 1440, 50],
       sent: { resolution: "1080p", fps: 30 },
@@ -517,7 +582,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "1440p at 50 down to 854 x 480 at 30: the size goes, the lower rate stays",
       from: [2560, 1440, 50],
-      steps: [["resolution", "720p"], ["frame rate", "24 fps"]],
+      steps: [
+        ["resolution", "720p"],
+        ["frame rate", "24 fps"],
+      ],
       shows: "720p",
       to: [854, 480, 30],
       sent: { resolution: "source", fps: 24 },
@@ -525,7 +593,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "8K at 30 down to 4K at 30: the 4K preset is the project's own size now",
       from: [7680, 4320, 30],
-      steps: [["resolution", "2160p (4K)"], ["frame rate", "25 fps"]],
+      steps: [
+        ["resolution", "2160p (4K)"],
+        ["frame rate", "25 fps"],
+      ],
       shows: "2160p",
       to: [3840, 2160, 30],
       sent: { resolution: "source", fps: 25 },
@@ -533,7 +604,10 @@ describe("a project that shrinks while the view is open", () => {
     {
       name: "1080p at 30 down to 854 x 480 at 24: 480p and 24 are the project's own now",
       from: [1920, 1080, 30],
-      steps: [["resolution", "480p"], ["frame rate", "24 fps"]],
+      steps: [
+        ["resolution", "480p"],
+        ["frame rate", "24 fps"],
+      ],
       shows: "480p",
       to: [854, 480, 24],
       sent: { resolution: "source", fps: null },

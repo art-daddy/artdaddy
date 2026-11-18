@@ -313,9 +313,7 @@ const SCENARIOS: Scenario[] = [
     adapters: [],
     look: never,
     picks: { size: "720p" },
-    presses: [
-      { sent: sent({ resolution: "720p", mode: "quality" }), legacyDrawsModeRow: false },
-    ],
+    presses: [{ sent: sent({ resolution: "720p", mode: "quality" }), legacyDrawsModeRow: false }],
   },
   {
     name: "a size pick that brings the chip row back (1080p at 60 is served, 4K at 60 is not) and the look wants a row",
@@ -353,8 +351,7 @@ async function pick(user: User, side: Side, picks: Picks): Promise<void> {
   if (side === "view" && (picks.rate !== undefined || picks.quality !== undefined))
     await user.click(screen.getByRole("button", { name: "Advanced settings" }));
   if (picks.size !== undefined) await choose("resolution", picks.size, picks.size);
-  if (picks.rate !== undefined)
-    await choose("frame rate", String(picks.rate), `${picks.rate} fps`);
+  if (picks.rate !== undefined) await choose("frame rate", String(picks.rate), `${picks.rate} fps`);
   if (picks.quality !== undefined) {
     const names = { high: "High", medium: "Medium", low: "Low" };
     await choose("quality", picks.quality, names[picks.quality]);

@@ -125,7 +125,9 @@ const FUNCTION_EXPORTS = EXPORTS.filter(([, value]) => typeof value === "functio
 );
 /** Every string of every non-function export: D2_WORDS, RESOLUTION_WORDS, QUALITY_WORDS, CHIP_NOTE_DROPPED_CLAUSES and whatever is added. */
 const WALKED = unique(
-  EXPORTS.filter(([, value]) => typeof value !== "function").flatMap(([, value]) => stringsOf(value)),
+  EXPORTS.filter(([, value]) => typeof value !== "function").flatMap(([, value]) =>
+    stringsOf(value),
+  ),
 );
 
 /** The builders that write digits and the letter x and no sentence of their own. */
@@ -231,7 +233,8 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
   it("covers every export of the words module: a string or a table is walked, a function is named here", () => {
     expect(FUNCTION_EXPORTS.sort()).toEqual([...NUMBER_BUILDERS, ...SENTENCE_BUILDERS].sort());
     for (const [name, value] of EXPORTS)
-      if (typeof value !== "function") expect({ name, strings: stringsOf(value).length > 0 }).toEqual({ name, strings: true });
+      if (typeof value !== "function")
+        expect({ name, strings: stringsOf(value).length > 0 }).toEqual({ name, strings: true });
     // the walk reaches the tables, not only the top level
     for (const text of Object.values(D2_WORDS)) expect(WALKED).toContain(text);
     expect(WALKED).toContain("2160p (4K)");
@@ -245,7 +248,10 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
     for (const text of texts) {
       expect(WALKED).toContain(text);
       const where = literals.filter((l) => l.text === text).map((l) => l.file);
-      expect({ text, inWordsFile: where.includes(WORDS_FILE) }).toEqual({ text, inWordsFile: true });
+      expect({ text, inWordsFile: where.includes(WORDS_FILE) }).toEqual({
+        text,
+        inWordsFile: true,
+      });
       expect({ text, inALegacyFile: where.some((file) => file !== WORDS_FILE) }).toEqual({
         text,
         inALegacyFile: true,
@@ -308,7 +314,11 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
   );
 
   it("builds the buttons of the question from the words, in the order the spec gives", () => {
-    expect(questionButtons("a")).toEqual([D2_WORDS.cancel, D2_WORDS.exportAtQuality, D2_WORDS.useFast]);
+    expect(questionButtons("a")).toEqual([
+      D2_WORDS.cancel,
+      D2_WORDS.exportAtQuality,
+      D2_WORDS.useFast,
+    ]);
     expect(questionButtons("b")).toEqual([
       D2_WORDS.cancel,
       D2_WORDS.exportWithThese,
@@ -324,7 +334,9 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
       CONNECTORS.includes(text) ||
       FRAGMENTS.some(({ fragment }) => text.includes(fragment));
     const strangers = own
-      .filter((literal) => literal.kind !== "jsx" && hasLetter(literal.text) && !known(literal.text))
+      .filter(
+        (literal) => literal.kind !== "jsx" && hasLetter(literal.text) && !known(literal.text),
+      )
       .map((literal) => `${literal.file}:${literal.line} ${JSON.stringify(literal.text)}`);
     expect(strangers).toEqual([]);
   });
@@ -403,7 +415,12 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
   });
 
   it("catches a copy: the scan reads a component literal that is a D2 sentence, a name or a sentence with more around it as a copy, and a code name as none", () => {
-    const at = (text: string): Literal => ({ file: "components/X.tsx", line: 1, kind: "string", text });
+    const at = (text: string): Literal => ({
+      file: "components/X.tsx",
+      line: 1,
+      kind: "string",
+      text,
+    });
     expect(copiesOf(at("Typical speed-up; your PC may differ."))).not.toEqual([]);
     expect(copiesOf(at("  Advanced   settings "))).not.toEqual([]);
     expect(copiesOf(at("Resolution"))).not.toEqual([]);

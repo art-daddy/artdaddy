@@ -105,9 +105,14 @@ const settle = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 
 const NOT_ASKED = { onCancel: vi.fn(), onStart: vi.fn() };
-function mount(workload: RenderWorkload | null = null, onStart = vi.fn<(s: ExportSettings) => void>()) {
+function mount(
+  workload: RenderWorkload | null = null,
+  onStart = vi.fn<(s: ExportSettings) => void>(),
+) {
   const user = userEvent.setup();
-  const view = render(<ExportSettingsView workload={workload} onCancel={NOT_ASKED.onCancel} onStart={onStart} />);
+  const view = render(
+    <ExportSettingsView workload={workload} onCancel={NOT_ASKED.onCancel} onStart={onStart} />,
+  );
   return { ...view, onStart, user };
 }
 type Mounted = ReturnType<typeof mount>;
@@ -212,9 +217,7 @@ describe("an opening starts afresh", () => {
     const view = mount(null);
     await pickEverything(view);
     // the dialog draws again (new callbacks, a new copy of the snapshot, the same view): not an opening
-    view.rerender(
-      <ExportSettingsView workload={null} onCancel={vi.fn()} onStart={view.onStart} />,
-    );
+    view.rerender(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={view.onStart} />);
     expect(box("resolution")).toHaveValue("720p");
     expect(box("frame rate")).toHaveValue("24");
     expect(box("quality")).toHaveValue("high");
@@ -234,11 +237,7 @@ describe("an opening starts afresh", () => {
     await settle();
     await pickEverything(view);
     view.rerender(
-      <ExportSettingsView
-        workload={{ ...first }}
-        onCancel={vi.fn()}
-        onStart={view.onStart}
-      />,
+      <ExportSettingsView workload={{ ...first }} onCancel={vi.fn()} onStart={view.onStart} />,
     );
     await settle();
     expect(box("resolution")).toHaveValue("720p");

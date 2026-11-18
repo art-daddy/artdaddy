@@ -196,7 +196,13 @@ const PROJECTS: Project[] = [
   {
     name: "the default project, 1080 x 1920 at 30",
     workload: DEFAULT,
-    closed: ["Resolution", "Same as project (1080 x 1920)", "Advanced settings", "Cancel", "Export"],
+    closed: [
+      "Resolution",
+      "Same as project (1080 x 1920)",
+      "Advanced settings",
+      "Cancel",
+      "Export",
+    ],
     open: [
       "Resolution",
       "Same as project (1080 x 1920)",
@@ -214,7 +220,13 @@ const PROJECTS: Project[] = [
   {
     name: "a 4K project at 60",
     workload: sized(3840, 2160, 60),
-    closed: ["Resolution", "Same as project (3840 x 2160)", "Advanced settings", "Cancel", "Export"],
+    closed: [
+      "Resolution",
+      "Same as project (3840 x 2160)",
+      "Advanced settings",
+      "Cancel",
+      "Export",
+    ],
     open: [
       "Resolution",
       "Same as project (3840 x 2160)",
@@ -248,7 +260,13 @@ const PROJECTS: Project[] = [
   {
     name: "a 1080p project at 24 (no Frame rate row)",
     workload: sized(1920, 1080, 24),
-    closed: ["Resolution", "Same as project (1920 x 1080)", "Advanced settings", "Cancel", "Export"],
+    closed: [
+      "Resolution",
+      "Same as project (1920 x 1080)",
+      "Advanced settings",
+      "Cancel",
+      "Export",
+    ],
     open: [
       "Resolution",
       "Same as project (1920 x 1080)",
