@@ -177,10 +177,11 @@ export default function ExportCard({
 
       {running.map((r) => {
         const feed = liveFeedOf({ live, finishing }, r.job_id);
-        // The honest estimate's own words (its range, where the number came from) when the export was admitted with one.
+        // The honest estimate's own words (its range, where the number came from) when the export was admitted with one. What was
+        // expected is said only when it came from this PC's own earlier exports: a guess from the size of the export is not shown.
         const expected =
           (r.estimate ? describeEstimateLine(r.estimate, r.estimateClass) : "") ||
-          describeExpected(r.expected);
+          (r.expected?.guessed ? "" : describeExpected(r.expected));
         const again =
           r.attempt && r.attempt > 1 ? (restartWords(r.restartReason)?.after ?? null) : null;
         const quietNote = feed ? describeQuietNote(feed, now) : null;
@@ -229,8 +230,8 @@ export default function ExportCard({
                 {quietNote}
               </div>
             )}
-            {/* What it was expected to take when it began, for the whole run: the time left above is the render's own
-                guess and only appears once it is moving. */}
+            {/* What it was expected to take when it began, for the whole run, when this PC's own earlier exports said so: the time left
+                above is the rule's, and only appears once the render has run long enough to read a pace from. */}
             {expected && !r.cancelling && (
               <div
                 data-testid="export-card-expected"

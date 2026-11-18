@@ -9,6 +9,7 @@ import {
   type DialogEstimate,
   type ExportMode,
 } from "./exportOptions";
+import { IMPLAUSIBLE_SECONDS, NO_TIME_LEFT, roundTimeLeft, type TimeLeft } from "./exportTimeLeft";
 
 export type LiveStageName = "queued" | "preparing" | "rendering" | "checking" | "saving";
 
@@ -27,6 +28,9 @@ export interface LiveFacts {
   /** Whether the export's processors or disk were busy over the last three minutes, as the watch reads them: true, false
    *  (idle), or null when that cannot be told (no reading yet, or the app cannot read it). Absent where nothing reads it. */
   readonly busy?: boolean | null;
+  /** What may be said about the time left (exportTimeLeft.ts): the store advances it with every progress report of this
+   *  export's own feed, so it carries the rule's memory of this run and no other. Absent where nothing feeds it: no time is said. */
+  readonly timeLeft?: TimeLeft;
 }
 
 /** A render that has not moved for this long is said to have made no progress (the same silence the
@@ -84,11 +88,82 @@ function plausibleEta(eta: number | null): number | null {
 }
 
 /** How long a render thinks is left, in seconds, or null when that is not worth saying: the render is not
- *  under way, it has stopped moving, or the number cannot be a time left. The one rule the status line and
- *  the assistant's export list share. */
+ *  under way, it has stopped moving, or the number cannot be a time left. This is the render's own raw pace (ffmpeg's speed, start-up
+ *  counted), unrounded and ungated: the slow banner and the assistant's `projected_total_s` read it. What a person is TOLD is
+ *  {@link timeLeftNow}. */
 export function timeLeftSeconds(live: LiveFacts, now: number): number | null {
   if (live.stage !== "rendering" || quietSeconds(live, now) >= QUIET_SECONDS) return null;
   return plausibleEta(live.etaSec);
+}
+
+/** What a person is told about the time left, in each of the rule's answers (the rule itself is exportTimeLeft.ts). Written here and nowhere else. */
+export const FINISHING_WORDS = "Finishing";
+export const LONGER_WORDS = "taking longer than expected";
+
+/** A stored answer, read as one of the four the rule gives. Anything else (not an object, a kind the rule does not have, a figure that is not on the
+ *  rounding grid or cannot be a time) reads as none: what the rule would not show is never said. */
+function readTimeLeft(value: unknown): TimeLeft {
+  if (typeof value !== "object" || value === null) return NO_TIME_LEFT;
+  const { kind, seconds } = value as { kind?: unknown; seconds?: unknown };
+  if (kind === "finishing" || kind === "longer") return { kind };
+  if (
+    kind === "left" &&
+    typeof seconds === "number" &&
+    Number.isFinite(seconds) &&
+    seconds > 0 &&
+    seconds <= IMPLAUSIBLE_SECONDS &&
+    roundTimeLeft(seconds) === seconds
+  )
+    return { kind, seconds };
+  return NO_TIME_LEFT;
+}
+
+/** A render made in parts, and not at its last: only the final encode runs at the pace of what is left, so no part before it has a time left to say.
+ *  Reads `step` and `steps` the way {@link describeStage} does. */
+function inEarlierPart(live: Pick<LiveFacts, "step" | "steps">): boolean {
+  const { step, steps } = live;
+  return (
+    step !== null &&
+    steps !== null &&
+    Number.isInteger(step) &&
+    Number.isInteger(steps) &&
+    steps > 1 &&
+    step >= 0 &&
+    step < steps - 1
+  );
+}
+
+/** What may be said about the time left of an export right now: the rule's answer for this run (`live.timeLeft`, advanced by every report of the
+ *  run's own feed), kept to the three things only a clock and the stage can know. It is said only while the render is under way (not while the file
+ *  is checked or saved), not once the render has made no new picture for a minute (a figure from before the silence is no longer news), and not
+ *  while a render made in parts is at a part before the last. The one answer the status line, the Export dialog and the assistant's export list share. */
+export function timeLeftNow(live: LiveFacts, now: number): TimeLeft {
+  if (live.stage !== "rendering" || quietSeconds(live, now) >= QUIET_SECONDS) return NO_TIME_LEFT;
+  if (inEarlierPart(live)) return NO_TIME_LEFT;
+  return readTimeLeft(live.timeLeft);
+}
+
+/** The figure of {@link timeLeftNow} in whole seconds (a value on the rounding grid), or null when what is said is not a figure ("Finishing", "taking
+ *  longer than expected", nothing). What the assistant's export list reports as `time_left_s`: never a number the person is not shown. */
+export function shownTimeLeftSeconds(live: LiveFacts, now: number): number | null {
+  const said = timeLeftNow(live, now);
+  return said.kind === "left" ? said.seconds : null;
+}
+
+/** An answer of the rule in words: "about 4 min left", "under a minute left", "Finishing", "taking longer than expected", or nothing. */
+export function describeTimeLeft(timeLeft: TimeLeft): string {
+  switch (timeLeft.kind) {
+    case "left": {
+      const time = describeExportTime(timeLeft.seconds);
+      return time ? `${time} left` : "";
+    }
+    case "finishing":
+      return FINISHING_WORDS;
+    case "longer":
+      return LONGER_WORDS;
+    case "none":
+      return "";
+  }
 }
 
 /** The front of the one line under the bar: how long it has been going or that it has made no progress, the stage by
@@ -116,13 +191,13 @@ export function describeStageLine(live: LiveFacts, now: number): string {
   return parts.join(" · ");
 }
 
-/** The one line under the bar: the front ({@link describeStageLine}) and how long the render thinks is left. */
+/** The one line under the bar: the front ({@link describeStageLine}) and what may be said about the time left ({@link timeLeftNow}):
+ *  a figure, "Finishing", or "taking longer than expected"; nothing before the rule has one to say. */
 export function describeLiveStatus(live: LiveFacts, now: number): string {
   const front = describeStageLine(live, now);
   if (live.stage === "queued") return front;
-  const left = timeLeftSeconds(live, now);
-  const leftText = left === null ? "" : describeExportTime(left);
-  return leftText ? `${front} · ${leftText} left` : front;
+  const left = describeTimeLeft(timeLeftNow(live, now));
+  return left ? `${front} · ${left}` : front;
 }
 
 /** The grey line that follows the status once a busy render has made no new picture for five minutes, or null. It says
@@ -165,8 +240,8 @@ export interface DialogProgress {
   readonly fraction: number | null;
   /** Right of the panel: how fast the render goes (a multiple of the video's length), or null when not worth saying. */
   readonly speed: number | null;
-  /** Right of the panel: how long the render thinks is left, in seconds, or null when not worth saying. */
-  readonly left: number | null;
+  /** Right of the panel, after the speed: what may be said about the time left, in words ("about 4 min left", "Finishing", "taking longer than expected"), or "" when nothing. The words of the chat card's line. */
+  readonly timeLeft: string;
 }
 
 const unitOrNull = (value: number | null): number | null =>
@@ -184,7 +259,8 @@ export function describeDialogProgress(
     readonly place: number | null;
     readonly phase: "preparing" | "rendering";
     readonly fraction: number | null;
-    readonly etaSec: number | null;
+    /** What the rule says of the job's own feed (exportTimeLeft.ts), read only where `own` is not there. */
+    readonly timeLeft: TimeLeft;
     readonly speed: number;
   },
   now: number,
@@ -195,10 +271,10 @@ export function describeDialogProgress(
       status: describeStageLine(own, now),
       fraction: unitOrNull(own.fraction),
       speed: own.stage === "rendering" ? rateOrNull(own.speed) : null,
-      left: timeLeftSeconds(own, now),
+      timeLeft: describeTimeLeft(timeLeftNow(own, now)),
     };
   if (view.place !== null)
-    return { status: describeWaiting(view.place), fraction: null, speed: null, left: null };
+    return { status: describeWaiting(view.place), fraction: null, speed: null, timeLeft: "" };
   const rendering = view.phase === "rendering";
   const fraction = unitOrNull(view.fraction);
   return {
@@ -209,8 +285,8 @@ export function describeDialogProgress(
         : `${Math.round(fraction * 100)}%`,
     fraction,
     speed: rendering ? rateOrNull(view.speed) : null,
-    // The same rule as the feed's: a number that cannot be a time left is not said.
-    left: rendering ? plausibleEta(view.etaSec) : null,
+    // The same rule as the feed's, said in the same words; the job has no clock of its own to tell a render that stopped moving.
+    timeLeft: rendering ? describeTimeLeft(readTimeLeft(view.timeLeft)) : "",
   };
 }
 

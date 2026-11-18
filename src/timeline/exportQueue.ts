@@ -119,7 +119,7 @@ import {
   describeChipFailure,
   failureOf,
   quietSeconds,
-  timeLeftSeconds,
+  shownTimeLeftSeconds,
 } from "./exportWords";
 import { limitThatFired, mibBand, parseNativeDiagnostics } from "./nativeDiagnostics";
 import { attempts, type Restarted, type RestartLink } from "./exportAttempts";
@@ -681,7 +681,7 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     const rendering = running !== null && running.stage === "rendering";
     const quiet = running ? quietSeconds(running, now) : 0;
     const busy = running ? (stories.get(r.job_id)?.watch?.busy() ?? null) : null;
-    const left = running ? timeLeftSeconds(running, now) : null;
+    const left = running ? shownTimeLeftSeconds(running, now) : null;
     const failure = r.state === "failed" ? failureOf(r.error) : null;
     const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
     // A running export that is slower than said: the two facts, and what the assistant is to do about them (not cancel and start again).
@@ -735,6 +735,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       ...(rendering && running.fraction !== null && Number.isFinite(running.fraction)
         ? { progress_percent: Math.round(Math.min(1, Math.max(0, running.fraction)) * 100) }
         : {}),
+      // The figure the card says, on its rounding grid, in whole seconds: absent where the card says no figure (before the rule has one, "Finishing", "taking
+      // longer than expected", a render that has stopped moving or is not at its render).
       ...(left !== null ? { time_left_s: Math.round(left) } : {}),
       ...(slow ? slow.fields : {}),
       // No new picture for a minute or more: idle (or unreadable) is said as it always was; busy is said as working, so the

@@ -9,6 +9,13 @@ import { COST_FEATURES, type FeatureLoads } from "../timeline/costShape";
 import { attempts } from "../timeline/exportAttempts";
 import { ENCODER_IDS, type ExportEncoder } from "../timeline/exportEncoder";
 import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
+import {
+  NO_TIME_LEFT,
+  notePace,
+  startPace,
+  type PaceState,
+  type TimeLeft,
+} from "../timeline/exportTimeLeft";
 import type { LiveFacts, LiveStageName } from "../timeline/exportWords";
 
 const ENGINE_KEY = "artdaddy-export-routing-v2";
@@ -143,11 +150,16 @@ export interface ExportJob {
   jobId: string | null;
   /** 0..1, or null while ffmpeg has not reported a position yet. */
   fraction: number | null;
-  /** Seconds remaining, or null when there is not enough information to say. */
+  /** Seconds remaining, or null when there is not enough information to say. The render's own raw pace (ffmpeg's speed), kept as the producers
+   *  publish it: what a person is told is `timeLeft`. */
   etaSec: number | null;
   /** Encoding rate as a multiple of realtime. */
   speed: number;
   frame: number;
+  /** What may be said about the time left of this job's feed (timeline/exportTimeLeft.ts), advanced by every report it takes. */
+  timeLeft: TimeLeft;
+  /** The rule's memory of this job's feed: its latches (finishing, taking longer, the best share seen) belong to one run, so `begin` starts them afresh. */
+  pace: PaceState;
   /** Where it landed, once it has. */
   savedTo: string | null;
   error: string | null;
@@ -161,6 +173,8 @@ const IDLE: ExportJob = {
   etaSec: null,
   speed: 0,
   frame: 0,
+  timeLeft: NO_TIME_LEFT,
+  pace: startPace(),
   savedTo: null,
   error: null,
   startedAt: 0,
@@ -173,7 +187,16 @@ export interface ExportLive extends LiveFacts {
   readonly jobId: string;
   readonly speed: number;
   readonly frame: number;
+  /** What may be said about the time left of THIS attempt: the rule's answer after the last report (exportTimeLeft.ts). */
+  readonly timeLeft: TimeLeft;
+  /** The rule's memory of this attempt. A new attempt is a new object (`beginLive`), so nothing of an earlier one's latches is carried into it. */
+  readonly pace: PaceState;
 }
+
+/** What a caller may change of the job: everything but the time-left rule's answer and memory, which only a progress report moves. */
+type JobPatch = Partial<Omit<ExportJob, "timeLeft" | "pace">>;
+/** A progress report: the job's fields it names, and for a render made in parts which part (0-based) of how many. */
+type ProgressPatch = JobPatch & { step?: number | null; steps?: number | null };
 
 interface ExportState extends ExportJob {
   /** The export that is rendering right now: progress reports are about this one. */
@@ -196,9 +219,10 @@ interface ExportState extends ExportJob {
    *  that arrives late follows nothing. */
   attach: (jobId: string) => void;
   /** A progress report. Moves the dialog's job while that job is running, and the live feed whenever
-   *  an export is live. `step` and `steps` say which part of a streamed render this is. */
-  update: (patch: Partial<ExportJob> & { step?: number | null; steps?: number | null }) => void;
-  finish: (patch: Partial<ExportJob>) => void;
+   *  an export is live. `step` and `steps` say which part of a streamed render this is. Each feed's time-left rule (exportTimeLeft.ts) takes the
+   *  report with the clock of the moment it lands. */
+  update: (patch: ProgressPatch) => void;
+  finish: (patch: JobPatch) => void;
   reset: () => void;
   beginLive: (jobId: string) => void;
   setLiveStage: (jobId: string, stage: LiveStageName) => void;
@@ -242,8 +266,12 @@ export const useExportJob = create<ExportState>((set, get) => ({
   update: (patch) =>
     set((s) => {
       const { step, steps, ...job } = patch;
-      const moved = s.phase === "preparing" || s.phase === "rendering" ? { ...s, ...job } : s;
-      return s.live ? { ...moved, live: advanced(s.live, patch, Date.now()) } : moved;
+      const now = Date.now();
+      const moved =
+        s.phase === "preparing" || s.phase === "rendering"
+          ? { ...s, ...job, ...jobPaced(s, patch, now) }
+          : s;
+      return s.live ? { ...moved, live: advanced(s.live, patch, now) } : moved;
     }),
   finish: (patch) => set((s) => ({ ...s, ...patch, abort: null })),
   reset: () => set({ ...IDLE, abort: null }),
@@ -261,6 +289,9 @@ export const useExportJob = create<ExportState>((set, get) => ({
         step: null,
         steps: null,
         lastMoveAt: now,
+        // A new attempt starts the rule afresh: no latch of an earlier attempt (finishing, taking longer, the best share seen) is carried into it.
+        timeLeft: NO_TIME_LEFT,
+        pace: startPace(),
       },
       // The one that was rendering is not any more, but it has not settled: it may still be checking the
       // file or saving it, and it keeps saying so. The next turn only comes once its render process is
@@ -324,12 +355,10 @@ export function liveFeedOf(
 
 /** The live feed after a progress report. Movement is a change in the frame count, the output position
  *  or the part being made: ffmpeg prints a block every half second even when it is stuck, and a stuck
- *  one repeats the same numbers, so a block arriving is not a sign of life, a block that differs is. */
-function advanced(
-  live: ExportLive,
-  patch: Partial<ExportJob> & { step?: number | null; steps?: number | null },
-  now: number,
-): ExportLive {
+ *  one repeats the same numbers, so a block arriving is not a sign of life, a block that differs is.
+ *  The time-left rule (exportTimeLeft.ts) takes every report, moved or not, at the moment it landed: a report that
+ *  says nothing new is the rule's evidence that the pace has dropped. */
+function advanced(live: ExportLive, patch: ProgressPatch, now: number): ExportLive {
   const next: ExportLive = {
     ...live,
     fraction: patch.fraction !== undefined ? patch.fraction : live.fraction,
@@ -341,7 +370,31 @@ function advanced(
   };
   const moved =
     next.frame !== live.frame || next.fraction !== live.fraction || next.step !== live.step;
-  return moved ? { ...next, lastMoveAt: now } : next;
+  const pace = notePace(live.pace ?? startPace(), {
+    at: now,
+    fraction: next.fraction ?? Number.NaN,
+    step: next.step,
+    steps: next.steps,
+  });
+  const reported = { ...next, pace, timeLeft: pace.value };
+  return moved ? { ...reported, lastMoveAt: now } : reported;
+}
+
+/** What a report does to the dialog's own job: its time-left rule takes the report (its share, and the part it names) at the moment it landed.
+ *  A report that names no share is the share the job already has. */
+function jobPaced(
+  job: Pick<ExportJob, "fraction" | "pace">,
+  patch: ProgressPatch,
+  now: number,
+): Pick<ExportJob, "pace" | "timeLeft"> {
+  const fraction = patch.fraction !== undefined ? patch.fraction : job.fraction;
+  const pace = notePace(job.pace ?? startPace(), {
+    at: now,
+    fraction: fraction ?? Number.NaN,
+    step: patch.step,
+    steps: patch.steps,
+  });
+  return { pace, timeLeft: pace.value };
 }
 
 /** True while a render is running — the menu uses this to refuse a second one. */
