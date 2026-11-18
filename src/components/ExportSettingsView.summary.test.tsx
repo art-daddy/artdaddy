@@ -330,7 +330,7 @@ describe("the owner's examples, word for word", () => {
       fps: null,
     });
   });
-  it("Fast on 72 fps: the size one smaller and a rate of 18 is not a clause (the project is above 30 and 18 is at most 30)", () => {
+  it("Fast on 72 fps: the line says 'up to 30 frames a second', not the 18 Fast sends (the project is above 30 and 18 is at most 30)", () => {
     expect(play(SHAPES[4], "fast").line).toBe(
       "One size smaller, up to 30 frames a second, Medium quality.",
     );

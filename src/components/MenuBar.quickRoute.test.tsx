@@ -564,7 +564,7 @@ describe("Fast, picked in the new view, runs the export tool with the route and 
     expect(run.options.exportRoute).toStrictEqual({ route: "quick", explicit: NOTHING_TOUCHED });
   });
 
-  it("a double press of Export is one call, with the route", async () => {
+  it("pressing Export twice in a row starts one export, with the route (off the app: in the shipped app the Save As box comes before the export begins)", async () => {
     const run = await exportedOn(
       HD30,
       true,

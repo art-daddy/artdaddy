@@ -261,10 +261,12 @@ describe("the two choices' own values (table 3.1)", () => {
   });
 
   it("never starts Fast on a rate at or above the project's", () => {
-    for (const project of PROJECTS) {
-      const own = ownLevers("fast", project.project);
-      if (project.project !== null && own.fps !== null)
-        expect(own.fps).toBeLessThan(project.project.fps);
+    // the six projects of the table whose rate Fast lowers (written out in `fast`)
+    const lowered = PROJECTS.filter((row) => row.fast.fps !== null);
+    expect(lowered).toHaveLength(6);
+    for (const row of lowered) {
+      expect(ownLevers("fast", row.project).fps).toBe(row.fast.fps);
+      expect(row.fast.fps).toBeLessThan((row.project as ProjectFacts).fps);
     }
   });
 
@@ -388,10 +390,10 @@ describe("the Frame rate list (table 3.1, rule 3.2)", () => {
   });
 
   it("holds Fast's own rate for every project of the table when the view passes it", () => {
-    for (const row of PROJECTS) {
-      const own = ownLevers("fast", row.project).fps;
-      if (own !== null) expect(rateOptions(row.project, own)).toContain(own);
-    }
+    const lowered = PROJECTS.filter((row) => row.fast.fps !== null);
+    expect(lowered).toHaveLength(6);
+    for (const row of lowered)
+      expect(rateOptions(row.project, row.fast.fps)).toContain(row.fast.fps);
   });
 
   it("names the entries: the project's rate as it is (at most two decimals), then the lower ones", () => {
@@ -474,11 +476,10 @@ describe("rateEntriesFor: the Frame rate list of a dialog that offers Fast (tabl
   });
 
   it("holds the rate Fast starts on, for every project of the table where it is a number", () => {
-    for (const row of PROJECTS) {
-      const own = ownLevers("fast", row.project).fps;
-      if (own !== null)
-        expect(rateEntriesFor(row.project, true).map((entry) => entry.value)).toContain(own);
-    }
+    const lowered = PROJECTS.filter((row) => row.fast.fps !== null);
+    expect(lowered).toHaveLength(6);
+    for (const row of lowered)
+      expect(rateEntriesFor(row.project, true).map((entry) => entry.value)).toContain(row.fast.fps);
   });
 
   it("reads Fast's own rate from the bundle: a cap of 24 halves 60 to 15, and 15 is in the list", () => {

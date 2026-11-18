@@ -547,6 +547,18 @@ async function makePicks(view: Mounted, shape: Shape, pick: Pick): Promise<void>
 }
 
 describe("(c) what Export hands over, over the project shapes and the picks", () => {
+  it("is not an empty matrix: eight shapes, at least the three picks that need no list for each choice, and every pick on 4K at 60 under Fast", () => {
+    expect(SHAPES).toHaveLength(8);
+    for (const shape of SHAPES)
+      for (const choice of ["quality", "fast"] as const)
+        expect(PICKS.filter((pick) => possible(shape, choice, pick)).length).toBeGreaterThanOrEqual(
+          3,
+        );
+    // 4K at 60 has both lists and Fast's own values differ from the project's: all eight picks are possible under Fast, and the two "Same as project" picks are not under Quality (it shows them already)
+    expect(PICKS.filter((pick) => possible(UHD60, "fast", pick))).toHaveLength(8);
+    expect(PICKS.filter((pick) => possible(UHD60, "quality", pick))).toHaveLength(6);
+  });
+
   describe.each(SHAPES)("$name", (shape) => {
     describe.each<Choice>(["quality", "fast"])("%s", (choice) => {
       it.each(PICKS.filter((pick) => possible(shape, choice, pick)))("$name", async (pick) => {
@@ -947,7 +959,7 @@ describe("(g) the click's own moves, for Fast as for Quality, and Cancel", () =>
     },
   );
 
-  it("a second click sends a second, identical object (the view does not guard it; the dialog does)", async () => {
+  it("a second click sends a second, identical object (the view hands over what it is asked: what stops a second export is the menu bar's check of a running export, which holds once the export has begun)", async () => {
     const view = mount(UHD60);
     await settle();
     await view.user.click(radio("Fast"));
