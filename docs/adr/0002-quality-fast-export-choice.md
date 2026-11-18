@@ -86,9 +86,10 @@ cores):
 | 4K at 60, 2 clips, streamed (20 s)   | 1.34                       | 1.01                                | not measured          |
 | 36-clip HD edit, streamed (2 min)    | (2.39)                     | (1.11)                              | (0.99)                |
 
-Brackets: from a block the lab flagged noisy and queued to repeat. A slideshow block was flagged too
-and is left out. "Processor" is Quality as the app runs it there (standard compression); "light
-compression" is what Quality's own rule already picks on a slow project without a chip.
+Brackets: every run of that figure is in a block the lab flagged or in an unfinished segment. A
+slideshow block was flagged too and is left out. "Processor" is Quality as the app runs it there
+(standard compression); "light compression" is what Quality's own rule already picks on a slow
+project without a chip.
 
 - Light compression alone is 1.27 to 1.38 times faster than standard on plain projects, the chip alone
   1.42 to 2.15 times (1.11 on the zoom-heavy reel). Fast without a chip is mostly the light
@@ -99,10 +100,10 @@ compression" is what Quality's own rule already picks on a slow project without 
 - On an emulated weak PC (the same laptop limited to 4 of 16 processors and 4.7 GB free; three valid
   blocks so far: a talking head, horizontal HD, HD at 60 fps) Fast without a chip was 1.8 to 2.6 times
   faster than Quality; Fast with the chip was slower than Quality with the chip (ratios 0.79 to 0.89).
-- On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps): the
-  lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame drawn, a little more than
-  the chip saves by encoding the smaller picture, so Fast took up to about 6 seconds longer than
-  Quality on 2-minute exports. A cheaper resize filter was not tried.
+- On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps) on
+  the one-pass engine: the lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame
+  drawn, a little more than the chip saves by encoding the smaller picture, so Fast took up to about
+  6 seconds longer than Quality on 2-minute exports. A cheaper resize filter was not tried.
 - Only drawing at the delivery size from the start moved a big project: 4K at 30 fps from about 120 s
   to about 13 s with the chip, the phone reel from about 51 s to 48 s. That is an upper bound: the
   canvas was set small by hand, text and effects were not rescaled, picture quality was not judged, and
