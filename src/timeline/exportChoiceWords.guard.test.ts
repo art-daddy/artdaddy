@@ -477,14 +477,25 @@ function mentionsIn(source: ts.SourceFile, label: string, names: readonly string
   return found;
 }
 
-/** Every use of the identifier `name` other than `name.key` and its import: a spread, `Object.values(name)`, `name[key]`, a re-export. Such a use names no key, so no list of names can say what it reaches. */
+/** Every use of the identifier `name` other than `name.key`, `const { key, ... } = name` and its import: a spread, `Object.values(name)`, `name[key]`, a rest element, a computed key, a re-export. Such a use names no key, so no list of names can say what it reaches. */
 function looseUsesIn(source: ts.SourceFile, label: string, name: string): string[] {
   const found: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === name) {
       const parent = node.parent;
       const keyRead = ts.isPropertyAccessExpression(parent) && parent.expression === node;
-      if (!keyRead && !ts.isImportSpecifier(parent)) {
+      const destructured =
+        ts.isVariableDeclaration(parent) &&
+        parent.initializer === node &&
+        ts.isObjectBindingPattern(parent.name) &&
+        parent.name.elements.every(
+          (element) =>
+            element.dotDotDotToken === undefined &&
+            !(
+              element.propertyName !== undefined && ts.isComputedPropertyName(element.propertyName)
+            ),
+        );
+      if (!keyRead && !destructured && !ts.isImportSpecifier(parent)) {
         const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
         found.push(`${label}:${line} ${parent.getText(source)}`);
       }
@@ -597,12 +608,15 @@ describe("T16 (4) no word of the dialog carries a retired name, except the two s
       "const all = { ...D2_WORDS };",
       "const one = D2_WORDS[key];",
       "export { D2_WORDS };",
+      "const { door, ...rest } = D2_WORDS;",
+      "const { [key]: one } = D2_WORDS;",
     ])
       expect(looseUsesIn(sourceOf(text), "x", "D2_WORDS"), text).not.toEqual([]);
     // and none for a read the dialog may make
     expect(mentionsIn(sourceOf("const a = D2_WORDS.door;"), "x", QUESTION_READERS)).toEqual([]);
     for (const text of [
       "const a = D2_WORDS.door;",
+      "const { door, cancel: close } = D2_WORDS;",
       'import { D2_WORDS } from "./exportChoiceWords";',
     ])
       expect(looseUsesIn(sourceOf(text), "x", "D2_WORDS"), text).toEqual([]);
