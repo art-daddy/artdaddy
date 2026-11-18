@@ -87,7 +87,8 @@ const noop = () => undefined;
 const dialog = (props: Props = {}) => (
   <ExportDialog open onCancel={noop} onStart={noop} workload={PROJECT} quickRoute {...props} />
 );
-const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+const settle = () =>
+  act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 const standIn = () => screen.queryByTestId("stand-in");
 
 describe("the Export dialog hands the settings over to the new view", () => {

@@ -60,7 +60,8 @@ const noop = () => undefined;
 const dialog = (props: Props = {}) => (
   <ExportDialog open onCancel={noop} onStart={noop} workload={PROJECT} quickRoute {...props} />
 );
-const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+const settle = () =>
+  act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 
 const resolutionBox = () => screen.getByRole("combobox", { name: "resolution" });
 const door = () => screen.getByRole("button", { name: "Advanced settings" });
