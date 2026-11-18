@@ -158,6 +158,9 @@ describe("the Resolution and Frame rate entries", () => {
     expect(sameAsProjectRate(29.97)).toBe("Same as project (29.97 fps)");
     expect(rateEntry(24)).toBe("24 fps");
     expect(rateEntry(29.97)).toBe("29.97 fps");
+    // a rate that is not written in two decimals (23.976) is rounded the same way in both entries
+    expect(rateEntry(23.976)).toBe("23.98 fps");
+    expect(sameAsProjectRate(23.976)).toBe("Same as project (23.98 fps)");
   });
 });
 

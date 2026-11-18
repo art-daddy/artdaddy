@@ -107,7 +107,7 @@ export default function ExportSettingsView({
         <AdvancedSettings
           open={advancedOpen}
           onToggle={() => setAdvancedOpen((before) => !before)}
-          fasterLine={look.faster}
+          fasterLine={look.faster === null ? null : D2_WORDS.fasterSetting}
           rates={rateEntries(facts)}
           fps={shown.fps}
           onFps={(value) => pick({ fps: value })}
