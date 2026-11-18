@@ -434,7 +434,10 @@ describe("a run a crashed page left in the app process", () => {
     jobs.pageDied();
     localStorage.clear();
     const [view] = (await jobs.list()).filter((v) => v.id === spec.id);
-    jobs.restoreJob({ ...view, meta: JSON.parse(JSON.stringify(record)) as Record<string, unknown> });
+    jobs.restoreJob({
+      ...view,
+      meta: JSON.parse(JSON.stringify(record)) as Record<string, unknown>,
+    });
     vi.resetModules();
     const [transcribe, supervisor, wordTimes, flags, facts, auth, session] = await Promise.all([
       import("./transcribe"),

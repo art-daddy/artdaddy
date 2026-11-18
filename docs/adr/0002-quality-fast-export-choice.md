@@ -9,7 +9,8 @@
 - **Quality guard:** `src/timeline/exportFullGuard.test.ts` with its frozen fixture
   `src/timeline/__fixtures__/exportFullGuard.sha256.json`
 - **Measurements:** one Windows laptop with an AMD chip (16 processors, Radeon 780M), lab of 18 Nov
-  2026, figures as read from the lab's tables on 19 Nov 2026 at 01:17 (kept outside the repository)
+  2026, figures as read from the lab's tables on 19 Nov 2026 at 01:42, after its last run at 01:33
+  (kept outside the repository)
 
 ## Context
 
@@ -78,11 +79,11 @@ option. Reading and drawing cost what they cost for Quality; Fast shrinks only t
 and the chip makes that share nearly free. Time ratios (Quality seconds divided by Fast seconds; above
 1 the Fast export took less time), one Windows laptop, strong profile, rounded to one decimal because
 every run was made on a PC that other programs were also using (the lab flags all of them as busy,
-3.5 to 11 cores):
+3.5 to 12 cores):
 
 | Project (length tested)              | Fast vs Quality, processor | Fast vs Quality's light compression | Fast vs Quality, chip |
 | ------------------------------------ | -------------------------- | ----------------------------------- | --------------------- |
-| Phone reel 1080x1920 at 30 (2 min)   | 1.4                        | 1.1                                 | 0.9                   |
+| Phone reel 1080x1920 at 30 (2 min)   | 1.3 to 1.4                 | 1.0                                 | 0.9                   |
 | Talking head, captions (2 min)       | 1.4                        | 1.0                                 | 0.9                   |
 | Horizontal HD, crossfades (2 min)    | 1.3 to 1.4                 | 1.0                                 | 0.9 to 1.0            |
 | HD at 60 fps (2 min)                 | 1.9 to 2.1                 | (1.2)                               | 1.0                   |
@@ -93,26 +94,31 @@ every run was made on a PC that other programs were also using (the lab flags al
 | 36-clip HD edit, streamed (2 min)    | (2.4)                      | (1.1)                               | (1.0)                 |
 
 Brackets: every run of that figure is in a block the lab flagged or in an unfinished segment. A range
-is the lab's two readings (ratio of the means of the valid runs; paired median of two blocks).
+is the lab's two readings (ratio of the means of the valid runs; paired median of the blocks).
 "Processor" is Quality as the app runs it there (standard compression); "light compression" is what
 Quality's own rule already picks on a slow project without a chip. The lab's paired medians for the
-five typical projects (the first five rows) read 1.40, 1.39, 1.33, 1.88 and 1.05 without a chip and
-0.89, 0.90, 0.97, 0.98 and 0.92 with one, all flagged; the two 60 fps blocks are 26 percent apart and
-a third was asked for. So three of the five typical projects sit at 1.3 to 1.4 without a chip, the
-60 fps project at 1.9 to 2.1 and the slideshow at 1.05; with a chip none is above 1.0.
+five typical projects (the first five rows) read 1.36, 1.39, 1.38, 1.88 and 1.05 without a chip and
+0.89, 0.90, 0.97, 0.98 and 0.92 with one, all flagged busy. The blocks are not steady: on the phone
+reel, horizontal HD and 60 fps projects they are 22, 13 and 26 percent apart, and the lab asks for a
+third block on the 60 fps project. So three of the five typical projects sit at 1.3 to 1.4 without a
+chip, the 60 fps project at 1.9 to 2.1 and the slideshow at 1.05; with a chip none is above 1.0.
 
 - Light compression alone is 1.3 to 1.4 times faster than standard on plain projects, the chip alone
-  1.4 to 2.15 (1.1 on the zoom-heavy reel). Fast without a chip is mostly the light compression; the
-  smaller picture adds 0 to 8 percent beyond it on plain projects, and nothing beyond the chip.
-- On 4K and many-clip projects Fast took no less time than Quality's own light compression (1.0 to
-  1.1). A second size step on 4K moved the chip time by under 1 percent (118.0 s to 118.1 s).
+  1.4 to 2.15 (1.1 on the zoom-heavy reel). Fast without a chip is mostly the light compression:
+  beside Quality's own light compression it reads 0.96 to 1.04 on the plain two-minute and the 4K
+  projects ((1.2) at 60 fps), and with a chip it adds nothing (0.85 to 1.01).
+- On 4K and many-clip projects Fast took no less time than Quality's own light compression (0.98 to
+  1.01 on the two 4K tests, (1.1) on the 36-clip edit). A second size step on 4K moved the chip time
+  by under 1 percent (118.0 s to 118.1 s).
 - On an emulated weak PC (the same laptop limited to 4 of 16 processors and 4.7 GB free; single runs,
   and the lab's validity gate for that profile failed on its first block, so indications only) Fast
-  without a chip read 1.8 to 2.6 on four projects and Fast with a chip 0.8 to 1.05, below 1 on three.
+  without a chip read 1.8 to 2.6 on four projects and Fast with a chip 0.79 to 0.89 on three of them
+  (the fourth, the phone reel, whose block the lab flagged, read 1.05).
 - On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps) on
   the one-pass engine: the lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame
   drawn, a little more than the chip saves by encoding the smaller picture, so Fast took up to about
-  6 seconds longer than Quality on 2-minute exports. A cheaper resize filter was not tried.
+  7 seconds longer than Quality on 2-minute exports (9 in one flagged block, and 5 seconds less in
+  one horizontal-HD block: the noise is of that size). A cheaper resize filter was not tried.
 - Only drawing at the delivery size from the start moved a big project: 4K at 30 fps from about 120 s
   to about 13 s with the chip, the phone reel from about 51 s to 48 s. That is an upper bound: the
   canvas was set small by hand, text and effects were not rescaled, picture quality was not judged, and
@@ -126,9 +132,9 @@ a third was asked for. So three of the five typical projects sit at 1.3 to 1.4 w
   the byte; the 0.28.0 dialog as a fallback.
 - **Time:** where no chip passes its test, the lab measured shorter Fast exports on plain projects
   (table; 1.8 to 2.6 on the weak emulation, indications only). Where a chip passes, Fast saves no
-  time and can take a little longer (0.9 to 1.0 on the strong laptop, 0.8 to 1.05 on the weak
-  emulation). On 4K and many-clip projects it adds nothing to Quality's own light compression. No
-  speed is claimed.
+  time and can take a little longer (0.9 to 1.0 on the strong laptop, 0.8 to 0.9 on the weak
+  emulation, one flagged cell 1.05). On 4K and many-clip projects it adds nothing to Quality's own
+  light compression. No speed is claimed.
 - **Not measured or tested:** macOS and Linux; NVIDIA and Intel chips; slower cores; an upgrade from a
   copied 0.27.0 profile (its flag cache has no `quick_route`, so the compiled "on" applies); a real
   browser or screen reader (only the test environment's). The lab is one Windows laptop, AMD chip.
