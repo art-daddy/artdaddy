@@ -115,7 +115,9 @@ describe("beamFor and acceptableBeam are what they were, for every variant and e
     for (const [spelling, perVariant] of Object.entries(FREEZE.languages))
       for (const v of VARIANTS)
         if (beamFor(v, spelling) !== perVariant[v][0])
-          drifted.push(`${v} ${JSON.stringify(spelling)}: ${beamFor(v, spelling)} not ${perVariant[v][0]}`);
+          drifted.push(
+            `${v} ${JSON.stringify(spelling)}: ${beamFor(v, spelling)} not ${perVariant[v][0]}`,
+          );
     expect(drifted).toEqual([]);
   });
 
@@ -124,7 +126,9 @@ describe("beamFor and acceptableBeam are what they were, for every variant and e
     for (const [spelling, perVariant] of Object.entries(FREEZE.languages))
       for (const v of VARIANTS)
         if (accepted(v, spelling) !== perVariant[v][1])
-          drifted.push(`${v} ${JSON.stringify(spelling)}: ${accepted(v, spelling)} not ${perVariant[v][1]}`);
+          drifted.push(
+            `${v} ${JSON.stringify(spelling)}: ${accepted(v, spelling)} not ${perVariant[v][1]}`,
+          );
     expect(drifted).toEqual([]);
   });
 
@@ -195,7 +199,9 @@ describe("decodeArgs is what it was, for every beam and for anything that is not
   });
 
   it("values that are not numbers", () => {
-    expect(Object.keys(FREEZE.decodeArgs.notNumbers).sort()).toEqual(NOT_NUMBERS.map(([l]) => l).sort());
+    expect(Object.keys(FREEZE.decodeArgs.notNumbers).sort()).toEqual(
+      NOT_NUMBERS.map(([l]) => l).sort(),
+    );
     for (const [label, value] of NOT_NUMBERS)
       expect(decodeArgs(value as number), label).toEqual(FREEZE.decodeArgs.notNumbers[label]);
   });
