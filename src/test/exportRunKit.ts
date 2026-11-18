@@ -339,3 +339,121 @@ export async function waitBehind(behind: Run, dest = "C:/out/second.mp4"): Promi
   } as ExportSpec);
   return sub.job_id;
 }
+
+/** One report of a feed played by hand: the share made and the raw guess as {@link Report}, and the frame count that goes with it (by default it follows the share, so a report that moves
+ *  the share moves the frame too; a test that wants "the same block again" gives the same frame). */
+export interface Said extends Report {
+  readonly frame?: number;
+}
+
+/** A render's feed played to the app one second at a time on the fake clock, for the tests that look at what the app says at each moment: the share, the app process's block and (every fifth second) its activity
+ *  mark, as {@link Run.to} plays them, but at the rate of a real render (a report every second or so) instead of the watch's own five-second step. A run is played with `to` of the run OR with a feed, not both. */
+export interface Feed {
+  /** The seconds the feed has played. */
+  at: () => number;
+  /** The render says `said` now (null: nothing, it has stopped moving). */
+  say: (said: Said | null) => void;
+  /** The clock runs on by `seconds` whole seconds, one at a time. */
+  wait: (seconds: number) => Promise<void>;
+  /** One report a second up to `until` seconds in; the report for second `t` arrives when the clock reads `t`, so after it the render is `t` seconds old and has just moved. */
+  to: (until: number, report: (t: number) => Said | null) => Promise<void>;
+}
+
+export function feedOf(
+  run: { id: string; jobs: FakeJobs },
+  activity: "busy" | "idle" | "none" = "busy",
+): Feed {
+  let played = 0;
+  let cpuMs = 0;
+  const say = (said: Said | null): void => {
+    if (said === null) return;
+    const share = Number.isFinite(said.fraction) ? Math.min(1, Math.max(0, said.fraction)) : 0;
+    const frame = said.frame ?? Math.max(1, Math.round(share * 7200));
+    run.jobs.stdout(run.id, block(frame, Math.round(share * 240_000)));
+    useExportJob.getState().update({
+      fraction: said.fraction,
+      frame,
+      speed: said.speed ?? 1,
+      etaSec: said.etaSec === undefined ? 0 : said.etaSec,
+      ...(said.step !== undefined ? { step: said.step } : {}),
+      ...(said.steps !== undefined ? { steps: said.steps } : {}),
+    });
+  };
+  const wait = async (seconds: number): Promise<void> => {
+    for (let i = 0; i < seconds; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      played++;
+      if (activity !== "none" && played % 5 === 0) {
+        cpuMs += activity === "idle" ? 5 : 7_500;
+        run.jobs.stdout(run.id, formatActivityMark({ cpuMs, readBytes: 0 }));
+      }
+    }
+  };
+  return {
+    at: () => played,
+    say,
+    wait,
+    to: async (until, report) => {
+      for (let t = played + 1; t <= until; t++) {
+        await wait(1);
+        say(report(t));
+      }
+    },
+  };
+}
+
+/** The same export started again by the app (exportAttempts.ts): a later attempt that continues `previous`, which has ended. To the person and to the assistant it is one export: the row keeps the first
+ *  attempt's id and says it is on its second, and the feed the card reads is the new attempt's own, which begins with nothing. `kit` is the one `previous` was started with (`startRun({ kit })`). */
+export async function startRunAgain(
+  previous: { id: string; jobs: FakeJobs; store: ProjectStoreAccess },
+  kit: Awaited<ReturnType<typeof fresh>>,
+  over: { dest?: string } = {},
+): Promise<{ id: string; jobs: FakeJobs; store: ProjectStoreAccess; end: Run["end"] }> {
+  const { jobs, store } = previous;
+  const dest = over.dest ?? DEST;
+  const stage = `${dest}.part-x`;
+  let finish: "finish" | "fail" = "finish";
+  let wake!: () => void;
+  const gate = new Promise<void>((resolve) => (wake = resolve));
+  const sub = await submitExport({
+    ...described(store, { destPath: dest, stagePath: stage }),
+    supervisor: jobs,
+    via: "chat",
+    origin: AGENT,
+    restart: {
+      kind: "auto",
+      from: previous.id,
+      meta: { restarted: "gentler_setting", reason: "memory_short" },
+    },
+    run: async (signal, id) => {
+      await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+      const aborted = new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve()),
+      );
+      await Promise.race([gate, aborted]);
+      if (signal.aborted) {
+        jobs.exit(id, 255, "");
+        await kit.fs.remove(stage).catch(() => undefined);
+        throw new Error("ffmpeg render failed (code=255)");
+      }
+      if (finish === "fail") {
+        jobs.exit(id, 1, "");
+        throw new Error("ffmpeg render failed (code=1)");
+      }
+      jobs.exit(id, 0, "");
+      await kit.fs.writeBytes(stage, new Uint8Array([1, 2, 3]));
+      return {};
+    },
+  } as ExportSpec);
+  await vi.waitFor(() => expect(jobs.started).toContain(sub.job_id));
+  return {
+    id: sub.job_id,
+    jobs,
+    store,
+    end: async (how) => {
+      finish = how;
+      wake();
+      await whenExportsSettle();
+    },
+  };
+}
