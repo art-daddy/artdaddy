@@ -144,7 +144,7 @@ const openFromMenu = () => {
 const settle = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 const newView = () => screen.queryByRole("button", { name: "Advanced settings" });
-const legacyView = () => screen.queryByText(/Never upscales/);
+const legacyView = () => screen.queryByRole("option", { name: /Near-lossless, large file/ });
 
 describe("the menu bar decides which settings the Export dialog draws, once per opening", () => {
   it("draws the new view when the switch is on", () => {

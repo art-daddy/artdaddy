@@ -118,7 +118,7 @@ describe("the Export dialog hands the settings over to the new view", () => {
     const quick = render(dialog());
     expect(standIn()).not.toBeNull();
     expect(screen.queryByRole("combobox", { name: "resolution" })).toBeNull();
-    expect(screen.queryByText(/Never upscales/)).toBeNull();
+    expect(screen.queryByRole("option", { name: /Near-lossless, large file/ })).toBeNull();
     expect(screen.queryByTestId("legacy-queue-pane")).toBeNull();
     expect(screen.queryByRole("button", { name: "Export" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
@@ -127,7 +127,7 @@ describe("the Export dialog hands the settings over to the new view", () => {
     render(dialog({ quickRoute: undefined }));
     expect(standIn()).toBeNull();
     expect(screen.getByRole("combobox", { name: "resolution" })).toBeInTheDocument();
-    expect(screen.getByText(/Never upscales/)).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Near-lossless, large file/ })).toBeInTheDocument();
     expect(screen.getAllByTestId("legacy-queue-pane")).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Export" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(1);

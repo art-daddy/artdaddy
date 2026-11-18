@@ -94,7 +94,7 @@ describe("the Export dialog is the 0.28.0 one unless the menu bar hands it quick
   it("draws the 0.28.0 settings without the prop, though the unit suite has the switch on: the dialog never reads the switch", () => {
     expect(exportFlag("quick_route")).toBe(true); // else this case could not tell a dialog that reads it from one that does not
     render(dialog({ quickRoute: undefined }));
-    expect(screen.getByText(/Never upscales/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "frame rate" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "quality" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Near-lossless, large file/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Advanced settings" })).toBeNull();
