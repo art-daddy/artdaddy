@@ -19,7 +19,14 @@ import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { coarser, replayRun, shifted, slowedFrom, type ReplayRecord } from "./__fixtures__/replay";
+import {
+  coarser,
+  replayRun,
+  shifted,
+  slowedFrom,
+  stalledFrom,
+  type ReplayRecord,
+} from "./__fixtures__/replay";
 import { REPLAY_RUNS, type ReplayRun } from "./__fixtures__/timeLeftRuns";
 import { roundTimeLeft, type TimeLeft } from "./exportTimeLeft";
 
@@ -65,6 +72,16 @@ const C8_REPORTED_FACTORS = [1.5, 2, 5];
 
 // C9: the words do not flap.
 const FLAP_WINDOW_REPORTS = 5;
+
+// C6: on the real, healthy runs "taking longer" should never be said (observed: none of the 88).
+const C6_HEALTHY_MAX_FALSE_ALARMS = 0;
+
+// C3: a stall built from a real feed: from this share made on nothing moves for this long.
+const STALL_FROM_SHARE = 0.4;
+const STALL_SECONDS = 22;
+const STALL_MIN_RENDER_SECONDS = 60;
+/** The stall must really leave a figure on screen with an unreadable pace for the claim to have bitten. */
+const STALL_MIN_RUNS_WITH_FIGURE_AT_ITS_END = 10;
 
 // The fixture itself.
 const LONG_RUN_MIN_RENDER_SECONDS = 25;
@@ -538,6 +555,24 @@ describe("the recorded runs", () => {
 
   it('C6 taking longer: never the first thing said, and held; where it appears on a healthy run is in the report', () => {
     expect(ALL.flatMap(longerViolations)).toEqual([]);
+  });
+
+  it('C6 taking longer: no real, healthy run is ever said to be taking longer', () => {
+    expect(
+      LONGER_CASES.map((c) => `${c.id}@${pct0(c.share)}`),
+      "false alarms on healthy runs",
+    ).toHaveLength(C6_HEALTHY_MAX_FALSE_ALARMS);
+  });
+
+  it("C3 no flicker: a figure stays on screen when nothing moves for 22 s (the pace cannot be read)", () => {
+    const stalled = LONG.filter((f) => f.run.endMs / 1000 >= STALL_MIN_RENDER_SECONDS).map((f) => {
+      const pivot = f.share.findIndex((s) => s >= STALL_FROM_SHARE);
+      return { pivot, facts: factsOf(stalledFrom(f.run, STALL_FROM_SHARE, STALL_SECONDS)) };
+    });
+    expect(stalled.map((s) => s.facts).flatMap(basicViolations)).toEqual([]);
+    expect(stalled.map((s) => s.facts).flatMap(longerViolations)).toEqual([]);
+    const bitten = stalled.filter((s) => s.facts.recs[s.pivot + STALL_SECONDS]?.value.kind === "left");
+    expect(bitten.length).toBeGreaterThanOrEqual(STALL_MIN_RUNS_WITH_FIGURE_AT_ITS_END);
   });
 
   it("C9 the words do not flap: a figure that changes is not followed within 5 reports by the figure it left", () => {

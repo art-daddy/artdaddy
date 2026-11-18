@@ -40,6 +40,35 @@ export function coarser(run: ReplayRun): ReplayRun {
 }
 
 /**
+ * The same run until `fromShare` of the video is made, then nothing moves for `seconds` (reports keep coming with the same
+ * position, as ffmpeg's do while it works on one heavy frame) and the rest follows, `seconds` later.
+ */
+export function stalledFrom(run: ReplayRun, fromShare: number, seconds: number): ReplayRun {
+  let best = 0;
+  let pivot = -1;
+  for (let i = 0; i < run.samples.length; i++) {
+    best = Math.max(best, fractionOf(run, run.samples[i][1]));
+    if (best >= fromShare) {
+      pivot = i;
+      break;
+    }
+  }
+  if (pivot < 0) return run;
+  const [at, out] = run.samples[pivot];
+  const flat = Array.from({ length: seconds }, (_, s) => [at + (s + 1) * 1000, out] as const);
+  const by = seconds * 1000;
+  return {
+    ...run,
+    endMs: run.endMs + by,
+    samples: [
+      ...run.samples.slice(0, pivot + 1),
+      ...flat,
+      ...run.samples.slice(pivot + 1).map(([t, o]) => [t + by, o] as const),
+    ],
+  };
+}
+
+/**
  * The same run until `fromShare` of the video is made, then `factor` times slower: the time axis after that point is stretched
  * and the positions are kept, so the real run's own wobble stays and only its speed changes.
  */
