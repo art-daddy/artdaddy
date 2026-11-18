@@ -6,8 +6,8 @@
 // id is ever among them.
 //
 // The tokens, in the order they are written after the sample's older figures (each is left out when it does not apply):
-//   ng=1       the launch carried `-ng`: the processor was forced (a PC without a chip, the hold after a crash, a model file
-//              that may only run there, or the run after a chip crash)
+//   ng=1       the launch carried `-ng`: the processor was forced (the hold after a crash, a model file that may only run there,
+//              or the run after a chip crash). On a PC where the engine finds no chip it runs on its processor without it
 //   held=1     the graphics chip was being kept off when the run launched (the hold after a crash)
 //   mf=<key>   which model file ran, by its key in the manifest (`small`, `small_q8_0`): the engine's own `model=` word is
 //              `small` for both
