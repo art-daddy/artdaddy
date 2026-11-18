@@ -524,26 +524,70 @@ describe("T15 (g) payloadFor", () => {
   });
 });
 
-describe("T15 (h) summaryFor is built from the bundle", () => {
-  it("writes the bundle's cap, its quality and whether its ladder has a size below the project's", () => {
+describe("T15 (h) summaryFor is built from the shown values, the bundle's cap and ladder, and never the bundle's quality", () => {
+  /** The rung the bundle's ladder gives for a project: the largest preset of the ladder whose short side is below the project's, else none. */
+  const rungOf = (f: ProjectFacts, b: QuickBundle): SizePreset | null =>
+    [...b.ladder]
+      .filter((rung) => PRESET_SHORT_SIDE[rung] < shortSideOf(f))
+      .sort((x, y) => PRESET_SHORT_SIDE[y] - PRESET_SHORT_SIDE[x])[0] ?? null;
+
+  it("writes One size smaller where the shown size is the bundle's rung below the project's, and nowhere else", () => {
     fc.assert(
-      fc.property(maybeProject, anyBundle, (f, b) => {
-        const smaller =
-          f !== null && b.ladder.some((rung) => PRESET_SHORT_SIDE[rung] < shortSideOf(f));
-        expect(summaryFor("fast", f, b)).toBe(
-          `${smaller ? "One size smaller, up to" : "Up to"} ${b.maxFps} frames a second, ${QUALITY_NAME[b.quality]} quality, light compression.`,
+      fc.property(project, anyBundle, shownLevers, (f, b, shown) => {
+        const rung = rungOf(f, b);
+        expect(summaryFor(shown, f, b).includes("One size smaller")).toBe(
+          rung !== null && shown.resolution === rung,
         );
-        expect(summaryFor("quality", f, b)).toBe("Project size and frame rate, Medium quality.");
       }),
       { numRuns: RUNS },
     );
   });
 
-  it("gives another line for another bundle: another cap or another quality is another sentence", () => {
+  it("writes the bundle's cap, only where the project runs faster than it and the shown rate is no faster", () => {
     fc.assert(
-      fc.property(maybeProject, randomBundle, randomBundle, (f, one, other) => {
-        if (one.maxFps === other.maxFps && one.quality === other.quality) return;
-        expect(summaryFor("fast", f, one)).not.toBe(summaryFor("fast", f, other));
+      fc.property(project, anyBundle, shownLevers, (f, b, shown) => {
+        const delivered = shown.fps ?? Math.trunc(f.fps);
+        const named = new RegExp(`[Uu]p to ${b.maxFps} frames a second`).test(
+          summaryFor(shown, f, b),
+        );
+        expect(named).toBe(f.fps > b.maxFps && delivered <= b.maxFps);
+      }),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("gives another line for another cap where the project runs faster than both and the shown rate is under both", () => {
+    fc.assert(
+      fc.property(
+        project,
+        fc.integer({ min: 31, max: 120 }),
+        fc.integer({ min: 5, max: 29 }),
+        fc.integer({ min: 5, max: 29 }),
+        shownLevers,
+        (f0, fps, one, other, shown) => {
+          fc.pre(one !== other);
+          const f = { ...f0, fps };
+          const low = { ...shown, fps: 5 };
+          expect(summaryFor(low, f, { ...QUICK_BUNDLE, maxFps: one })).not.toBe(
+            summaryFor(low, f, { ...QUICK_BUNDLE, maxFps: other }),
+          );
+        },
+      ),
+      { numRuns: RUNS },
+    );
+  });
+
+  it("ends with the shown quality's name, whatever quality the bundle starts Fast on, and is empty for no project", () => {
+    fc.assert(
+      fc.property(maybeProject, anyBundle, shownLevers, (f, b, shown) => {
+        const line = summaryFor(shown, f, b);
+        if (f === null) {
+          expect(line).toBe("");
+          return;
+        }
+        expect(line.endsWith(`${QUALITY_NAME[shown.quality]} quality.`)).toBe(true);
+        for (const name of Object.values(QUALITY_NAME))
+          if (name !== QUALITY_NAME[shown.quality]) expect(line).not.toContain(`${name} quality`);
       }),
       { numRuns: RUNS },
     );

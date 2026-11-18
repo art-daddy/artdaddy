@@ -14,6 +14,7 @@ import {
   projectFacts,
   qualityEntries,
   rateEntries,
+  rateEntriesFor,
   rateOptions,
   resolveChoice,
   routeOf,
@@ -52,6 +53,8 @@ interface Project {
   project: ProjectFacts | null;
   /** What Fast starts on (table 3.1, "Fast shows"). */
   fast: Levers;
+  /** The line under the door while Fast's own values are shown, written out from the rules of the line (decision D16); empty where there is no project. */
+  fastLine: string;
   /** The Resolution list's values, in order. */
   sizes: ExportResolution[];
   /** The Frame rate list's values, in order (null is "Same as project"). */
@@ -62,6 +65,7 @@ interface Project {
 const PROJECTS: Project[] = [
   {
     name: "1080 x 1920 at 30 (the app's default project)",
+    fastLine: "One size smaller, Medium quality.",
     project: A,
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -69,6 +73,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "3840 x 2160 at 60",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: B,
     fast: levers("1080p", 30),
     sizes: ["source", "1440p", "1080p", "720p", "480p"],
@@ -76,6 +81,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "2560 x 1440 at 50",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: facts(2560, 1440, 50),
     fast: levers("1080p", 25),
     sizes: ["source", "1080p", "720p", "480p"],
@@ -83,6 +89,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1280 x 720 at 25",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1280, 720, 25),
     fast: levers("480p", null),
     sizes: ["source", "480p"],
@@ -90,6 +97,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "854 x 480 at 30",
+    fastLine: "Project size and frame rate, Medium quality.",
     project: facts(854, 480, 30),
     fast: levers("source", null),
     sizes: ["source"],
@@ -97,6 +105,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1920 x 1080 at 24",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1920, 1080, 24),
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -104,6 +113,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "7680 x 4320 at 30",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(7680, 4320, 30),
     fast: levers("2160p", null),
     sizes: ["source", "2160p", "1440p", "1080p", "720p", "480p"],
@@ -111,6 +121,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "no project",
+    fastLine: "",
     project: null,
     fast: levers("source", null),
     sizes: ["source"],
@@ -118,6 +129,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1920 x 1080 at 30 (the default project turned on its side: sizes go by the short side)",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1920, 1080, 30),
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -125,6 +137,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "2160 x 3840 at 60 (vertical 4K)",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: facts(2160, 3840, 60),
     fast: levers("1080p", 30),
     sizes: ["source", "1440p", "1080p", "720p", "480p"],
@@ -132,6 +145,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "4096 x 2160 at 60 (4K cinema: 2160 is not below 2160)",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: facts(4096, 2160, 60),
     fast: levers("1080p", 30),
     sizes: ["source", "1440p", "1080p", "720p", "480p"],
@@ -139,6 +153,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1081 x 1921 at 30 (odd: the render works at 1082 x 1922, so 1080p is below it)",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1081, 1921, 30),
     fast: levers("1080p", null),
     sizes: ["source", "1080p", "720p", "480p"],
@@ -146,6 +161,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1079 x 1919 at 30 (odd: the render works at 1080 x 1920, so 1080p is not below it)",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1079, 1919, 30),
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -153,6 +169,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "2 x 2 at 30 (the smallest picture the render makes)",
+    fastLine: "Project size and frame rate, Medium quality.",
     project: facts(2, 2, 30),
     fast: levers("source", null),
     sizes: ["source"],
@@ -160,6 +177,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1920 x 1080 at 29.97",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1920, 1080, 29.97),
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -167,6 +185,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "3840 x 2160 at 59.94",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: facts(3840, 2160, 59.94),
     fast: levers("1080p", 30),
     sizes: ["source", "1440p", "1080p", "720p", "480p"],
@@ -174,6 +193,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1920 x 1080 at 23.976",
+    fastLine: "One size smaller, Medium quality.",
     project: facts(1920, 1080, 23.976),
     fast: levers("720p", null),
     sizes: ["source", "720p", "480p"],
@@ -181,6 +201,7 @@ const PROJECTS: Project[] = [
   },
   {
     name: "1920 x 1080 at 120",
+    fastLine: "One size smaller, up to 30 frames a second, Medium quality.",
     project: facts(1920, 1080, 120),
     fast: levers("720p", 30),
     sizes: ["source", "720p", "480p"],
@@ -398,6 +419,85 @@ describe("the Frame rate list (table 3.1, rule 3.2)", () => {
   it("has one entry, so no row, for a 24 fps project and for none", () => {
     expect(rateEntries(facts(1920, 1080, 24)).map((entry) => entry.value)).toEqual([null]);
     expect(rateEntries(null).map((entry) => entry.value)).toEqual([null]);
+  });
+});
+
+describe("rateEntriesFor: the Frame rate list of a dialog that offers Fast (table 3.2)", () => {
+  // [the project's rate, the list with Fast offered, the list without it]: Fast's own rate is added only where the ladder has not got it
+  const SAME = "same" as const;
+  const LISTS: [number, (number | null)[], (number | null)[] | typeof SAME][] = [
+    [72, [null, 60, 50, 30, 25, 24, 18], [null, 60, 50, 30, 25, 24]],
+    [32, [null, 30, 25, 24, 16], [null, 30, 25, 24]],
+    [36, [null, 30, 25, 24, 18], [null, 30, 25, 24]],
+    [64, [null, 60, 50, 30, 25, 24, 16], [null, 60, 50, 30, 25, 24]],
+    // Fast's own rate is on the ladder already: nothing is added
+    [120, [null, 60, 50, 30, 25, 24], SAME],
+    [100, [null, 60, 50, 30, 25, 24], SAME],
+    [90, [null, 60, 50, 30, 25, 24], SAME],
+    [62, [null, 60, 50, 30, 25, 24], SAME],
+    [60, [null, 50, 30, 25, 24], SAME],
+    [59.94, [null, 50, 30, 25, 24], SAME],
+    [50, [null, 30, 25, 24], SAME],
+    [48, [null, 30, 25, 24], SAME],
+    // Fast has no lower rate to start on: nothing is added
+    [30, [null, 25, 24], SAME],
+    [29.97, [null, 25, 24], SAME],
+    [25, [null, 24], SAME],
+    [24, [null], SAME],
+    [23.976, [null], SAME],
+  ];
+
+  it.each(LISTS)(
+    "a project at %s fps: %j with Fast offered, the ladder's list without it",
+    (fps, withFast, without) => {
+      const project = facts(1920, 1080, fps);
+      expect(rateEntriesFor(project, true).map((entry) => entry.value)).toEqual(withFast);
+      expect(rateEntriesFor(project, false).map((entry) => entry.value)).toEqual(
+        without === SAME ? withFast : without,
+      );
+    },
+  );
+
+  it("names Fast's own rate as it names the others, and the project's rate as it is", () => {
+    expect(rateEntriesFor(facts(1920, 1080, 72), true).map((entry) => entry.label)).toEqual([
+      "Same as project (72 fps)",
+      "60 fps",
+      "50 fps",
+      "30 fps",
+      "25 fps",
+      "24 fps",
+      "18 fps",
+    ]);
+    expect(rateEntriesFor(facts(1920, 1080, 72), false)).toEqual(
+      rateEntries(facts(1920, 1080, 72)),
+    );
+  });
+
+  it("holds the rate Fast starts on, for every project of the table where it is a number", () => {
+    for (const row of PROJECTS) {
+      const own = ownLevers("fast", row.project).fps;
+      if (own !== null)
+        expect(rateEntriesFor(row.project, true).map((entry) => entry.value)).toContain(own);
+    }
+  });
+
+  it("reads Fast's own rate from the bundle: a cap of 24 halves 60 to 15, and 15 is in the list", () => {
+    const capped: QuickBundle = { ...QUICK_BUNDLE, maxFps: 24 };
+    expect(rateEntriesFor(facts(1920, 1080, 60), true, capped).map((entry) => entry.value)).toEqual(
+      [null, 50, 30, 25, 24, 15],
+    );
+    expect(rateEntriesFor(facts(1920, 1080, 60), true).map((entry) => entry.value)).toEqual([
+      null,
+      50,
+      30,
+      25,
+      24,
+    ]);
+  });
+
+  it("has only the project's own rate for no project, offered or not", () => {
+    expect(rateEntriesFor(null, true).map((entry) => entry.value)).toEqual([null]);
+    expect(rateEntriesFor(null, false).map((entry) => entry.value)).toEqual([null]);
   });
 });
 
@@ -881,63 +981,229 @@ describe("payloadFor: what onStart is handed (table 3.5, rows 1 to 13)", () => {
     expect(routeOf("fast")).toBe("quick");
     expect(routeOf("quality")).toBe("standard");
   });
+
+  /** Every way to pick or leave alone each lever on the lists of one project: nothing, or one entry of the list. */
+  const everyPicks = (row: Project): Overrides[] => {
+    const sizes: (ExportResolution | undefined)[] = [undefined, ...row.sizes];
+    const rates: (number | null | undefined)[] = [undefined, ...row.rates];
+    const qualities: (ExportQuality | undefined)[] = [undefined, "high", "medium", "low"];
+    return sizes.flatMap((resolution) =>
+      rates.flatMap((fps) =>
+        qualities.map((quality) => ({
+          ...(resolution !== undefined ? { resolution } : {}),
+          ...(fps !== undefined ? { fps } : {}),
+          ...(quality !== undefined ? { quality } : {}),
+        })),
+      ),
+    );
+  };
+
+  it.each(PROJECTS)(
+    "over every set of picks on the project's lists, Fast's route names exactly the levers picked and Quality has none: $name",
+    (row) => {
+      const all = everyPicks(row);
+      // not an empty sweep: nothing picked, each lever alone and all three are in it
+      expect(all.length).toBeGreaterThanOrEqual(4);
+      expect(all).toContainEqual({});
+      for (const picks of all) {
+        const where = JSON.stringify(picks);
+        for (const mode of ["quality", null] as const) {
+          // Fast: the pick where there is one, else Fast's own value (the table's); the route names the levers that were picked; the mode is left to the app
+          expect(sent("fast", picks, row.project, mode), where).toStrictEqual({
+            resolution: picks.resolution ?? row.fast.resolution,
+            quality: picks.quality ?? row.fast.quality,
+            fps: picks.fps !== undefined ? picks.fps : row.fast.fps,
+            mode: null,
+            route: quick("resolution" in picks, "fps" in picks, "quality" in picks),
+          });
+          // Quality: the 0.28.0 object for the same inputs, and no route key at all
+          const object = sent("quality", picks, row.project, mode);
+          expect(object, where).toStrictEqual({
+            resolution: picks.resolution ?? "source",
+            quality: picks.quality ?? "medium",
+            fps: picks.fps !== undefined ? picks.fps : null,
+            mode,
+          });
+          expect("route" in object, where).toBe(false);
+        }
+      }
+    },
+  );
 });
 
-describe("summaryFor: the line under the door is built from the choice and the bundle", () => {
-  it("says the project's own size and rate at Medium for Quality, whatever the project and the bundle", () => {
-    const other: QuickBundle = { ...QUICK_BUNDLE, maxFps: 24, quality: "low" };
-    for (const row of PROJECTS) {
-      expect(summaryFor("quality", row.project)).toBe(
-        "Project size and frame rate, Medium quality.",
+describe("summaryFor: the line under the door says what the shown values will do (decision D16)", () => {
+  it("says the project's own size and rate at Medium for Quality's own values, on every project", () => {
+    for (const row of PROJECTS)
+      expect(summaryFor(ownLevers("quality", row.project), row.project)).toBe(
+        row.project === null ? "" : "Project size and frame rate, Medium quality.",
       );
-      expect(summaryFor("quality", row.project, other)).toBe(
-        "Project size and frame rate, Medium quality.",
-      );
-    }
   });
 
-  it("says one size smaller, up to 30 frames a second, Medium and light compression for Fast", () => {
-    expect(summaryFor("fast", A)).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
+  it.each(PROJECTS)("says what Fast's own values do, project by project: $name", (row) => {
+    expect(summaryFor(ownLevers("fast", row.project), row.project)).toBe(row.fastLine);
+  });
+
+  it("reads as the owner wrote it for the three projects of table 3.1 that show the three kinds of line", () => {
+    // 4K at 60: one size down and the rate cut to 30; 1080 x 1920 at 30: one size down, nothing to cut; 854 x 480 at 30: nothing smaller and nothing to cut
+    expect(summaryFor(levers("1080p", 30), B)).toBe(
+      "One size smaller, up to 30 frames a second, Medium quality.",
     );
-    expect(summaryFor("fast", B)).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
-    );
-  });
-
-  it("leaves out one size smaller where the project has no smaller size (480p and under, no project)", () => {
-    const plain = "Up to 30 frames a second, Medium quality, light compression.";
-    expect(summaryFor("fast", facts(854, 480, 30))).toBe(plain);
-    expect(summaryFor("fast", facts(640, 360, 25))).toBe(plain);
-    expect(summaryFor("fast", null)).toBe(plain);
-  });
-
-  it("still says up to 30 for a project that runs at 24: the line is for the choice, not for the values", () => {
-    expect(summaryFor("fast", facts(1920, 1080, 24))).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
+    expect(summaryFor(levers("720p", null), A)).toBe("One size smaller, Medium quality.");
+    expect(summaryFor(levers("source", null), facts(854, 480, 30))).toBe(
+      "Project size and frame rate, Medium quality.",
     );
   });
 
-  it("takes every number from the bundle: another cap, quality and ladder give another line", () => {
-    const other: QuickBundle = {
-      ...QUICK_BUNDLE,
-      ladder: ["2160p", "1080p"],
-      maxFps: 24,
-      quality: "low",
-    };
-    // 1280 x 720 has no rung below it in this ladder, 1920 x 1080 has none either (1080p is not below 1080)
-    expect(summaryFor("fast", facts(1280, 720, 25), other)).toBe(
-      "Up to 24 frames a second, Low quality, light compression.",
+  it("is empty where the project cannot be read, whatever is shown", () => {
+    for (const resolution of ["source", "720p", "480p"] as const)
+      for (const fps of [null, 24, 30])
+        for (const quality of ["high", "medium", "low"] as const)
+          expect(summaryFor(levers(resolution, fps, quality), null)).toBe("");
+  });
+
+  /** The line a person reads after the picks, through the view's own pipeline: the choice, the picks the project still holds, the values that are shown. */
+  const lineAfter = (choice: Choice, picks: Overrides, project: ProjectFacts | null): string =>
+    summaryFor(resolveChoice(choice, picks, project).shown, project);
+
+  // [what was done, the choice, the picks, the project, the line]
+  const AFTER_PICKS: [string, Choice, Overrides, ProjectFacts, string][] = [
+    ["A, Fast, nothing picked", "fast", {}, A, "One size smaller, Medium quality."],
+    ["A, Fast, Quality High", "fast", { quality: "high" }, A, "One size smaller, High quality."],
+    [
+      "A, Fast, Resolution Same as project: the line is the project's size and rate",
+      "fast",
+      { resolution: "source" },
+      A,
+      "Project size and frame rate, Medium quality.",
+    ],
+    [
+      "A, Fast, Resolution 480p: a size that is not the one rung down",
+      "fast",
+      { resolution: "480p" },
+      A,
+      "Medium quality.",
+    ],
+    [
+      "A, Fast, Frame rate 24: nothing is cut from 30",
+      "fast",
+      { fps: 24 },
+      A,
+      "One size smaller, Medium quality.",
+    ],
+    [
+      "A, Quality, Resolution 720p: Quality's pick says what Fast's own size says",
+      "quality",
+      { resolution: "720p" },
+      A,
+      "One size smaller, Medium quality.",
+    ],
+    [
+      "A, Quality, 480p, 24 fps and Low",
+      "quality",
+      { resolution: "480p", fps: 24, quality: "low" },
+      A,
+      "Low quality.",
+    ],
+    [
+      "B, Fast, nothing picked",
+      "fast",
+      {},
+      B,
+      "One size smaller, up to 30 frames a second, Medium quality.",
+    ],
+    [
+      "B, Fast, Frame rate Same as project: the cap is gone",
+      "fast",
+      { fps: null },
+      B,
+      "One size smaller, Medium quality.",
+    ],
+    [
+      "B, Fast, Resolution 1440p: the cap stays, the size is not one rung down",
+      "fast",
+      { resolution: "1440p" },
+      B,
+      "Up to 30 frames a second, Medium quality.",
+    ],
+    [
+      "B, Fast, Resolution and Frame rate Same as project, and High",
+      "fast",
+      { resolution: "source", fps: null, quality: "high" },
+      B,
+      "Project size and frame rate, High quality.",
+    ],
+    [
+      "B, Quality, nothing picked",
+      "quality",
+      {},
+      B,
+      "Project size and frame rate, Medium quality.",
+    ],
+    [
+      "B, Quality, Frame rate 24: cut from 60",
+      "quality",
+      { fps: 24 },
+      B,
+      "Up to 30 frames a second, Medium quality.",
+    ],
+    ["B, Quality, Frame rate 50: not cut to 30", "quality", { fps: 50 }, B, "Medium quality."],
+    [
+      "B, Quality, Resolution 720p: neither the project's size nor one rung down",
+      "quality",
+      { resolution: "720p" },
+      B,
+      "Medium quality.",
+    ],
+    [
+      "B, Quality, 1080p and 30 picked by hand: the same values as Fast's own say the same",
+      "quality",
+      { resolution: "1080p", fps: 30 },
+      B,
+      "One size smaller, up to 30 frames a second, Medium quality.",
+    ],
+    [
+      "72 fps, Fast: its own rate is 18",
+      "fast",
+      {},
+      facts(1920, 1080, 72),
+      "One size smaller, up to 30 frames a second, Medium quality.",
+    ],
+    [
+      "72 fps, Fast, Frame rate Same as project",
+      "fast",
+      { fps: null },
+      facts(1920, 1080, 72),
+      "One size smaller, Medium quality.",
+    ],
+  ];
+
+  it.each(AFTER_PICKS)("%s", (_name, choice, picks, project, expected) => {
+    expect(lineAfter(choice, picks, project)).toBe(expected);
+  });
+
+  it("takes the cap and the ladder from the bundle, and the quality from what is shown", () => {
+    const capped: QuickBundle = { ...QUICK_BUNDLE, maxFps: 24 };
+    // 1920 x 1080 at 30 shown at 24: nothing is cut under the real bundle (30 is not above 30), but under a cap of 24 it is
+    expect(summaryFor(levers("source", 24), facts(1920, 1080, 30))).toBe("Medium quality.");
+    expect(summaryFor(levers("source", 24), facts(1920, 1080, 30), capped)).toBe(
+      "Up to 24 frames a second, Medium quality.",
     );
-    expect(summaryFor("fast", facts(3840, 2160, 60), other)).toBe(
-      "One size smaller, up to 24 frames a second, Low quality, light compression.",
+    // a ladder of 1440p and 720p: the rung below 2160 is 1440p, not 1080p
+    const ladder: QuickBundle = { ...QUICK_BUNDLE, ladder: ["1440p", "720p"] };
+    const four = facts(3840, 2160, 30);
+    expect(summaryFor(levers("1440p", null), four, ladder)).toBe(
+      "One size smaller, Medium quality.",
     );
-    expect(summaryFor("fast", facts(1280, 720, 25))).toBe(
-      "One size smaller, up to 30 frames a second, Medium quality, light compression.",
+    expect(summaryFor(levers("1080p", null), four, ladder)).toBe("Medium quality.");
+    expect(summaryFor(levers("1440p", null), four)).toBe("Medium quality.");
+    // a ladder with nothing below 1080: no size is one size smaller
+    expect(summaryFor(levers("720p", null), A, { ...QUICK_BUNDLE, ladder: ["2160p"] })).toBe(
+      "Medium quality.",
     );
-    expect(
-      summaryFor("fast", facts(1920, 1080, 30), { ...other, quality: "high", maxFps: 60 }),
-    ).toBe("Up to 60 frames a second, High quality, light compression.");
+    // the bundle's own quality never reaches the line
+    expect(summaryFor(levers("source", null, "high"), A, { ...QUICK_BUNDLE, quality: "low" })).toBe(
+      "Project size and frame rate, High quality.",
+    );
   });
 });
 
@@ -965,5 +1231,29 @@ describe("resolveChoice: one answer for a draw and for a click", () => {
     const shrunk = resolveChoice("quality", picks, facts(1280, 720, 25));
     expect(shrunk.kept).toEqual({});
     expect(shrunk.shown).toEqual(QUALITY_OWN);
+  });
+
+  it("keeps the route's explicit flags in step with the picks the shrunk project still holds (Fast)", () => {
+    // 4K at 60: 1440p, 50 fps and High are picked; the canvas then shrinks to 1280 x 720 at 25 under the open dialog
+    const picks: Overrides = { resolution: "1440p", fps: 50, quality: "high" };
+    const before = resolveChoice("fast", picks, B);
+    expect(payloadFor("fast", before.shown, before.kept, null)).toStrictEqual({
+      resolution: "1440p",
+      quality: "high",
+      fps: 50,
+      mode: null,
+      route: { route: "quick", explicit: { size: true, fps: true, quality: true } },
+    });
+    // the size and the rate are gone and are no longer set by the person: Fast's own are shown and sent, and the route says they are not explicit
+    const after = resolveChoice("fast", picks, facts(1280, 720, 25));
+    expect(after.kept).toEqual({ quality: "high" });
+    expect(after.shown).toEqual(levers("480p", null, "high"));
+    expect(payloadFor("fast", after.shown, after.kept, null)).toStrictEqual({
+      resolution: "480p",
+      quality: "high",
+      fps: null,
+      mode: null,
+      route: { route: "quick", explicit: { size: false, fps: false, quality: true } },
+    });
   });
 });

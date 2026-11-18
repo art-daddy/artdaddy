@@ -1,6 +1,8 @@
 // T16 of the UI spec: the words of the Export dialog's Quality / Fast view are written once, in exportChoiceWords.ts, and nowhere else. This guard is anchored to that module itself: it walks every string
 // the module exports (`D2_WORDS`, the size and quality names, the dropped clause) and the fixed text its builders embed, counts the quoted literals of the shipped sources (the syntax tree, so comments
-// and type positions do not count), and fails where a sentence appears twice, where a D2 component copies one, or where the words file grows a text this guard has not been told about.
+// and type positions do not count), and fails where a sentence appears twice, where a D2 component copies one, or where the words file grows a text this guard has not been told about. It also holds that the
+// lighter-setting sentence is this module's own literal (the 0.28.0 dialog keeps its own sentence in exportWords.ts), and that no entry carries a retired name (src/test/retiredNames.ts) except the two
+// sentences of the question that no screen draws and no shipped file reads.
 // The test of the old help words (exportHelp.guard.test.ts) is a different file and is left as it is; it runs beside this one.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,6 +10,7 @@ import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { retiredIn } from "../test/retiredNames";
 import * as WORDS from "./exportChoiceWords";
 import {
   D2_WORDS,
@@ -19,7 +22,6 @@ import {
   sameAsProjectSize,
   summaryWords,
 } from "./exportChoiceWords";
-import { FASTER_SETTING_LINE } from "./exportWords";
 
 const SRC = path.resolve(__dirname, "..");
 const WORDS_FILE = "timeline/exportChoiceWords.ts";
@@ -97,23 +99,12 @@ function literalsIn(file: string): Literal[] {
   return found;
 }
 
-/** Sentences of other surfaces that carry the owner's name for the processor's lighter setting inside their own words: the chat card's line says "light compression" too, in a sentence of its own. They are not copies of
- *  the view's words, so the literals counted for a name's fragment leave them out. Each is named with its file, so a change to the line shows here. */
-const OTHER_SURFACES: readonly { file: string; text: string }[] = [
-  {
-    file: "timeline/exportWords.ts",
-    text: "Using light compression to save time · the picture may be slightly softer",
-  },
-];
-
 /** The literals of every shipped file that mentions any of the texts (a file that does not cannot carry them, and parsing all of src would be slow for nothing). */
 function literalsMentioning(texts: string[]): Literal[] {
-  return shipped()
-    .flatMap((file) => {
-      const source = readFileSync(file, "utf8");
-      return texts.some((text) => source.includes(text)) ? literalsIn(file) : [];
-    })
-    .filter((l) => !OTHER_SURFACES.some((o) => o.file === l.file && o.text === l.text));
+  return shipped().flatMap((file) => {
+    const source = readFileSync(file, "utf8");
+    return texts.some((text) => source.includes(text)) ? literalsIn(file) : [];
+  });
 }
 
 /** Every string a value holds: itself, or those of a table or a list, at any depth. */
@@ -176,10 +167,6 @@ const LEGACY_KEPT: Record<string, string> = {
   "720p": "ExportDialog.tsx lists the same size names; exportOptions.ts keys them",
   "480p": "ExportDialog.tsx lists the same size names; exportOptions.ts keys them",
 };
-/** The 0.28.0 constant: the words file IMPORTS it and never writes it out, so the one literal is the legacy file's. */
-const IMPORTED_FROM: Record<string, string> = {
-  [FASTER_SETTING_LINE]: "timeline/exportWords.ts",
-};
 
 /** The fixed text the builders embed (sentence pieces): each is probed through its builder, and must be in exactly this many literals, all in the words file. */
 const FRAGMENTS: { fragment: string; literals: number; probe: string; builds: string }[] = [
@@ -199,20 +186,24 @@ const FRAGMENTS: { fragment: string; literals: number; probe: string; builds: st
   {
     fragment: "Project size and frame rate",
     literals: 1,
-    probe: summaryWords("quality", { smallerSize: false, maxFps: 30, quality: "medium" }),
+    probe: summaryWords({
+      projectSizeAndRate: true,
+      oneSizeSmaller: false,
+      upToFps: null,
+      quality: "medium",
+    }),
     builds: "Project size and frame rate, Medium quality.",
   },
   {
     fragment: "One size smaller",
     literals: 1,
-    probe: summaryWords("fast", { smallerSize: true, maxFps: 30, quality: "medium" }),
-    builds: "One size smaller, up to 30 frames a second, Medium quality, light compression.",
-  },
-  {
-    fragment: "light compression",
-    literals: 1,
-    probe: summaryWords("fast", { smallerSize: false, maxFps: 30, quality: "medium" }),
-    builds: "Up to 30 frames a second, Medium quality, light compression.",
+    probe: summaryWords({
+      projectSizeAndRate: false,
+      oneSizeSmaller: true,
+      upToFps: 30,
+      quality: "medium",
+    }),
+    builds: "One size smaller, up to 30 frames a second, Medium quality.",
   },
   {
     fragment: "This is a big export. Fast would be about ",
@@ -222,20 +213,18 @@ const FRAGMENTS: { fragment: string; literals: number; probe: string; builds: st
   },
 ];
 /** The pieces of a builder that are connectors, not sentences: too short or too common to be guarded by counting (the eval prompts say "frames a second" too), listed so that the scan of the words
- *  file knows every literal it holds. `rateEntry` writes `N fps`; the question's and the figure's `x`; the typeof check and the choice values are code. */
+ *  file knows every literal it holds. `rateEntry` writes `N fps`; the question's and the figure's `x`; the typeof check and the choice values are code. The summary's "up to N frames a second" is a
+ *  template of `up to ` and ` frames a second`, and its last clause a template that ends in ` quality`. A test below holds that every connector is still a literal of the words file. */
 const CONNECTORS = [
   "About ",
   " x ",
   " fps",
   " quality",
-  " to ",
+  "up to ",
   " frames a second",
   " faster.",
-  "up",
-  "Up",
   "x",
   "number",
-  "quality",
   "a",
   "b",
 ];
@@ -271,15 +260,14 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
   });
 
   it("holds each sentence or name of 4 characters or more as ONE quoted literal in src, the words file's, except the named legacy ones", () => {
-    const texts = WALKED.filter(
-      (text) => text.length >= 4 && !(text in LEGACY_KEPT) && !(text in IMPORTED_FROM),
-    );
+    const texts = WALKED.filter((text) => text.length >= 4 && !(text in LEGACY_KEPT));
     // not an empty loop: the sentences of the owner's copy are in it
     expect(texts).toEqual(
       expect.arrayContaining([
         "export choice",
         "Typical speed-up; your PC may differ.",
         "Advanced settings",
+        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
         "Are you sure?",
         "This is a big export. Fast would be quicker.",
         "Export at Quality",
@@ -293,21 +281,21 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
     }
   });
 
-  it("takes the faster-setting sentence from the 0.28.0 file by import, never as a second literal", () => {
-    expect(D2_WORDS.fasterSetting).toBe(FASTER_SETTING_LINE);
-    const literals = literalsMentioning([FASTER_SETTING_LINE]);
-    for (const [text, file] of Object.entries(IMPORTED_FROM))
-      expect({ text, where: literals.filter((l) => l.text === text).map((l) => l.file) }).toEqual({
-        text,
-        where: [file],
-      });
-    const imports = parse(path.join(SRC, WORDS_FILE)).statements.filter(ts.isImportDeclaration);
-    const fromLegacy = imports.find(
-      (statement) =>
-        ts.isStringLiteral(statement.moduleSpecifier) &&
-        statement.moduleSpecifier.text === "./exportWords",
+  it("writes the lighter-setting sentence as one literal of its own in the words file, and takes nothing from the 0.28.0 words (exportWords.ts keeps its own sentence)", () => {
+    const sentence = D2_WORDS.lightCompressionLine;
+    expect(sentence).toContain("light compression");
+    const found = literalsMentioning([sentence])
+      .filter((l) => l.text === sentence)
+      .map((l) => `${l.file} ${l.kind}`);
+    expect(found).toEqual([`${WORDS_FILE} string`]);
+    const specifiers = parse(path.join(SRC, WORDS_FILE)).statements.flatMap((statement) =>
+      (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
+      statement.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(statement.moduleSpecifier)
+        ? [statement.moduleSpecifier.text]
+        : [],
     );
-    expect(fromLegacy?.importClause?.getText()).toContain("FASTER_SETTING_LINE");
+    expect(specifiers.filter((specifier) => /exportWords$/.test(specifier))).toEqual([]);
   });
 
   it.each(FRAGMENTS)(
@@ -351,6 +339,11 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
       .map((literal) => `${literal.file}:${literal.line} ${JSON.stringify(literal.text)}`);
     expect(strangers).toEqual([]);
   });
+
+  it("keeps no connector that the words file no longer holds, so a stale entry cannot let a new literal through", () => {
+    const held = new Set(literalsIn(path.join(SRC, WORDS_FILE)).map((literal) => literal.text));
+    expect(CONNECTORS.filter((connector) => !held.has(connector))).toEqual([]);
+  });
 });
 
 /** The component files of the D2 view; those that exist are scanned (helpers write them in parallel, so a missing one is skipped, never failed). */
@@ -387,7 +380,7 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
         "Advanced settings",
         "Resolution",
         "Are you sure?",
-        FASTER_SETTING_LINE,
+        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
       ]),
     );
   });
@@ -436,6 +429,13 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
     expect(copiesOf(at("  Advanced   settings "))).not.toEqual([]);
     expect(copiesOf(at("Resolution"))).not.toEqual([]);
     expect(copiesOf(at("Are you sure?"))).not.toEqual([]);
+    expect(
+      copiesOf(
+        at(
+          "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+        ),
+      ),
+    ).not.toEqual([]);
     expect(copiesOf(at("Hint: Typical speed-up; your PC may differ. (more)"))).not.toEqual([]);
     expect(copiesOf(at("export-choice"))).toEqual([]);
     expect(copiesOf(at("export-advanced"))).toEqual([]);
@@ -447,5 +447,164 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
 describe("T16 (3) the old help guard is left alone", () => {
   it("has exportHelp.guard.test.ts beside this file, which this lane does not edit (it runs in the same pass)", () => {
     expect(existsSync(path.join(__dirname, "exportHelp.guard.test.ts"))).toBe(true);
+  });
+});
+
+// ---- the retired names (src/test/retiredNames.ts), and the question that no screen draws ----
+
+/** The two sentences of the question "Are you sure?" that still say "quicker". The question is not built (decision D3), so no screen draws them: until it is, nothing may read them, nor the builders that return them. */
+const QUESTION_SENTENCES: readonly string[] = ["questionQuicker", "questionOwnSettings"];
+const QUESTION_READERS: readonly string[] = [
+  ...QUESTION_SENTENCES,
+  "questionWords",
+  "questionButtons",
+];
+
+const sourceOf = (text: string): ts.SourceFile =>
+  ts.createSourceFile("snippet.tsx", text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+
+/** Every place a source names one of `names`: an identifier (an import, a property read, a destructured name, a call) or a quoted key (`D2_WORDS["questionQuicker"]`). */
+function mentionsIn(source: ts.SourceFile, label: string, names: readonly string[]): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && names.includes(node.text)) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+      found.push(`${label}:${line} ${node.text}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+/** Every use of the identifier `name` other than `name.key` and its import: a spread, `Object.values(name)`, `name[key]`, a re-export. Such a use names no key, so no list of names can say what it reaches. */
+function looseUsesIn(source: ts.SourceFile, label: string, name: string): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === name) {
+      const parent = node.parent;
+      const keyRead = ts.isPropertyAccessExpression(parent) && parent.expression === node;
+      if (!keyRead && !ts.isImportSpecifier(parent)) {
+        const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+        found.push(`${label}:${line} ${parent.getText(source)}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+/** The shipped files other than the words file that hold any of the needles in their text (a cheap filter before parsing). */
+const shippedHolding = (needles: readonly string[]): string[] =>
+  shipped().filter(
+    (file) =>
+      rel(file) !== WORDS_FILE &&
+      needles.some((needle) => readFileSync(file, "utf8").includes(needle)),
+  );
+
+describe("T16 (4) no word of the dialog carries a retired name, except the two sentences of the question that no screen draws", () => {
+  it("carries no retired name in any entry of D2_WORDS but those two sentences, and those two still do (the exemption is not stale)", () => {
+    const carrying = Object.entries(D2_WORDS)
+      .filter(([, text]) => retiredIn(text).length > 0)
+      .map(([key]) => key)
+      .sort();
+    expect(carrying).toEqual([...QUESTION_SENTENCES].sort());
+  });
+
+  it("carries none in the other tables the words module exports, nor in what its builders write", () => {
+    const tables = EXPORTS.filter(
+      ([name, value]) => typeof value !== "function" && name !== "D2_WORDS",
+    ).flatMap(([, value]) => stringsOf(value));
+    expect(tables.length).toBeGreaterThan(8);
+    const summaries = [true, false].flatMap((own) =>
+      [true, false].flatMap((smaller) =>
+        [null, 30].flatMap((cap) =>
+          (["high", "medium", "low"] as const).map((quality) =>
+            summaryWords({
+              projectSizeAndRate: own,
+              oneSizeSmaller: smaller,
+              upToFps: cap,
+              quality,
+            }),
+          ),
+        ),
+      ),
+    );
+    const written = [
+      ...tables,
+      ...summaries,
+      figureSpoken(4),
+      sameAsProjectSize(1080, 1920),
+      sameAsProjectRate(59.94),
+      rateEntry(24),
+      ...questionButtons("a"),
+      ...questionButtons("b"),
+      questionWords("a", 4),
+    ];
+    expect(written.filter((text) => retiredIn(text).length > 0)).toEqual([]);
+  });
+
+  it("is read by no shipped file: the two sentences and the builders that return them are named nowhere but in the words file", () => {
+    const mentions = shippedHolding(QUESTION_READERS).flatMap((file) =>
+      mentionsIn(parse(file), rel(file), QUESTION_READERS),
+    );
+    expect(
+      mentions,
+      "the question is not built (decision D3): a screen that reads its sentences draws the retired name",
+    ).toEqual([]);
+  });
+
+  it("reads D2_WORDS by key only, so no read of all its entries can reach the two sentences unseen", () => {
+    const files = shippedHolding(["D2_WORDS"]);
+    const loose = files.flatMap((file) => looseUsesIn(parse(file), rel(file), "D2_WORDS"));
+    expect(loose).toEqual([]);
+    // the scan reads real shipped code: the door and the choice row are read by key
+    const keys = files.flatMap((file) => {
+      const found: string[] = [];
+      const source = parse(file);
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isPropertyAccessExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "D2_WORDS"
+        )
+          found.push(`${rel(file)}:${node.name.text}`);
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+      return found;
+    });
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        "components/AdvancedSettings.tsx:door",
+        "components/ChoiceRow.tsx:choiceFast",
+      ]),
+    );
+  });
+
+  it("finds a read in every form: a property, a destructured name, an import, a quoted key, a namespace read, and a read of all entries", () => {
+    for (const text of [
+      "const a = D2_WORDS.questionQuicker;",
+      "const { questionOwnSettings } = D2_WORDS;",
+      'import { questionWords } from "./exportChoiceWords";',
+      'const b = D2_WORDS["questionQuicker"];',
+      'import * as W from "./exportChoiceWords"; W.questionButtons("a");',
+    ])
+      expect(mentionsIn(sourceOf(text), "x", QUESTION_READERS), text).not.toEqual([]);
+    for (const text of [
+      "Object.values(D2_WORDS);",
+      "const all = { ...D2_WORDS };",
+      "const one = D2_WORDS[key];",
+      "export { D2_WORDS };",
+    ])
+      expect(looseUsesIn(sourceOf(text), "x", "D2_WORDS"), text).not.toEqual([]);
+    // and none for a read the dialog may make
+    expect(mentionsIn(sourceOf("const a = D2_WORDS.door;"), "x", QUESTION_READERS)).toEqual([]);
+    for (const text of [
+      "const a = D2_WORDS.door;",
+      'import { D2_WORDS } from "./exportChoiceWords";',
+    ])
+      expect(looseUsesIn(sourceOf(text), "x", "D2_WORDS"), text).toEqual([]);
   });
 });
