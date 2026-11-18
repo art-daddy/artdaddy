@@ -1,9 +1,9 @@
 import runs from "./timeLeftRuns.json";
 
 // Recorded progress of real export runs, kept by the export-timing lab: ffmpeg's `-progress` positions with the time
-// each report arrived. The numbers are the raw ones (thinned to one report per second after the first seconds, never smoothed,
-// shifted or repaired); each run's `source` names the lab folder it was copied from. Used to replay the live time-left rule
-// against what really happened.
+// each report arrived. The numbers are the raw ones (every report of the run, at the report cadence of about half a second;
+// never smoothed, shifted or repaired); each run's `source` names the lab folder it was copied from. Used to replay the live
+// time-left rule against what really happened.
 
 /** The encoder of the run's command: the processor at its normal setting, the processor at its light setting, or the graphics chip. */
 export type ReplayRoute = "x264" | "x264-light" | "chip";
