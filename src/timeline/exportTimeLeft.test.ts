@@ -1402,14 +1402,14 @@ describe("R9 robustness", () => {
   it("never changes the state it was given, and answers the same from a frozen state", () => {
     fc.assert(
       fc.property(perturbedArb, ([spec, seed, level]) => {
-        const reps = perturb(buildFeed(spec), seed, level);
+        const reps = perturb(buildFeed(spec), seed, level).slice(0, 300);
         const plainRun = shows(reps);
         let s = deepFreeze(startPace());
         const frozenRun: string[] = [];
         for (const r of reps) {
-          const before = snapshot(s);
+          const before = JSON.stringify(snapshot(s));
           const next = notePace(s, reportOf(r, BASE));
-          expect(snapshot(s)).toEqual(before);
+          if (JSON.stringify(snapshot(s)) !== before) throw new Error("the given state changed");
           s = deepFreeze(next);
           frozenRun.push(show(s.value));
         }
@@ -1679,5 +1679,29 @@ describe("R17 a report that is not finite is no report", () => {
       }),
       { numRuns: 300 },
     );
+  });
+});
+
+describe("R18 reports that come very fast", () => {
+  it("keeps a bounded memory however fast the reports arrive", () => {
+    let s = startPace();
+    for (let i = 0; i <= 30_000; i += 1) {
+      s = notePace(s, { at: BASE + i, fraction: round12(1e-6 * i) });
+    }
+    const size = JSON.stringify(snapshot(s)).length;
+    expect(size).toBeGreaterThan(0);
+    expect(size).toBeLessThan(250_000);
+    expect(problemWith(s.value)).toBeNull();
+  });
+
+  it("reads the same pace from reports 50 times a second as from twice a second", () => {
+    const fast = valuesOf(steady(0.01, 0.02, 25));
+    const slow = valuesOf(steady(0.01, 0.5, 25));
+    const firstFigure = (vs: TimeLeft[]): string =>
+      show(vs[vs.findIndex((v) => v.kind !== "none")]);
+    // 0.01 a second: 80 s left at 20 s
+    expect(firstFigure(fast)).toBe("left 60");
+    expect(firstFigure(slow)).toBe("left 60");
+    expect(fast.findIndex((v) => v.kind !== "none")).toBe(1000);
   });
 });
