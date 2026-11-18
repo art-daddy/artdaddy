@@ -328,3 +328,84 @@ describe("a build that keeps the facts dark", () => {
     expect(lit[0].meta.notes).not.toHaveProperty("net");
   });
 });
+
+describe("a run a crashed page left in the app process", () => {
+  const OUTPUT =
+    '{"result":{"language":"en"},"transcription":[{"offsets":{"from":0,"to":1000},"text":" a","tokens":[{"text":" a","offsets":{"from":0,"to":1000},"p":0.9}]}]}';
+
+  /** The first page launches a run (alone on the processor with the chip held off, or two files in one launch on the chip) and
+   *  dies; the next page, a module graph of its own that knows nothing but what the job's record says, takes the run over and
+   *  reports it. */
+  async function reportedByTheNextPage(gate: boolean, several = false) {
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    if (!several) holdCpuOnly(CRASH);
+    __setSpeechFactsShipped(gate);
+    const rig = speechRig({ ...(several ? {} : { audio: () => wavWithVoiceAt(1360) }) });
+    if (several) void ensureTranscripts(rig.ctx(), [freshSource(), freshSource()], "small", "en");
+    else void runWhisper(rig.ctx(), freshSource(), "small", "en").catch(() => undefined);
+    for (let i = 0; i < 500 && jobs.started.length === 0; i++)
+      await new Promise((r) => setTimeout(r, 2));
+    expect(jobs.started).toHaveLength(1);
+    const [spec] = jobs.submitted.filter((s) => s.program === "whisper-cli");
+    jobs.pageDied();
+    vi.resetModules();
+    const [transcribe, supervisor, wordTimes, flags, facts, auth, session] = await Promise.all([
+      import("./transcribe"),
+      import("./jobSupervisor"),
+      import("./speechWordTimes"),
+      import("../api/exportFlags"),
+      import("./speechFacts"),
+      import("../store/auth"),
+      import("../api/auth"),
+    ]);
+    supervisor.__setJobSupervisor(jobs);
+    wordTimes.__setWordTimesShipped(true);
+    flags.__setExportFlag("speech_word_times", true);
+    facts.__setSpeechFactsShipped(gate);
+    auth.useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+    session.setClerkTokenProvider(async () => "isolated-speech-facts-next-page");
+    sent = [];
+    const io = {
+      exists: (p: string) => rig.store.exists(p),
+      readText: (p: string) => rig.store.readText(p),
+      remove: (p: string) => rig.store.remove(p),
+      appCache: () => rig.store.appCache(),
+    };
+    expect(await transcribe.adoptTranscriptions(io as never)).toBe(1);
+    for (const base of flagValues(spec.args, "-of")) {
+      rig.files.add(`${base}.json`);
+      rig.texts.set(`${base}.json`, OUTPUT);
+    }
+    jobs.exit(spec.id, 0, several ? BATCH_ON_CHIP : ON_PROCESSOR);
+    return { spec, sample: await theSample() };
+  }
+
+  it("is reported by the next page with the facts of the launch that made it, read from the job's own record", async () => {
+    const { spec, sample } = await reportedByTheNextPage(true);
+    expect(spec.args).toContain("-ng");
+    expect(spec.args).toContain("-dtw");
+    expect(factsOf(sample.reason)).toEqual([
+      "ng=1",
+      "held=1",
+      "mf=small",
+      "dtw=1",
+      "lead=gt1",
+      "lang=en",
+    ]);
+  });
+
+  it("is reported by the next page as it would have been by the first, for one launch over several files too", async () => {
+    const { spec, sample } = await reportedByTheNextPage(true, true);
+    expect(flagValues(spec.args, "-f")).toHaveLength(2);
+    expect(sample.reason).toContain("files=2");
+    expect(factsOf(sample.reason)).toEqual(["mf=small", "gpu=amd", "lang=en"]);
+  });
+
+  it("is reported as the sample always was when the build keeps the facts dark", async () => {
+    const { spec, sample } = await reportedByTheNextPage(false);
+    expect(spec.meta).not.toHaveProperty("notes");
+    expect(factsOf(sample.reason)).toEqual([]);
+    expect(sample.reason).toMatch(/^audio_s=600\.0 wall_s=66\.1 x=9\.08 model=small threads=8/);
+  });
+});
