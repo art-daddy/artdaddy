@@ -34,6 +34,7 @@ import { __setExportConfirmationForTests } from "../lib/confirm";
 import * as host from "../platform/host";
 import { ExportMemFs } from "../test/timelineKit";
 import { FakeJobs } from "../test/fakeJobs";
+import { playSteady } from "../test/steadyFeed";
 import { ProjectStoreAccess } from "../tools/store";
 
 vi.mock("../tools/genJobs", () => ({
@@ -158,6 +159,16 @@ function start(
 const status = () => screen.getByTestId("export-card-status").textContent;
 const report = (over: Partial<Parameters<ReturnType<typeof useExportJob.getState>["update"]>[0]>) =>
   act(() => useExportJob.getState().update({ phase: "rendering", ...over }));
+const FAKE_NOW = 5_000_000;
+/** A render of `total` seconds in all, reporting every second from second `from` to second `to` on the fake clock (which starts at FAKE_NOW). The raw guess the
+ *  producers publish with each report is a constant 90 s: what the card says about the time left follows the rule's own reading of the feed, never that number. */
+const playRender = (total: number, from: number, to: number) =>
+  playSteady((r) => report({ fraction: r.fraction, etaSec: 90, speed: 1, frame: r.frame }), {
+    total,
+    from,
+    to,
+    origin: FAKE_NOW,
+  });
 
 beforeEach(() => {
   __resetExportQueue();
@@ -185,18 +196,20 @@ describe("ExportCard", () => {
   });
 
   it("shows an export the CHAT started: its name, a bar and a line saying where it is, with no menu involved", async () => {
+    vi.useFakeTimers({ now: FAKE_NOW, toFake: ["Date", "setInterval", "clearInterval"] });
     const g = gated();
     await start("one.mp4", g.wait);
     render(<ExportCard />);
     expect(useExportJob.getState().phase).toBe("idle"); // the dialog's job was never begun
     expect(screen.getByText("Exporting “one.mp4”")).toBeVisible();
     expect(status()).toBe("Preparing · checking your clips");
-    // ffmpeg starts reporting, the way render.ts publishes it.
-    report({ fraction: 0.4, etaSec: 90, speed: 1, frame: 120 });
+    // ffmpeg starts reporting, the way render.ts publishes it: the queue names the stage, then a report comes every second.
     act(() =>
       useExportJob.getState().setLiveStage(useExportJob.getState().live!.jobId, "rendering"),
     );
-    expect(status()).toBe("Rendering and encoding · 40% · about 2 min left");
+    playRender(100, 1, 40);
+    // A render of 100 s in all that is 40 s in has 60 s left: the nearest minute. (The raw guess the producer publishes, 90 s, would read "about 2 min".)
+    expect(status()).toBe("Rendering and encoding · 40% · about 1 min left");
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("aria-valuenow", "40");
     g.open();
@@ -299,6 +312,7 @@ describe("ExportCard", () => {
     });
 
     it("says, under the status line, what it is expected to take, in the words the Export dialog used, and keeps saying it the whole run", async () => {
+      vi.useFakeTimers({ now: FAKE_NOW, toFake: ["Date", "setInterval", "clearInterval"] });
       useExportJob.setState({ calibrations: [MEASURED] });
       const g = gated();
       await start("one.mp4", g.wait, { described: true });
@@ -314,23 +328,42 @@ describe("ExportCard", () => {
         "Expected: about 3 min, a file of about 48 MB, from earlier exports on this PC.",
       );
       expect(expectedLine()).toBe(dialogSaid);
-      // The render then reports a time left of its own. The line stays: it is what was expected at the start.
-      report({ fraction: 0.4, etaSec: 90, speed: 1, frame: 120 });
+      // The render then reports a time left of its own (a render of 100 s in all, 40 s in: 60 s left). The line stays: it is what was expected at the start.
       act(() =>
         useExportJob.getState().setLiveStage(useExportJob.getState().live!.jobId, "rendering"),
       );
-      expect(status()).toBe("Rendering and encoding · 40% · about 2 min left");
+      playRender(100, 1, 40);
+      expect(status()).toBe("Rendering and encoding · 40% · about 1 min left");
       expect(expectedLine()).toBe(dialogSaid);
       g.open();
     });
 
-    it("says it is a guess when nothing like this has been exported on this PC", async () => {
+    // 0.27.0 also said, under the line, "A rough guess: nothing like this has been exported on this PC yet." A guess is not something to hang a line on once the
+    // render has a time of its own to say, so the card leaves it out; what this PC measured of its own earlier exports (the test above) stays.
+    it("does not show a guess of what it is expected to take (nothing like this has been exported on this PC), at the start or later in the run", async () => {
+      vi.useFakeTimers({ now: FAKE_NOW, toFake: ["Date", "setInterval", "clearInterval"] });
       const g = gated();
       await start("one.mp4", g.wait, { described: true });
       render(<ExportCard />);
-      expect(expectedLine()).toMatch(
-        /^Expected: (under a minute|about [\w ]+)\. A rough guess: nothing like this has been exported on this PC yet\.$/,
+      // The premise: the export was admitted with an expectation, and it is a guess. It is the card that leaves it out.
+      const record = listExportRecords().find((r) => r.filename === "one.mp4")!;
+      expect(record.expected).toMatchObject({ guessed: true });
+      expect(expectedLine()).toBeNull();
+      expect(screen.queryByText(/rough guess/i)).toBeNull();
+      act(() =>
+        useExportJob.getState().setLiveStage(useExportJob.getState().live!.jobId, "rendering"),
       );
+      // Before the rule has a time to say, when it says one, and when it says "Finishing" (95 s in is a minute in): the card is alive each time and the guess is never back.
+      playRender(100, 1, 5);
+      expect(status()).toBe("Rendering and encoding · 5%");
+      expect(expectedLine()).toBeNull();
+      playRender(100, 6, 40);
+      expect(status()).toBe("Rendering and encoding · 40% · about 1 min left");
+      expect(expectedLine()).toBeNull();
+      playRender(100, 41, 95);
+      expect(status()).toBe("Still working · 1 min in · Rendering and encoding · 95% · Finishing");
+      expect(expectedLine()).toBeNull();
+      expect(screen.queryByText(/rough guess|Expected:/i)).toBeNull();
       g.open();
     });
 
@@ -429,14 +462,20 @@ describe("ExportCard", () => {
       act(() =>
         useExportJob.getState().setLiveStage(useExportJob.getState().live!.jobId, "rendering"),
       );
-      expect(status()).toBe("Rendering and encoding · 20% · about 5 min left");
+      // One report is not a pace: the rule says nothing about the time left yet, only how far it is.
+      expect(status()).toBe("Rendering and encoding · 20%");
       // It keeps moving, a block every 20 s, for three minutes.
       for (let second = 20; second <= 190; second += 20) {
         vi.setSystemTime(5_000_000 + second * 1000);
         report({ fraction: 0.2 + second / 1000, etaSec: 300 - second, frame: 10 + second });
         act(() => void vi.advanceTimersByTime(10_000));
       }
-      expect(status()).toContain("Still working · 3 min in");
+      // The clock is at 190 s and the last report (38 %) was at 180 s. The render made 0.001 a second throughout, so (1 - 0.38) / 0.001 = 620 s were left at the
+      // last report; the figure said since the gate opened (780 s at 20 s in: the nearest 5 minutes is 15 min) came down to 10 min when the raw time left, now 620 s,
+      // had left that cell by more than a quarter of its width (at 660 s, 140 s in). The line counts the minutes in front of it.
+      expect(status()).toBe(
+        "Still working · 3 min in · Rendering and encoding · 38% · about 10 min left",
+      );
       g.open();
     });
 
@@ -1102,6 +1141,7 @@ describe("ExportCard", () => {
 
   describe("exports that overlap: one is still being checked while the next one renders", () => {
     it("shows each with its own line and bar, so neither is hidden and neither is left on 'Working…'", async () => {
+      vi.useFakeTimers({ now: FAKE_NOW, toFake: ["Date"] });
       const jobs = new FakeJobs();
       let finishCheck!: () => void;
       const checking = new Promise<void>((resolve) => (finishCheck = resolve));
@@ -1144,15 +1184,22 @@ describe("ExportCard", () => {
           secondQueued();
           await vi.waitFor(() => expect(jobs.started).toContain(id));
           jobs.stdout(id, block(180, 6_000));
-          act(() =>
-            useExportJob.getState().update({ fraction: 0.1, etaSec: 90, frame: 180, speed: 1 }),
+          // A render of 200 s in all, reporting every second for 40 s: 20 % made, 160 s left, said as the nearest minute.
+          playSteady(
+            (r) =>
+              act(() =>
+                useExportJob
+                  .getState()
+                  .update({ fraction: r.fraction, etaSec: 90, frame: r.frame, speed: 1 }),
+              ),
+            { total: 200, from: 1, to: 40, origin: Date.now() },
           );
           await secondRuns;
           jobs.exit(id, 0, "");
         }),
       );
       await vi.waitFor(() => expect(useExportJob.getState().live?.jobId).toBe(second.job_id));
-      await vi.waitFor(() => expect(useExportJob.getState().live?.fraction).toBe(0.1));
+      await vi.waitFor(() => expect(useExportJob.getState().live?.fraction).toBe(0.2));
       expect(first.job_id).not.toBe(second.job_id);
 
       render(<ExportCard />);
@@ -1160,10 +1207,10 @@ describe("ExportCard", () => {
       expect(screen.getByText("Exporting “second.mp4”")).toBeVisible();
       expect(screen.getAllByTestId("export-card-status").map((line) => line.textContent)).toEqual([
         "Checking the file",
-        "Rendering and encoding · 10% · about 2 min left",
+        "Rendering and encoding · 20% · about 3 min left",
       ]);
       const bars = screen.getAllByRole("progressbar");
-      expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["100", "10"]);
+      expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["100", "20"]);
       finishCheck();
       finishSecond();
     });
