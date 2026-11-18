@@ -128,9 +128,33 @@ describe("the Export dialog is the 0.28.0 one unless the menu bar hands it quick
     expect(vi.mocked(decideExportEncoder).mock.calls[0][0]).toMatchObject({
       request: "auto",
       preview: true,
+      waitMs: Infinity,
       workload: PROJECT,
       settings: { resolution: "source", quality: "medium", fps: null },
     });
+  });
+
+  it("asks the app what the 0.28.0 dialog asks, and waits for a graphics chip's first test to end: the same request in both views, with an unlimited wait", async () => {
+    // A finite wait would make the look give up before a chip's first test has ended, and what Quality sends would then differ from 0.28.0 in real use only: the stub answers at once whatever the wait.
+    const wanted = {
+      request: "auto",
+      workload: PROJECT,
+      settings: { resolution: "source", quality: "medium", fps: null },
+      history: [],
+      preview: true,
+      waitMs: Infinity,
+    };
+    const legacy = render(dialog({ quickRoute: false }));
+    await settle();
+    expect(decideExportEncoder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decideExportEncoder).mock.calls[0][0]).toEqual(wanted);
+    legacy.unmount();
+
+    vi.mocked(decideExportEncoder).mockClear();
+    render(dialog());
+    await settle();
+    expect(decideExportEncoder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decideExportEncoder).mock.calls[0][0]).toEqual(wanted);
   });
 
   it("Cancel is the dialog's own door: it asks the host to hide the dialog and starts nothing", async () => {
