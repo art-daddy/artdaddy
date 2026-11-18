@@ -28,6 +28,7 @@ import {
 } from "../timeline/exportWords";
 import { flags3cNow } from "../timeline/flags3c";
 import type { RenderWorkload } from "../timeline/renderPlan";
+import type { ExportRouteSlot } from "../tools/context";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
 import ExportProgressBar from "./ExportProgressBar";
@@ -44,6 +45,8 @@ export interface ExportSettings {
   /** What the person picked in the Mode row, or null when they did not: the app then decides, as it does for every
    *  other way an export starts (exportChoice.ts). */
   mode: ExportMode | null;
+  /** Set only when the person chose Fast (the Quality / Fast view): Quality sends no route, so its settings are the 0.28.0 ones key for key. */
+  route?: ExportRouteSlot;
 }
 
 const RESOLUTIONS: { value: ExportResolution; label: string }[] = [
