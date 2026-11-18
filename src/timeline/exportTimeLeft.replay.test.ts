@@ -66,8 +66,8 @@ const C8_SLOW_FACTOR = 3;
 const C8_MIN_CAUGHT_SHARE = 0.9;
 const C8_HEALTHY_FACTOR = 1.2;
 /** The stated claim is that a 1.2 times slowdown is never called "taking longer". On the recorded runs it is in 2 of 53 (a phone
- *  reel on the 4-thread PC and an E3-type edit on the strong PC, at 80 % and 85 % made): both runs were already 1.3 to 1.4 times
- *  above the total their first figure implied when healthy, so a mild slowdown carries them past 1.5. This is the OBSERVED count, not
+ *  reel on the 4-thread PC and an E3-type edit on the strong PC, at 80 % and 85 % made): when healthy they already rose to 1.48 and
+ *  1.37 times the total their first figure implied, so a mild slowdown carries them past 1.5. This is the OBSERVED count, not
  *  the claim: the number to decide on is in the report (the headroom column). Raising it hides a regression; lower it with the rule. */
 const C8_HEALTHY_MAX_CAUGHT = 2;
 const C8_REPORTED_FACTORS = [1.5, 2, 5];
