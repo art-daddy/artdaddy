@@ -36,7 +36,8 @@ rates below the project's, and it starts fresh at every opening. This ADR adds t
    - at most 30 frames a second (60 gives 30, 50 gives 25, 48 gives 24; lower rates are kept);
    - Medium quality;
    - the encoder: the graphics chip where it passed the app's own test and the person's Graphics chip
-     switch is not Off, else light compression while the server switch `faster_x264` is on.
+     switch is not Off, else light compression while the server switch `faster_x264` is on (plain
+     x264 when it is off).
    A size, rate or quality the person set in the dialog is never overridden: the dialog sends which of
    the three were touched (`explicit`) and Fast composes only the rest.
 3. **One authority, read at the commit point.** The dialog hands the host
@@ -98,6 +99,10 @@ compression" is what Quality's own rule already picks on a slow project without 
 - On one emulated weak PC (the same laptop limited to 4 of 16 processors and 4.7 GB free; one valid
   block, a talking head) Fast without a chip was 1.8 times faster than Quality; with the chip the
   ratio was 0.89, as on the strong profile.
+- On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps): the
+  lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame drawn, a little more than
+  the chip saves by encoding the smaller picture, so Fast took about 1 to 6 seconds longer than
+  Quality on 2-minute exports. A cheaper resize filter was not tried.
 - Only drawing at the delivery size from the start moved a big project: 4K at 30 fps from about 120 s
   to about 13 s with the chip, the phone reel from about 51 s to 48 s. That is an upper bound: the
   canvas was set small by hand, text and effects were not rescaled, picture quality was not judged, and
@@ -107,9 +112,9 @@ compression" is what Quality's own rule already picks on a slow project without 
 
 ## Consequences
 
-- **We get:** a named choice for a smaller picture and file; a 1.3 to 1.4 times shorter export on
-  processor-only PCs for plain projects (2.1 at 60 fps); Quality unchanged to the byte; the 0.28.0
-  dialog as a fallback.
+- **We get:** a named choice for a smaller picture and file; on processor-only PCs, plain projects
+  export 1.3 to 1.4 times faster (2.1 at 60 fps; one laptop); Quality unchanged to the byte; the
+  0.28.0 dialog as a fallback.
 - **We do not get:** a speed claim. With a working chip Fast takes about as long as Quality (0.88 to
   1.01) and only delivers a smaller picture and file; on 4K and many-clip projects it adds nothing to
   Quality's own light compression.
@@ -120,15 +125,16 @@ compression" is what Quality's own rule already picks on a slow project without 
 
 ## Rejected alternatives
 
-- **A speed figure on the label.** No figure holds across projects and PCs (0.88 to 1.4 on typical
-  projects), so none is claimed.
+- **A speed figure on the label.** No figure holds across the projects and PCs measured (0.88 to 2.1),
+  so none is claimed.
 - **An "Are you sure?" question before a big Quality export.** It needs that figure and targets the
   projects where Fast adds least (4K, 60 fps, many clips).
 - **A Fast preset in the assistant's `export` tool.** A new parameter changes the tool contract (server
   first, a new catalog snapshot, evals) for a small gain; the tool already accepts a smaller
   `resolution`, a lower `fps` and a lower `quality`.
 - **A "Switch to Fast" button on the slow-export banner.** A restart discards the progress already
-  made and Fast gains at most about 1.4 times; `quickAvailable()` stays false.
+  made, and Fast gains about 1.4 times at best on typical projects (2.1 at 60 fps);
+  `quickAvailable()` stays false.
 - **Build small** (draw at the delivery size from the start). The one lever that moved 4K, but it
   changes the draw stage (text sizes and pixel-valued effects need care, Quality must stay
   byte-identical): deferred, with its upper-bound measurement recorded.
