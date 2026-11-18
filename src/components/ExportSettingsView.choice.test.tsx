@@ -84,7 +84,16 @@ function pcWith(adapters: GraphicsAdapter[]): void {
   vi.mocked(processorName).mockResolvedValue(null);
 }
 
+// The real hold lets go after 30 s: in a long file that would end the hold of a later test under it. Every hold the view makes is let go at the end of its own test.
+const realHold = exportAsk.holdExportAsk;
+const holds: (() => void)[] = [];
+
 beforeEach(() => {
+  vi.spyOn(exportAsk, "holdExportAsk").mockImplementation((ms) => {
+    const release = realHold(ms);
+    holds.push(release);
+    return release;
+  });
   localStorage.clear();
   __resetChipTests();
   __setExportFlag("quick_export", true);
@@ -97,6 +106,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  for (const release of holds.splice(0)) release();
   exportAsk.__resetExportAsk();
   __resetExportFlags();
   useEditor.setState({ timeline: null });
@@ -278,7 +288,7 @@ function mount(shape: Shape, options: { workload?: boolean; fastChoice?: boolean
       }
       onCancel={onCancel}
       onStart={onStart}
-      fastChoice={options.fastChoice}
+      fastChoice={options.fastChoice ?? true}
     />,
   );
   return { ...view, onStart, onCancel, user };
@@ -396,7 +406,7 @@ describe("(a) the row at mount and in every state", () => {
   });
 
   it("is there for a project that cannot be read too (no canvas, no snapshot): Quality checked, nothing described", async () => {
-    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} />);
+    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} fastChoice />);
     await settle();
     expectRow("quality");
   });

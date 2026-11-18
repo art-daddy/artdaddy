@@ -184,7 +184,12 @@ function play(shape: Shape, choice: Choice, picks: Picks = {}): Played {
   setCanvas(shape.width, shape.height, shape.fps);
   const onStart = vi.fn<(settings: ExportSettings) => void>();
   const view = render(
-    <ExportSettingsView workload={workloadOf(shape)} onCancel={vi.fn()} onStart={onStart} />,
+    <ExportSettingsView
+      workload={workloadOf(shape)}
+      onCancel={vi.fn()}
+      onStart={onStart}
+      fastChoice
+    />,
   );
   if (choice === "fast") fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
   fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
@@ -341,7 +346,12 @@ describe("where the line is and is not", () => {
   it("is in the region behind the door: not visible while the door is closed, visible once it is open", () => {
     setCanvas(3840, 2160, 60);
     render(
-      <ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />,
+      <ExportSettingsView
+        workload={workloadOf(SHAPES[0])}
+        onCancel={vi.fn()}
+        onStart={vi.fn()}
+        fastChoice
+      />,
     );
     expect(lineBehindDoor()).toBe("Project size and frame rate, Medium quality.");
     expect(screen.getByText("Project size and frame rate, Medium quality.")).not.toBeVisible();
@@ -352,7 +362,12 @@ describe("where the line is and is not", () => {
   it("follows the choice and the picks live: it changes with each of them and comes back with them", () => {
     setCanvas(3840, 2160, 60);
     render(
-      <ExportSettingsView workload={workloadOf(SHAPES[0])} onCancel={vi.fn()} onStart={vi.fn()} />,
+      <ExportSettingsView
+        workload={workloadOf(SHAPES[0])}
+        onCancel={vi.fn()}
+        onStart={vi.fn()}
+        fastChoice
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
     const seen = [lineBehindDoor()];
@@ -374,7 +389,7 @@ describe("where the line is and is not", () => {
   });
 
   it("is not drawn for no project (nothing to describe), with either choice", () => {
-    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} />);
+    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} fastChoice />);
     fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
     expect(region().querySelector("p")).toBeNull();
     fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
