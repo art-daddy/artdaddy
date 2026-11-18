@@ -453,7 +453,11 @@ const FAST_RUNS: {
     name: "Resolution Same as project picked on 1920 x 1080 at 30: the size is the person's",
     canvas: HD30,
     picks: [["size", "Same as project (1920 x 1080)"]],
-    rows: { size: "Same as project (1920 x 1080)", rate: "Same as project (30 fps)", quality: "Medium" },
+    rows: {
+      size: "Same as project (1920 x 1080)",
+      rate: "Same as project (30 fps)",
+      quality: "Medium",
+    },
     args: { resolution: "source", quality: "medium" },
     explicit: { size: true, fps: false, quality: false },
   },
@@ -541,6 +545,25 @@ describe("Fast, picked in the new view, runs the export tool with the route and 
     expect(run.options.exportRoute).toStrictEqual({ route: "quick", explicit: NOTHING_TOUCHED });
   });
 
+  it("works the settings out again from the project as it is at the click: a project that shrank under the open dialog gets Fast's own values for its new size", async () => {
+    const run = await exportedOn(UHD60, true, async (user) => {
+      await user.click(fastRadio());
+      ed.timeline = projectOf(1280, 720, 25) as never; // the project is changed while the dialog is open
+    });
+    expect(run.args).toStrictEqual({ resolution: "480p", quality: "medium" });
+    expect(run.options.exportRoute).toStrictEqual({ route: "quick", explicit: NOTHING_TOUCHED });
+  });
+
+  it("drops a size pick that a project which shrank no longer holds, with its mark as the person's: Fast's own size is sent", async () => {
+    const run = await exportedOn(UHD60, true, async (user) => {
+      await user.click(fastRadio());
+      await pickRows(user, [["size", "1440p"]]);
+      ed.timeline = projectOf(1920, 1080, 30) as never; // 1440p is above this project
+    });
+    expect(run.args).toStrictEqual({ resolution: "720p", quality: "medium" });
+    expect(run.options.exportRoute).toStrictEqual({ route: "quick", explicit: NOTHING_TOUCHED });
+  });
+
   it("a double press of Export is one call, with the route", async () => {
     const run = await exportedOn(
       HD30,
@@ -567,20 +590,38 @@ describe("a Quality export, and an export from the 0.28.0 dialog, run the export
     ]);
 
   it.each([
-    { name: "untouched on 1920 x 1080 at 30", canvas: HD30, args: { resolution: "source", quality: "medium" }, touched: false },
-    { name: "untouched on 3840 x 2160 at 60", canvas: UHD60, args: { resolution: "source", quality: "medium" }, touched: false },
-    { name: "with the three picks on 3840 x 2160 at 60", canvas: UHD60, args: { resolution: "720p", quality: "low", fps: 24 }, touched: true },
-  ])("$name: the new view's call is the 0.28.0 dialog's, with no exportRoute key", async ({ canvas, args, touched }) => {
-    const legacy = await exportedOn(canvas, false, touched ? legacyPicks : undefined);
-    const quality = await exportedOn(canvas, true, touched ? newPicks : undefined);
-    expect(legacy.args).toStrictEqual(args);
-    expect(quality.args).toStrictEqual(args);
-    expect("exportRoute" in quality.options).toBe(false);
-    expect("exportRoute" in legacy.options).toBe(false);
-    expect(Object.keys(quality.options).sort()).toEqual(OPTION_KEYS);
-    expect(Object.keys(legacy.options).sort()).toEqual(OPTION_KEYS);
-    expect(withoutSignal(quality.options)).toStrictEqual(withoutSignal(legacy.options));
-  });
+    {
+      name: "untouched on 1920 x 1080 at 30",
+      canvas: HD30,
+      args: { resolution: "source", quality: "medium" },
+      touched: false,
+    },
+    {
+      name: "untouched on 3840 x 2160 at 60",
+      canvas: UHD60,
+      args: { resolution: "source", quality: "medium" },
+      touched: false,
+    },
+    {
+      name: "with the three picks on 3840 x 2160 at 60",
+      canvas: UHD60,
+      args: { resolution: "720p", quality: "low", fps: 24 },
+      touched: true,
+    },
+  ])(
+    "$name: the new view's call is the 0.28.0 dialog's, with no exportRoute key",
+    async ({ canvas, args, touched }) => {
+      const legacy = await exportedOn(canvas, false, touched ? legacyPicks : undefined);
+      const quality = await exportedOn(canvas, true, touched ? newPicks : undefined);
+      expect(legacy.args).toStrictEqual(args);
+      expect(quality.args).toStrictEqual(args);
+      expect("exportRoute" in quality.options).toBe(false);
+      expect("exportRoute" in legacy.options).toBe(false);
+      expect(Object.keys(quality.options).sort()).toEqual(OPTION_KEYS);
+      expect(Object.keys(legacy.options).sort()).toEqual(OPTION_KEYS);
+      expect(withoutSignal(quality.options)).toStrictEqual(withoutSignal(legacy.options));
+    },
+  );
 
   it("Fast and then Quality again: no route, and Quality's own values whatever was picked on Fast in between", async () => {
     const run = await exportedOn(UHD60, true, async (user) => {

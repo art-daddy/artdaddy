@@ -483,16 +483,22 @@ describe("the Quality | Fast row, with the real view", () => {
       sent: { resolution: "480p", quality: "low", fps: 25, mode: null },
       explicit: { size: true, fps: true, quality: true },
     },
-  ])("marks as the person's exactly what they touched on Fast: $name", async ({ pick, sent, explicit }) => {
-    const onStart = vi.fn();
-    const user = userEvent.setup();
-    render(dialog({ onStart }));
-    await settle();
-    await user.click(fastRadio());
-    await pick(user);
-    await user.click(screen.getByRole("button", { name: "Export" }));
-    expect(onStart.mock.calls[0][0]).toStrictEqual({ ...sent, route: { route: "quick", explicit } });
-  });
+  ])(
+    "marks as the person's exactly what they touched on Fast: $name",
+    async ({ pick, sent, explicit }) => {
+      const onStart = vi.fn();
+      const user = userEvent.setup();
+      render(dialog({ onStart }));
+      await settle();
+      await user.click(fastRadio());
+      await pick(user);
+      await user.click(screen.getByRole("button", { name: "Export" }));
+      expect(onStart.mock.calls[0][0]).toStrictEqual({
+        ...sent,
+        route: { route: "quick", explicit },
+      });
+    },
+  );
 
   it("sends no route for Quality, and for Fast and then Quality again, with the project's own values back: the same object as the 0.28.0 dialog", async () => {
     const onStart = vi.fn();

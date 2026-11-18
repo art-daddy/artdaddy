@@ -85,8 +85,13 @@ const dialog = (props: Props = {}) => (
 const settle = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 
-/** Everything on the screen as a person reads it: the text of the page, the closed door's region included (so a name behind the door is found too). */
-const drawn = (): string => document.body.textContent ?? "";
+/** Everything on the screen as a person reads it, the closed door's region included (so a name behind the door is found too): the page's text as one string, then the text of every element on a line of its
+ *  own, because a name that opens an element ("Export video" then "Quick export") has no word boundary in front of it once the page's text is run together. */
+const drawn = (): string =>
+  [
+    document.body.textContent ?? "",
+    ...Array.from(document.body.querySelectorAll("*"), (element) => element.textContent ?? ""),
+  ].join("\n");
 /** The owner's sentence for the processor's lighter setting, written out here. */
 const LIGHT_COMPRESSION =
   "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
@@ -99,16 +104,14 @@ describe("the 0.28.0 dialog draws the older names, so the checks below can tell"
     vi.mocked(decideExportEncoder).mockResolvedValue(withRow());
     render(dialog({ quickRoute: false }));
     await screen.findByRole("radio", { name: "Full quality" });
-    expect(retiredIn(document.body.textContent ?? "")).toEqual(
-      expect.arrayContaining(["Full quality", "quicker"]),
-    );
+    expect(retiredIn(drawn())).toEqual(expect.arrayContaining(["Full quality", "quicker"]));
   });
 
   it("names a faster setting where the app will use the processor's lighter one", async () => {
     vi.mocked(decideExportEncoder).mockResolvedValue(lighter());
     render(dialog({ quickRoute: false }));
     expect(await screen.findByText(FASTER_SETTING_LINE)).toBeVisible();
-    expect(retiredIn(document.body.textContent ?? "")).toContain("faster setting");
+    expect(retiredIn(drawn())).toContain("faster setting");
   });
 });
 
@@ -166,87 +169,95 @@ describe("the new view reads none of the older names", () => {
     { name: "the app's answer wants the Mode row", decide: withRow },
     { name: "the app will use the lighter setting", decide: lighter },
     { name: "the app has nothing to say", decide: decision },
-  ])("draws no older name in any state of the view, Fast picked and the door open included: $name", async ({ decide }) => {
-    vi.mocked(decideExportEncoder).mockResolvedValue(decide());
-    const user = userEvent.setup();
-    render(dialog());
-    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
-    await settle();
-    const states: { name: string; enter: () => Promise<void>; holds: () => void }[] = [
-      {
-        name: "Quality, the door closed",
-        enter: async () => undefined,
-        holds: () => {
-          expect(qualityRadio()).toBeChecked();
-          expect(door()).toHaveAttribute("aria-expanded", "false");
-        },
-      },
-      {
-        name: "Quality, the door open",
-        enter: () => user.click(door()),
-        holds: () => expect(door()).toHaveAttribute("aria-expanded", "true"),
-      },
-      {
-        name: "Fast, the door open",
-        enter: () => user.click(fastRadio()),
-        holds: () => {
-          expect(fastRadio()).toBeChecked();
-          expect(door()).toHaveAttribute("aria-expanded", "true");
-          expect(drawn()).toContain("One size smaller, Medium quality."); // Fast's own line is on the page
-        },
-      },
-      {
-        name: "Fast, the door closed",
-        enter: () => user.click(door()),
-        holds: () => {
-          expect(fastRadio()).toBeChecked();
-          expect(door()).toHaveAttribute("aria-expanded", "false");
-        },
-      },
-      {
-        name: "Quality picked back, the door closed",
-        enter: () => user.click(qualityRadio()),
-        holds: () => expect(qualityRadio()).toBeChecked(),
-      },
-    ];
-    for (const { name, enter, holds } of states) {
-      await enter();
+  ])(
+    "draws no older name in any state of the view, Fast picked and the door open included: $name",
+    async ({ decide }) => {
+      vi.mocked(decideExportEncoder).mockResolvedValue(decide());
+      const user = userEvent.setup();
+      render(dialog());
+      await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
       await settle();
-      holds();
-      expect(retiredIn(drawn()), name).toEqual([]);
-      expect(screen.queryByRole("radiogroup", { name: "export mode" }), name).toBeNull();
-      expect(screen.queryByRole("radio", { name: "Full quality" }), name).toBeNull();
-    }
-  });
+      const states: { name: string; enter: () => Promise<void>; holds: () => void }[] = [
+        {
+          name: "Quality, the door closed",
+          enter: async () => undefined,
+          holds: () => {
+            expect(qualityRadio()).toBeChecked();
+            expect(door()).toHaveAttribute("aria-expanded", "false");
+          },
+        },
+        {
+          name: "Quality, the door open",
+          enter: () => user.click(door()),
+          holds: () => expect(door()).toHaveAttribute("aria-expanded", "true"),
+        },
+        {
+          name: "Fast, the door open",
+          enter: () => user.click(fastRadio()),
+          holds: () => {
+            expect(fastRadio()).toBeChecked();
+            expect(door()).toHaveAttribute("aria-expanded", "true");
+            expect(drawn()).toContain("One size smaller, Medium quality."); // Fast's own line is on the page
+          },
+        },
+        {
+          name: "Fast, the door closed",
+          enter: () => user.click(door()),
+          holds: () => {
+            expect(fastRadio()).toBeChecked();
+            expect(door()).toHaveAttribute("aria-expanded", "false");
+          },
+        },
+        {
+          name: "Quality picked back, the door closed",
+          enter: () => user.click(qualityRadio()),
+          holds: () => expect(qualityRadio()).toBeChecked(),
+        },
+      ];
+      for (const { name, enter, holds } of states) {
+        await enter();
+        await settle();
+        holds();
+        expect(retiredIn(drawn()), name).toEqual([]);
+        expect(screen.queryByRole("radiogroup", { name: "export mode" }), name).toBeNull();
+        expect(screen.queryByRole("radio", { name: "Full quality" }), name).toBeNull();
+      }
+    },
+  );
 
   it.each([
     { name: "Quality", fast: false },
     { name: "Fast", fast: true },
-  ])("draws no older name while an export runs, after it, or after it failed, with $name picked", async ({ fast }) => {
-    const user = userEvent.setup();
-    render(dialog());
-    await settle();
-    if (fast) await user.click(fastRadio());
-    act(() => useExportJob.getState().begin(null));
-    act(() => useExportJob.getState().update({ phase: "rendering", fraction: 0.4 }));
-    expect(screen.getByTestId("export-status")).toBeInTheDocument();
-    expect(retiredIn(drawn())).toEqual([]);
-    act(() => useExportJob.getState().finish({ phase: "done", fraction: 1, savedTo: "film.mp4" }));
-    expect(screen.getByText(/film\.mp4/)).toBeInTheDocument();
-    expect(retiredIn(drawn())).toEqual([]);
-    cleanup();
-    useExportJob.getState().reset();
+  ])(
+    "draws no older name while an export runs, after it, or after it failed, with $name picked",
+    async ({ fast }) => {
+      const user = userEvent.setup();
+      render(dialog());
+      await settle();
+      if (fast) await user.click(fastRadio());
+      act(() => useExportJob.getState().begin(null));
+      act(() => useExportJob.getState().update({ phase: "rendering", fraction: 0.4 }));
+      expect(screen.getByTestId("export-status")).toBeInTheDocument();
+      expect(retiredIn(drawn())).toEqual([]);
+      act(() =>
+        useExportJob.getState().finish({ phase: "done", fraction: 1, savedTo: "film.mp4" }),
+      );
+      expect(screen.getByText(/film\.mp4/)).toBeInTheDocument();
+      expect(retiredIn(drawn())).toEqual([]);
+      cleanup();
+      useExportJob.getState().reset();
 
-    render(dialog());
-    await settle();
-    if (fast) await user.click(fastRadio());
-    act(() => useExportJob.getState().begin(null));
-    act(() =>
-      useExportJob
-        .getState()
-        .finish({ phase: "failed", error: "the encoder said no clips to render" }),
-    );
-    expect(screen.getByTestId("export-error")).toBeInTheDocument();
-    expect(retiredIn(drawn())).toEqual([]);
-  });
+      render(dialog());
+      await settle();
+      if (fast) await user.click(fastRadio());
+      act(() => useExportJob.getState().begin(null));
+      act(() =>
+        useExportJob
+          .getState()
+          .finish({ phase: "failed", error: "the encoder said no clips to render" }),
+      );
+      expect(screen.getByTestId("export-error")).toBeInTheDocument();
+      expect(retiredIn(drawn())).toEqual([]);
+    },
+  );
 });
