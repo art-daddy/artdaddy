@@ -1,4 +1,4 @@
-// Properties of the Quality | Fast view's pure model over every project and every value its lists can show (decisions D8 and D16): the line under the door, the Frame rate list that offers Fast's own
+// Properties of the Quality | Fast view's pure model over every project and every value its lists can show: the line under the door (built from the values that are shown), the Frame rate list that offers Fast's own
 // rate, and what is sent after the project changed under a pick. The oracle is written here from first principles and calls nothing of the product (no `quickSettings`, no `summaryFor`): the short sides
 // of the size presets (2160, 1440, 1080, 720, 480), Fast's ladder (2160, 1080, 720, 480), the cap of 30 frames a second, a rate halved for as long as it stays whole, and the even sides the render works
 // at. The first tests hold the oracle to the product on the quantities everything else leans on (what Fast starts on, what the lists offer), so a disagreement shows there and not behind a wrong line.
@@ -100,9 +100,18 @@ const says = {
     f.fps > CAP && (shown.fps ?? Math.trunc(f.fps)) <= CAP,
 };
 
-/** What a person reading the line can tell: its clauses in order, how it starts and ends, a word about the encoder, and every number in it. */
+/** A word about the encoder, the graphics chip or the compression: the line says none (the app decides the encoder when the export starts). */
 const FORBIDDEN = /compression|chip|graphics|processor|faster|quick|full/i;
-const readLine = (line: string) => ({
+
+/** What a person reading the line can tell: its clauses in order, how it starts and ends, a word about the encoder, and every number in it. */
+interface LineReading {
+  clauses: string[];
+  startsWithCapital: boolean;
+  oneFinalFullStop: boolean;
+  aWordAboutTheEncoder: boolean;
+  numbers: string[];
+}
+const readLine = (line: string): LineReading => ({
   clauses: line
     .slice(0, -1)
     .split(", ")
@@ -124,7 +133,7 @@ const readLine = (line: string) => ({
 });
 
 /** What the line must read as for these shown values, by the rules above. The clauses come in a fixed order and the shown quality's name is always the last. */
-const expectedReading = (f: ProjectFacts, shown: Levers): ReturnType<typeof readLine> => ({
+const expectedReading = (f: ProjectFacts, shown: Levers): LineReading => ({
   clauses: [
     ...(says.projectSizeAndRate(shown) ? ["own"] : []),
     ...(says.oneSizeSmaller(f, shown) ? ["smaller"] : []),
@@ -305,7 +314,7 @@ describe("rateEntriesFor: the Frame rate list of a dialog that offers Fast", () 
   });
 });
 
-describe("summaryFor over every project and every shown value the lists offer (decision D16)", () => {
+describe("summaryFor over every project and every shown value the lists offer", () => {
   it("holds every rule of the line for every size, every rate (Fast's own among them) and every quality of the lists", () => {
     fc.assert(
       fc.property(project, (f) => {

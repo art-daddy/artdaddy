@@ -53,7 +53,7 @@ interface Project {
   project: ProjectFacts | null;
   /** What Fast starts on (table 3.1, "Fast shows"). */
   fast: Levers;
-  /** The line under the door while Fast's own values are shown, written out from the rules of the line (decision D16); empty where there is no project. */
+  /** The line under the door while Fast's own values are shown, written out from the rules of the line; empty where there is no project. */
   fastLine: string;
   /** The Resolution list's values, in order. */
   sizes: ExportResolution[];
@@ -1031,7 +1031,7 @@ describe("payloadFor: what onStart is handed (table 3.5, rows 1 to 13)", () => {
   );
 });
 
-describe("summaryFor: the line under the door says what the shown values will do (decision D16)", () => {
+describe("summaryFor: the line under the door says what the shown values will do", () => {
   it("says the project's own size and rate at Medium for Quality's own values, on every project", () => {
     for (const row of PROJECTS)
       expect(summaryFor(ownLevers("quality", row.project), row.project)).toBe(

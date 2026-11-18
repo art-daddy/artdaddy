@@ -452,7 +452,7 @@ describe("T16 (3) the old help guard is left alone", () => {
 
 // ---- the retired names (src/test/retiredNames.ts), and the question that no screen draws ----
 
-/** The two sentences of the question "Are you sure?" that still say "quicker". The question is not built (decision D3), so no screen draws them: until it is, nothing may read them, nor the builders that return them. */
+/** The two sentences of the question "Are you sure?" that still say "quicker". The question is not built, so no screen draws them: until it is, nothing may read them, nor the builders that return them. */
 const QUESTION_SENTENCES: readonly string[] = ["questionQuicker", "questionOwnSettings"];
 const QUESTION_READERS: readonly string[] = [
   ...QUESTION_SENTENCES,
@@ -551,7 +551,7 @@ describe("T16 (4) no word of the dialog carries a retired name, except the two s
     );
     expect(
       mentions,
-      "the question is not built (decision D3): a screen that reads its sentences draws the retired name",
+      "the question is not built: a screen that reads its sentences draws the retired name",
     ).toEqual([]);
   });
 

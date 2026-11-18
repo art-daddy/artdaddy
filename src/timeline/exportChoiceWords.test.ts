@@ -165,7 +165,7 @@ describe("the Resolution and Frame rate entries", () => {
   });
 });
 
-describe("summaryWords: the line under the door (S11, S12, S13; decision D16)", () => {
+describe("summaryWords: the line under the door (S11, S12, S13), built from what is shown", () => {
   const line = (
     projectSizeAndRate: boolean,
     oneSizeSmaller: boolean,
