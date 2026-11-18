@@ -13,7 +13,7 @@ import {
   type ExportQuality,
 } from "./exportOptions";
 import type { Rung } from "./exportPlan";
-import { quickSettings } from "./exportRoute";
+import { QUICK_BUNDLE, isWeakPc, quickSettings } from "./exportRoute";
 import {
   PC_CLASSES,
   type EncoderFamily,
@@ -251,6 +251,8 @@ export function estimatesForRoutes(
       : null;
     let quick: HonestEstimate | null = null;
     if (gathered.flags.estimate_v2) {
+      // This prices the estimate design's Quick: a 1080p cap, 720p on a weak PC, as a ladder of the one rung. It is read only with estimate_v2 on, which this build holds off,
+      // and it is not the Fast bundle the app runs (exportRoute.ts: one rung below the project): price that one from `quickSettings` before this is ever turned on.
       const settingsOfQuick = quickSettings({
         canvas: { width: workload.width, height: workload.height, fps: workload.fps },
         requested: {
@@ -258,8 +260,8 @@ export function estimatesForRoutes(
           fps: typeof settings.fps === "number" ? settings.fps : undefined,
           quality,
         },
-        pcClass: gathered.cls,
         explicit: request.explicit,
+        bundle: { ...QUICK_BUNDLE, ladder: [isWeakPc(gathered.cls) ? "720p" : "1080p"] },
       });
       const picture = deliveredPicture(workload, {
         resolution: settingsOfQuick.resolution,

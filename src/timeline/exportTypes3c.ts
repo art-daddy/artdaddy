@@ -21,7 +21,8 @@ export const ROUTE_KINDS = ["standard", "quick"] as const;
 export type RouteKind = (typeof ROUTE_KINDS)[number];
 
 /** Why Quick was or was not on offer: preselected, offered, not offered because it would save under 25 %, because the export is a minute or less,
- *  because the person or the assistant set a size or rate, or because the remote switch is off. */
+ *  because the person or the assistant set a size or rate, or because the remote switch is off. The list is the report's vocabulary (the server accepts all six). The
+ *  rules of the Fast choice (exportRoute.ts) are not built on an estimate and answer only `offered` and `off`; the four others are kept, never produced there. */
 export const QUICK_OFFERS = [
   "selected",
   "offered",
@@ -90,10 +91,12 @@ export interface RouteEstimatesRequest {
   chipMaker: ChipMaker | null;
 }
 
-/** What the person or the assistant set explicitly. Quick never overrides a size or a frame rate that was set. */
+/** What the person or the assistant set explicitly. Quick never overrides a size, a frame rate or a quality that was set. */
 export interface ExplicitSettings {
   size: boolean;
   fps: boolean;
+  /** Absent for a caller that does not know it: a quality that may have been set is read as set, so nothing is ever taken from the person. */
+  quality?: boolean;
 }
 
 /** The remote switches the 3c modules read. A module takes this as a PARAMETER (never reads the flag store itself); one reader of the switches builds it.
