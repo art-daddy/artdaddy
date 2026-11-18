@@ -24,6 +24,7 @@ import {
   ff,
   installE2EDocuments,
   libRef,
+  meanVolumeDb,
   mkCtx,
   nodeFs,
   nodeRunner,
@@ -167,7 +168,6 @@ interface Shape {
 }
 interface Project {
   ctx: ClientToolContext;
-  shape: Shape;
   /** The names exported from it so far: one file each, so a name is never used twice. */
   names: Set<string>;
 }
@@ -198,7 +198,7 @@ async function project(shape: Shape): Promise<Project> {
     ctx,
   )) as Rec;
   expect(placed.ok, JSON.stringify(placed)).toBe(true);
-  return { ctx, shape, names: new Set() };
+  return { ctx, names: new Set() };
 }
 
 // What a delivered file says of itself, read back with ffprobe (not what the plan or the command promised).
@@ -504,12 +504,18 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
 
     expect(picture(quality)).toEqual({ width: 1280, height: 720, rate: 30 });
     near(quality.facts.frames, 60, 1, "Quality's frames");
+    const loud = await meanVolumeDb(quality.file);
+    expect(loud, "Quality's sound is not silence").toBeGreaterThan(-40);
     for (const fast of [dialog, slotOnly]) {
       expect(picture(fast), fast.name).toEqual({ width: 854, height: 480, rate: 30 });
       near(fast.facts.frames, 60, 1, `${fast.name}: frames`);
       expectSameVideo(quality, fast, 1 / 30);
+      // Fast changes the picture and not the sound: as audible, and as loud as Quality's.
+      expect(await meanVolumeDb(fast.file), `${fast.name}: the sound`).toBeCloseTo(loud, 0);
       await expectSamePicture(quality, fast);
     }
+    await expectEncoder(dialog, { fast: true });
+    await expectEncoder(slotOnly, { fast: true, chipOff: true });
   });
 
   it("B. a 60 fps project: Fast delivers 30 fps and about half the frames, Quality keeps 60", async () => {
@@ -533,6 +539,9 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
       near(fast.facts.frames, quality.facts.frames / 2, 2, `${fast.name}: half of Quality's`);
       expectSameVideo(quality, fast, 1 / 30);
     }
+    await expectEncoder(slotOnly.auto, { fast: true });
+    await expectEncoder(slotOnly.off, { fast: true, chipOff: true });
+    await expectEncoder(dialog, { fast: true });
   });
 
   it("C. a vertical project: the short side goes one rung down (720x1280 gives 480x854)", async () => {
@@ -546,6 +555,7 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
     near(fast.facts.frames, 60, 1, "Fast's frames");
     expectSameVideo(quality, fast, 1 / 30);
     await expectSamePicture(quality, fast);
+    await expectEncoder(fast, { fast: true });
   });
 
   it("D. what the person set stays: a size and a rate are never overridden, and a slot nobody can read is not believed", async () => {
