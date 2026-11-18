@@ -1,7 +1,7 @@
-// The Export dialog with the new settings view (design D2): the real view, the real stores, the dialog the menu bar hands `quickRoute` to. The 0.28.0 dialog (rendered without the prop) is the oracle for what is
-// sent. The dialog's own part of the hand-over (what it draws around the view, when it takes the view away) is also held with a stand-in view in ExportDialog.quickRouteWiring.test.tsx; here the view is the whole screen.
-// The words are written out here, never read from the words file.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+// The Export dialog with the new settings view (design D2): the real view, the real stores, the dialog the menu bar hands `quickRoute` to. The 0.28.0 dialog (rendered without the prop) is the oracle for what Quality
+// sends; Fast adds its route, and the row that chooses between them is drawn by the view and by nothing else. The dialog's own part of the hand-over (what it draws around the view, when it takes the view away) is
+// also held with a stand-in view in ExportDialog.quickRouteWiring.test.tsx; here the view is the whole screen. The words are written out here, never read from the words file.
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -404,5 +404,220 @@ describe("Escape, with the new view", () => {
     view.rerender(dialog({ onCancel, open: false }));
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onCancel).not.toHaveBeenCalled();
+  });
+});
+
+// The Quality | Fast row: what the view hands the host for each choice, and what the dialog does around a Fast that was picked (an opening, a render, Escape, no prop). Fast starts on its own values for this
+// project (1920 x 1080 at 30: 720p, the project's own rate, Medium) and marks as the person's exactly what they touched.
+const fastRadio = () => screen.getByRole("radio", { name: "Fast" });
+const qualityRadio = () => screen.getByRole("radio", { name: "Quality" });
+const choiceRow = () => screen.queryByRole("radiogroup", { name: "export choice" });
+const FAST_OWN = { resolution: "720p", quality: "medium", fps: null, mode: null };
+const NOTHING_TOUCHED = { size: false, fps: false, quality: false };
+
+describe("the Quality | Fast row, with the real view", () => {
+  it("is drawn first in the settings, Quality checked and Fast not, before the Resolution row and the door; the 0.28.0 Mode row is not drawn", () => {
+    render(dialog());
+    const row = choiceRow()!;
+    expect(within(row).getAllByRole("radio")).toHaveLength(2);
+    expect(within(row).getByRole("radio", { name: "Quality" })).toBeChecked();
+    expect(within(row).getByRole("radio", { name: "Fast" })).not.toBeChecked();
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    expect(row.compareDocumentPosition(resolutionBox()) & FOLLOWING).toBeTruthy();
+    expect(row.compareDocumentPosition(door()) & FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "export mode" })).toBeNull();
+  });
+
+  it("hands the host Fast's own values, no mode, and the route with nothing marked as picked", async () => {
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    render(dialog({ onStart }));
+    await settle();
+    await user.click(fastRadio());
+    expect(resolutionBox()).toHaveDisplayValue("720p");
+    expect(rateBox()).toHaveDisplayValue("Same as project (30 fps)");
+    expect(qualityBox()).toHaveDisplayValue("Medium");
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onStart.mock.calls[0][0]).toStrictEqual({
+      ...FAST_OWN,
+      route: { route: "quick", explicit: NOTHING_TOUCHED },
+    });
+    expect(useExportJob.getState().modeRowOnScreen).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "the size",
+      pick: async (user: ReturnType<typeof userEvent.setup>) =>
+        user.selectOptions(resolutionBox(), "480p"),
+      sent: { resolution: "480p", quality: "medium", fps: null, mode: null },
+      explicit: { size: true, fps: false, quality: false },
+    },
+    {
+      name: "the quality",
+      pick: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(door());
+        await user.selectOptions(qualityBox(), "High");
+      },
+      sent: { resolution: "720p", quality: "high", fps: null, mode: null },
+      explicit: { size: false, fps: false, quality: true },
+    },
+    {
+      name: "the frame rate",
+      pick: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(door());
+        await user.selectOptions(rateBox(), "24 fps");
+      },
+      sent: { resolution: "720p", quality: "medium", fps: 24, mode: null },
+      explicit: { size: false, fps: true, quality: false },
+    },
+    {
+      name: "all three",
+      pick: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.selectOptions(resolutionBox(), "480p");
+        await user.click(door());
+        await user.selectOptions(qualityBox(), "Low");
+        await user.selectOptions(rateBox(), "25 fps");
+      },
+      sent: { resolution: "480p", quality: "low", fps: 25, mode: null },
+      explicit: { size: true, fps: true, quality: true },
+    },
+  ])("marks as the person's exactly what they touched on Fast: $name", async ({ pick, sent, explicit }) => {
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    render(dialog({ onStart }));
+    await settle();
+    await user.click(fastRadio());
+    await pick(user);
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    expect(onStart.mock.calls[0][0]).toStrictEqual({ ...sent, route: { route: "quick", explicit } });
+  });
+
+  it("sends no route for Quality, and for Fast and then Quality again, with the project's own values back: the same object as the 0.28.0 dialog", async () => {
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    render(dialog({ onStart }));
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    expect(onStart.mock.calls[0][0]).toStrictEqual({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: null,
+    });
+
+    onStart.mockClear();
+    await user.click(fastRadio());
+    await user.selectOptions(resolutionBox(), "480p");
+    await user.click(qualityRadio());
+    expect(resolutionBox()).toHaveDisplayValue("Same as project (1920 x 1080)");
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    expect(onStart.mock.calls[0][0]).toStrictEqual({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: null,
+    });
+    expect("route" in onStart.mock.calls[0][0]).toBe(false);
+  });
+
+  it("opens on Quality with the project's own settings and the door closed, after the dialog was closed with Fast picked and settings changed", async () => {
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    const view = render(dialog({ onStart }));
+    await user.click(fastRadio());
+    await user.selectOptions(resolutionBox(), "480p");
+    await user.click(door());
+    await user.selectOptions(qualityBox(), "High");
+    expect(fastRadio()).toBeChecked();
+
+    view.rerender(dialog({ onStart, open: false }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(dialog({ onStart }));
+    expect(qualityRadio()).toBeChecked();
+    expect(fastRadio()).not.toBeChecked();
+    expectFreshOpening();
+
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    expect(onStart.mock.calls[0][0]).toStrictEqual({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: null,
+    });
+  });
+
+  it("draws the progress and no row while a render runs under an open dialog with Fast picked, and the row is back on Quality once the result is closed", async () => {
+    const user = userEvent.setup();
+    render(dialog());
+    await user.click(fastRadio());
+    expect(fastRadio()).toBeChecked();
+
+    act(() => useExportJob.getState().begin(null));
+    act(() => useExportJob.getState().update({ phase: "rendering", fraction: 0.5 }));
+    expect(choiceRow()).toBeNull();
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.getByRole("progressbar", { name: "export progress" })).toBeInTheDocument();
+
+    act(() => useExportJob.getState().finish({ phase: "done", fraction: 1, savedTo: "film.mp4" }));
+    expect(choiceRow()).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(qualityRadio()).toBeChecked();
+    expect(fastRadio()).not.toBeChecked();
+    expectFreshOpening();
+  });
+
+  it("draws the progress and no row for a render that is already going when the dialog opens", () => {
+    useExportJob.getState().begin(null);
+    useExportJob.getState().update({ phase: "rendering", fraction: 0.1 });
+    render(dialog());
+    expect(choiceRow()).toBeNull();
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.getByRole("progressbar", { name: "export progress" })).toBeInTheDocument();
+  });
+
+  it("Escape with Fast picked hides the dialog and starts nothing; with a render running it never aborts the render", async () => {
+    const user = userEvent.setup();
+    const abort = vi.fn();
+    const onCancel = vi.fn();
+    const onStart = vi.fn();
+    render(dialog({ onCancel, onStart }));
+    await user.click(fastRadio());
+    await user.keyboard("{Escape}"); // the focus is on the Fast radio
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onStart).not.toHaveBeenCalled();
+
+    act(() => useExportJob.getState().begin(abort));
+    act(() => useExportJob.getState().update({ phase: "rendering", fraction: 0.4 }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(abort, "Escape killed a running render").not.toHaveBeenCalled();
+    expect(useExportJob.getState().phase).toBe("rendering");
+  });
+
+  it("is not drawn by the dialog without the prop, though the unit suite has the switch on, whatever the app says about the encoder", async () => {
+    expect(exportFlag("quick_route")).toBe(true);
+    const view = render(dialog({ quickRoute: undefined }));
+    await settle();
+    expect(choiceRow()).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Fast" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Quality" })).toBeNull();
+    view.unmount();
+
+    // The 0.28.0 Mode row has a radio of its own named Fast, where a chip has passed: it is that row's, and the choice row is still not there.
+    vi.mocked(decideExportEncoder).mockResolvedValue({
+      ...decision(),
+      showRow: true,
+      defaultMode: "fast",
+      reason: "over_minute",
+      fullSeconds: 720,
+      fastSeconds: 240,
+      facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
+    });
+    render(dialog({ quickRoute: undefined }));
+    expect(await screen.findByRole("radiogroup", { name: "export mode" })).toBeInTheDocument();
+    expect(choiceRow()).toBeNull();
   });
 });
