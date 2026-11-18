@@ -1,7 +1,9 @@
 // T2 of the D2 UI spec (section 5, invariant I2): Quality sends what 0.28.0 sends. The 0.28.0 dialog (`ExportDialog` rendered WITHOUT the prop `quickRoute`) is the frozen oracle: every scenario runs through it and
 // through the new settings view with the same PC, the same answer of the app, the same chip row and the same picks, Export is pressed in each, and what `onStart` received is compared (strictly: a `route` key, even an
 // undefined one, is a difference). The old Mode row is never drawn in the new view, so what the export job store says about it (`modeRowOnScreen`) differs on purpose in exactly the scenarios where 0.28.0 draws the row.
-// Mutants this file must kill: `mode` computed as if a Mode row were drawn; the chip row unmounted behind the closed door; `modeRowOnScreen` left unset or true; a pick not sent; a `route` key on the object.
+// Mutants this file must kill: `mode` computed as if a Mode row were drawn; the chip row unmounted behind the closed door; `modeRowOnScreen` left unset or true; a pick not sent; a `route` key on the object;
+// an answer that counts after the history of this PC's exports changed under it (`answer.history === calibrations` dropped); one that counts after the person changed the Graphics chip switch (`chipEpoch` left out
+// of the question's key).
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +20,7 @@ import { useExportJob } from "../store/exportJob";
 import { amd, harness } from "../test/chipHarness";
 import { __resetChipTests } from "../timeline/chipTest";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
+import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 import type { RenderWorkload } from "../timeline/renderPlan";
 import ExportDialog, { type ExportSettings } from "./ExportDialog";
 import ExportSettingsView from "./ExportSettingsView";
@@ -117,6 +120,20 @@ const sized = (width: number, height: number, fps: number): RenderWorkload => ({
 const UHD_60 = sized(3840, 2160, 60);
 const SD_30 = sized(854, 480, 30);
 
+/** One run this PC has measured for the project above: what the history of exports holds after a background export (the shape the 0.28.0 dialog's own tests use). */
+const EARLIER_EXPORT: ExportCalibration = {
+  workload: PROJECT,
+  output: { width: 1920, height: 1080, fps: 30 },
+  quality: "medium",
+  engine: "file-sequence-v1",
+  encoder: "x264-crf",
+  revision: EXPORT_SPEED_REVISION,
+  elapsedSeconds: 150,
+  finalBytes: 48_000_000,
+  memoryBytes: null,
+  temporaryBytes: null,
+};
+
 /** What an untouched Export sends: the project's own size and rate at Medium, and `mode` as the app's look leaves it. */
 const sent = (over: Partial<ExportSettings> = {}): ExportSettings => ({
   resolution: "source",
@@ -144,11 +161,18 @@ interface Scenario {
   adapters: GraphicsAdapter[];
   /** The app's answer to the encoder look, as often as it is asked. */
   look: () => Promise<ExportEncoderDecision>;
+  /** What the app says to every question after the first (the first is `look`'s): the answer in hand is then for settings, a history or a chip switch that have since changed. */
+  thenLook?: () => Promise<ExportEncoderDecision>;
+  /** Something that happens after the app has answered and before Export is pressed. */
+  between?: Between;
   /** The chip row's first look waits until it is released after the first press: one press in the gap, one after. */
   chipGate?: boolean;
   picks?: Picks;
   presses: Press[];
 }
+
+/** The history of this PC's exports gets a new record, or the person switches the Graphics chip Off. */
+type Between = "history" | "chip-off";
 
 const answers = (decided: () => ExportEncoderDecision) => async () => decided();
 const never = () => new Promise<ExportEncoderDecision>(() => undefined);
@@ -323,6 +347,24 @@ const SCENARIOS: Scenario[] = [
     picks: { size: "1080p" },
     presses: [{ sent: sent({ resolution: "1080p" }), legacyDrawsModeRow: false }],
   },
+  {
+    name: "the history of this PC's exports changes after the app has answered, and Export is pressed before it answers again",
+    workload: PROJECT,
+    adapters: [],
+    look: answers(decision),
+    thenLook: never,
+    between: "history",
+    presses: [{ sent: sent({ mode: "quality" }), legacyDrawsModeRow: false }],
+  },
+  {
+    name: "the person switches the Graphics chip Off after the app has answered, and Export is pressed before it answers again",
+    workload: PROJECT,
+    adapters: [amd],
+    look: answers(decision),
+    thenLook: never,
+    between: "chip-off",
+    presses: [{ sent: sent({ mode: "quality" }), legacyDrawsModeRow: false }],
+  },
 ];
 
 /** The settings object has these four keys and no others: no `route`, not even an undefined one. */
@@ -358,6 +400,18 @@ async function pick(user: User, side: Side, picks: Picks): Promise<void> {
   }
 }
 
+/** What happens between the app's answer and the press of Export: on both sides the answer in hand is then stale, and the new question is out. The chip switch is behind the door in the new view and in the settings block of 0.28.0. */
+async function happen(user: User, side: Side, what: Between): Promise<void> {
+  if (what === "history") {
+    await act(async () => {
+      useExportJob.setState({ calibrations: [EARLIER_EXPORT] });
+    });
+    return;
+  }
+  if (side === "view") await user.click(screen.getByRole("button", { name: "Advanced settings" }));
+  await user.click(await screen.findByRole("radio", { name: "Off" }));
+}
+
 /** One side of a scenario from a clean PC and clean stores: shown, settled, picked, then Export pressed once (twice in the gap scenario). */
 async function play(side: Side, scenario: Scenario): Promise<Played[]> {
   cleanup();
@@ -374,8 +428,11 @@ async function play(side: Side, scenario: Scenario): Promise<Played[]> {
       })
     : undefined;
   pcWith(scenario.adapters, gate);
+  let asked = 0;
   vi.mocked(decideExportEncoder).mockReset();
-  vi.mocked(decideExportEncoder).mockImplementation(scenario.look);
+  vi.mocked(decideExportEncoder).mockImplementation(() =>
+    asked++ > 0 && scenario.thenLook ? scenario.thenLook() : scenario.look(),
+  );
 
   const onStart = vi.fn<(settings: ExportSettings) => void>();
   render(
@@ -391,6 +448,10 @@ async function play(side: Side, scenario: Scenario): Promise<Played[]> {
   const user = userEvent.setup();
   if (scenario.picks) {
     await pick(user, side, scenario.picks);
+    await settleAll();
+  }
+  if (scenario.between) {
+    await happen(user, side, scenario.between);
     await settleAll();
   }
 
