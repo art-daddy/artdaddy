@@ -9,6 +9,7 @@ import {
   FAILURE_TEXTS,
   REASONS_WITHOUT_TEXT,
 } from "../test/failureTexts";
+import { NO_TIME_LEFT, type TimeLeft } from "./exportTimeLeft";
 import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
   canSaveElsewhere,
@@ -50,6 +51,8 @@ const live = (over: Partial<LiveFacts> = {}): LiveFacts => ({
   lastMoveAt: T0,
   ...over,
 });
+// What the rule (exportTimeLeft.ts) publishes for a render with 4 minutes left: 240 s is a figure of its rounding grid, and reads "about 4 min".
+const FOUR_MIN: TimeLeft = { kind: "left", seconds: 240 };
 const garbage = [Number.NaN, Number.POSITIVE_INFINITY, -5, 0, 1e18] as const;
 
 describe("when the card says there is no progress", () => {
@@ -92,15 +95,15 @@ describe("the step an export is at, in words", () => {
 
 describe("the status line", () => {
   it("tells a fresh render's stage, how far it is and how long is left", () => {
-    expect(describeLiveStatus(live(), T0 + 20_000)).toBe(
+    expect(describeLiveStatus(live({ timeLeft: FOUR_MIN }), T0 + 20_000)).toBe(
       "Rendering and encoding · 52% · about 4 min left",
     );
   });
 
   it("says 'still working' with the minutes in once a minute has passed, so the line changes at least every minute", () => {
-    expect(describeLiveStatus(live({ lastMoveAt: T0 + 170_000 }), T0 + 185_000)).toBe(
-      "Still working · 3 min in · Rendering and encoding · 52% · about 4 min left",
-    );
+    expect(
+      describeLiveStatus(live({ lastMoveAt: T0 + 170_000, timeLeft: FOUR_MIN }), T0 + 185_000),
+    ).toBe("Still working · 3 min in · Rendering and encoding · 52% · about 4 min left");
   });
 
   it("says it too while the file is being checked or saved, which also go on for minutes on a long export", () => {
@@ -743,15 +746,27 @@ describe("what an export is expected to take, in words", () => {
 
 describe("what the Export dialog says about its own export", () => {
   const own = (over: Partial<LiveFacts> = {}, speed = 2.1) => ({ ...live(over), speed });
-  // The dialog's own job, which is all it has before its export has an id, and which any export's progress can move.
-  const job = { phase: "rendering" as const, fraction: 0.8, etaSec: 5, speed: 3 };
+  // The dialog's own job, which is all it has before its export has an id, and which any export's progress can move. Its answer is another
+  // export's ("under a minute left"): a panel that read it for an export with its own feed would say it, so every test below that expects the
+  // feed's own words also shows it was the feed that was read.
+  const job = {
+    phase: "rendering" as const,
+    fraction: 0.8,
+    timeLeft: { kind: "left", seconds: 30 } as TimeLeft,
+    speed: 3,
+  };
 
   it("names the stage of the export's own feed with how far it is, and gives the speed and time left", () => {
-    expect(describeDialogProgress({ own: own(), place: null, ...job }, T0 + 20_000)).toEqual({
+    expect(
+      describeDialogProgress(
+        { own: own({ timeLeft: FOUR_MIN }), place: null, ...job },
+        T0 + 20_000,
+      ),
+    ).toEqual({
       status: "Rendering and encoding · 52%",
       fraction: 0.52,
       speed: 2.1,
-      left: 240,
+      timeLeft: "about 4 min left",
     });
   });
 
@@ -767,22 +782,29 @@ describe("what the Export dialog says about its own export", () => {
 
   it("says it is working, with the minutes in, as the card does, and when the render stops moving", () => {
     const at = (now: number, facts: Partial<LiveFacts> = {}) =>
-      describeDialogProgress({ own: own(facts), place: null, ...job }, now);
+      describeDialogProgress(
+        { own: own({ timeLeft: FOUR_MIN, ...facts }), place: null, ...job },
+        now,
+      );
     expect(at(T0 + 185_000, { lastMoveAt: T0 + 170_000 }).status).toBe(
       "Still working · 3 min in · Rendering and encoding · 52%",
     );
     const stuck = at(T0 + 90_000);
     expect(stuck.status).toBe("No progress for 90 s · Rendering and encoding · 52%");
-    expect(stuck.left).toBeNull(); // no time left is promised for a render that is not moving
+    expect(stuck.timeLeft).toBe(""); // no time left is promised for a render that is not moving, whatever the rule last said
+    expect(at(T0 + 20_000).timeLeft).toBe("about 4 min left"); // the same feed, while it moves, does say it
   });
 
   it("gives no speed or time left outside the render", () => {
     for (const stage of ["preparing", "checking", "saving"] as const)
       expect(
-        describeDialogProgress({ own: own({ stage }), place: null, ...job }, T0 + 20_000),
+        describeDialogProgress(
+          { own: own({ stage, timeLeft: FOUR_MIN }), place: null, ...job },
+          T0 + 20_000,
+        ),
       ).toMatchObject({
         speed: null,
-        left: null,
+        timeLeft: "",
       });
   });
 
@@ -793,7 +815,7 @@ describe("what the Export dialog says about its own export", () => {
       status: "Waiting · 2nd in line",
       fraction: null, // the bar is not 80% either
       speed: null,
-      left: null,
+      timeLeft: "", // and no time left of the other export
     });
   });
 
@@ -802,42 +824,62 @@ describe("what the Export dialog says about its own export", () => {
     const said = (
       phase: "preparing" | "rendering",
       fraction: number | null,
-      etaSec: number | null,
+      timeLeft: TimeLeft,
       speed: number,
-    ) => describeDialogProgress({ ...none, phase, fraction, etaSec, speed }, T0);
-    expect(said("preparing", null, null, 0)).toEqual({
+    ) => describeDialogProgress({ ...none, phase, fraction, timeLeft, speed }, T0);
+    expect(said("preparing", null, NO_TIME_LEFT, 0)).toEqual({
       status: "Preparing…",
       fraction: null,
       speed: null,
-      left: null,
+      timeLeft: "",
     });
-    expect(said("rendering", null, null, 0).status).toBe("Starting…");
-    expect(said("rendering", 0.42, 90, 2)).toEqual({
+    expect(said("rendering", null, NO_TIME_LEFT, 0).status).toBe("Starting…");
+    // 120 s is the figure of the rounding grid that a job 90 s from its end is told (the grid has no 90).
+    expect(said("rendering", 0.42, { kind: "left", seconds: 120 }, 2)).toEqual({
       status: "42%",
       fraction: 0.42,
       speed: 2,
-      left: 90,
+      timeLeft: "about 2 min left",
     });
   });
 
   it("is never a half-made sentence, whatever the numbers are", () => {
+    // What the job or the feed may hold: the rule's four answers, and what no rule would publish.
+    const answers = [
+      NO_TIME_LEFT,
+      { kind: "left", seconds: 30 },
+      FOUR_MIN,
+      { kind: "left", seconds: 4500 },
+      { kind: "finishing" },
+      { kind: "longer" },
+      ...garbage.map((seconds) => ({ kind: "left", seconds })),
+      { kind: "left", seconds: 90 },
+      { kind: "left" },
+      { kind: "later" },
+      null,
+      "left",
+    ] as unknown as TimeLeft[];
     for (const fraction of [...garbage, null, 0.5])
-      for (const etaSec of [...garbage, null, 90])
+      for (const timeLeft of answers)
         for (const speed of [...garbage, 2])
           for (const stage of ["queued", "preparing", "rendering", "checking", "saving"] as const)
             for (const [feed, place] of [
-              [own({ stage, fraction, etaSec, lastMoveAt: T0 + 399_000 }, speed), null],
+              [own({ stage, fraction, timeLeft, lastMoveAt: T0 + 399_000 }, speed), null],
               [null, 3],
               [null, null],
             ] as const) {
               const said = describeDialogProgress(
-                { own: feed, place, phase: "rendering", fraction, etaSec, speed },
+                { own: feed, place, phase: "rendering", fraction, timeLeft, speed },
                 T0 + 400_000,
               );
               expect(said.status).not.toMatch(/NaN|undefined|null|Infinity|-\d|\[object/);
               expect(said.status.length).toBeGreaterThan(0);
-              for (const n of [said.speed, said.left])
-                if (n !== null) expect(Number.isFinite(n) && n >= 0).toBe(true);
+              // The time left is words that are one of the rule's four, or nothing.
+              expect(said.timeLeft).toMatch(
+                /^(|under a minute left|about \d+ min left|about \d+ h( \d+ min)? left|Finishing|taking longer than expected)$/,
+              );
+              if (said.speed !== null)
+                expect(Number.isFinite(said.speed) && said.speed >= 0).toBe(true);
               if (said.fraction !== null)
                 expect(said.fraction >= 0 && said.fraction <= 1).toBe(true);
             }
