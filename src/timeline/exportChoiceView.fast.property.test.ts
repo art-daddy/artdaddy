@@ -481,9 +481,9 @@ describe("what is sent after the project changed under a pick (resolveChoice, pa
         const resolved = resolveChoice("fast", picks, after);
         const sent = payloadFor("fast", resolved.shown, resolved.kept, null);
         const where = JSON.stringify({ after, picks });
-        if (sent.route?.explicit.size)
-          expect(sizesOffered(after), where).toContain(sent.resolution);
-        if (sent.route?.explicit.fps && typeof sent.fps === "number") {
+        expect(sent.route?.explicit, where).toBeDefined();
+        if (sent.route?.explicit?.size) expect(sizesOffered(after), where).toContain(sent.resolution);
+        if (sent.route?.explicit?.fps && typeof sent.fps === "number") {
           expect(after, where).not.toBeNull();
           expect(sent.fps).toBeLessThan((after as ProjectFacts).fps);
         }
