@@ -117,7 +117,10 @@ const settle = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
 const setCanvas = (canvas: Canvas) =>
   useEditor.setState({
-    timeline: { ...emptyTimeline(), canvas: { width: canvas.w, height: canvas.h, fps: canvas.fps } },
+    timeline: {
+      ...emptyTimeline(),
+      canvas: { width: canvas.w, height: canvas.h, fps: canvas.fps },
+    },
   });
 /** What the dialog snapshotted when it opened. */
 const workloadOf = (canvas: Canvas): RenderWorkload => ({
@@ -232,9 +235,23 @@ const backToQuality = (canvas: Canvas, picks: string[] = []): Row => ({
 const ROWS: Row[] = [
   // 3840x2160 at 60: Fast is 1080p at 30. Rates listed below 60: 50, 30, 25, 24. Sizes: 1440p, 1080p, 720p, 480p.
   row("nothing set", UHD60, ["fast"], "", ["1080p", 30, "medium"], pic(1920, 1080, 30)),
-  row("size Same", UHD60, ["fast", SAME(UHD60)], "s", ["source", 30, "medium"], pic(3840, 2160, 30)),
+  row(
+    "size Same",
+    UHD60,
+    ["fast", SAME(UHD60)],
+    "s",
+    ["source", 30, "medium"],
+    pic(3840, 2160, 30),
+  ),
   row("size 720p", UHD60, ["fast", "size:720p"], "s", ["720p", 30, "medium"], pic(1280, 720, 30)),
-  row("rate Same", UHD60, ["fast", SAME_RATE(UHD60)], "f", ["1080p", 60, "medium"], pic(1920, 1080, 60)),
+  row(
+    "rate Same",
+    UHD60,
+    ["fast", SAME_RATE(UHD60)],
+    "f",
+    ["1080p", 60, "medium"],
+    pic(1920, 1080, 60),
+  ),
   row("rate 24", UHD60, ["fast", "rate:24 fps"], "f", ["1080p", 24, "medium"], pic(1920, 1080, 24)),
   row("quality High", UHD60, ["fast", "q:High"], "q", ["1080p", 30, "high"], pic(1920, 1080, 30)),
   row("quality Low", UHD60, ["fast", "q:Low"], "q", ["1080p", 30, "low"], pic(1920, 1080, 30)),
@@ -252,7 +269,14 @@ const ROWS: Row[] = [
   row("nothing set", HD30, ["fast"], "", ["720p", 30, "medium"], pic(1280, 720, 30)),
   row("size Same", HD30, ["fast", SAME(HD30)], "s", ["source", 30, "medium"], pic(1920, 1080, 30)),
   row("size 480p", HD30, ["fast", "size:480p"], "s", ["480p", 30, "medium"], pic(854, 480, 30)),
-  row("rate Same", HD30, ["fast", SAME_RATE(HD30)], "f", ["720p", 30, "medium"], pic(1280, 720, 30)),
+  row(
+    "rate Same",
+    HD30,
+    ["fast", SAME_RATE(HD30)],
+    "f",
+    ["720p", 30, "medium"],
+    pic(1280, 720, 30),
+  ),
   row("rate 24", HD30, ["fast", "rate:24 fps"], "f", ["720p", 24, "medium"], pic(1280, 720, 24)),
   row("quality High", HD30, ["fast", "q:High"], "q", ["720p", 30, "high"], pic(1280, 720, 30)),
   row("quality Low", HD30, ["fast", "q:Low"], "q", ["720p", 30, "low"], pic(1280, 720, 30)),
@@ -282,11 +306,46 @@ const ROWS: Row[] = [
   backToQuality(HD24),
   // 1080x1920 at 30, vertical: Fast is 720p at 30. Sizes: 720p, 480p. Rates: 25, 24.
   row("nothing set", VERTICAL30, ["fast"], "", ["720p", 30, "medium"], pic(720, 1280, 30)),
-  row("size Same", VERTICAL30, ["fast", SAME(VERTICAL30)], "s", ["source", 30, "medium"], pic(1080, 1920, 30)),
-  row("size 480p", VERTICAL30, ["fast", "size:480p"], "s", ["480p", 30, "medium"], pic(480, 854, 30)),
-  row("rate Same", VERTICAL30, ["fast", SAME_RATE(VERTICAL30)], "f", ["720p", 30, "medium"], pic(720, 1280, 30)),
-  row("rate 24", VERTICAL30, ["fast", "rate:24 fps"], "f", ["720p", 24, "medium"], pic(720, 1280, 24)),
-  row("quality High", VERTICAL30, ["fast", "q:High"], "q", ["720p", 30, "high"], pic(720, 1280, 30)),
+  row(
+    "size Same",
+    VERTICAL30,
+    ["fast", SAME(VERTICAL30)],
+    "s",
+    ["source", 30, "medium"],
+    pic(1080, 1920, 30),
+  ),
+  row(
+    "size 480p",
+    VERTICAL30,
+    ["fast", "size:480p"],
+    "s",
+    ["480p", 30, "medium"],
+    pic(480, 854, 30),
+  ),
+  row(
+    "rate Same",
+    VERTICAL30,
+    ["fast", SAME_RATE(VERTICAL30)],
+    "f",
+    ["720p", 30, "medium"],
+    pic(720, 1280, 30),
+  ),
+  row(
+    "rate 24",
+    VERTICAL30,
+    ["fast", "rate:24 fps"],
+    "f",
+    ["720p", 24, "medium"],
+    pic(720, 1280, 24),
+  ),
+  row(
+    "quality High",
+    VERTICAL30,
+    ["fast", "q:High"],
+    "q",
+    ["720p", 30, "high"],
+    pic(720, 1280, 30),
+  ),
   row("quality Low", VERTICAL30, ["fast", "q:Low"], "q", ["720p", 30, "low"], pic(720, 1280, 30)),
   row(
     "all three: 480p, 24, High",
@@ -304,9 +363,23 @@ const ROWS: Row[] = [
   backToQuality(SD24),
   // 1366x768 at 30, an odd size: Fast is 720p at 30 (1280x720). Sizes: 720p, 480p. Rates: 25, 24.
   row("nothing set", WXGA30, ["fast"], "", ["720p", 30, "medium"], pic(1280, 720, 30)),
-  row("size Same", WXGA30, ["fast", SAME(WXGA30)], "s", ["source", 30, "medium"], pic(1366, 768, 30)),
+  row(
+    "size Same",
+    WXGA30,
+    ["fast", SAME(WXGA30)],
+    "s",
+    ["source", 30, "medium"],
+    pic(1366, 768, 30),
+  ),
   row("size 480p", WXGA30, ["fast", "size:480p"], "s", ["480p", 30, "medium"], pic(854, 480, 30)),
-  row("rate Same", WXGA30, ["fast", SAME_RATE(WXGA30)], "f", ["720p", 30, "medium"], pic(1280, 720, 30)),
+  row(
+    "rate Same",
+    WXGA30,
+    ["fast", SAME_RATE(WXGA30)],
+    "f",
+    ["720p", 30, "medium"],
+    pic(1280, 720, 30),
+  ),
   row("rate 24", WXGA30, ["fast", "rate:24 fps"], "f", ["720p", 24, "medium"], pic(1280, 720, 24)),
   row("quality High", WXGA30, ["fast", "q:High"], "q", ["720p", 30, "high"], pic(1280, 720, 30)),
   row("quality Low", WXGA30, ["fast", "q:Low"], "q", ["720p", 30, "low"], pic(1280, 720, 30)),
@@ -321,9 +394,23 @@ const ROWS: Row[] = [
   backToQuality(WXGA30),
   // 2560x1440 at 50: Fast is 1080p at 25. Sizes: 1080p, 720p, 480p. Rates: 30, 25, 24.
   row("nothing set", QHD50, ["fast"], "", ["1080p", 25, "medium"], pic(1920, 1080, 25)),
-  row("size Same", QHD50, ["fast", SAME(QHD50)], "s", ["source", 25, "medium"], pic(2560, 1440, 25)),
+  row(
+    "size Same",
+    QHD50,
+    ["fast", SAME(QHD50)],
+    "s",
+    ["source", 25, "medium"],
+    pic(2560, 1440, 25),
+  ),
   row("size 720p", QHD50, ["fast", "size:720p"], "s", ["720p", 25, "medium"], pic(1280, 720, 25)),
-  row("rate Same", QHD50, ["fast", SAME_RATE(QHD50)], "f", ["1080p", 50, "medium"], pic(1920, 1080, 50)),
+  row(
+    "rate Same",
+    QHD50,
+    ["fast", SAME_RATE(QHD50)],
+    "f",
+    ["1080p", 50, "medium"],
+    pic(1920, 1080, 50),
+  ),
   row("rate 24", QHD50, ["fast", "rate:24 fps"], "f", ["1080p", 24, "medium"], pic(1920, 1080, 24)),
   row("quality High", QHD50, ["fast", "q:High"], "q", ["1080p", 25, "high"], pic(1920, 1080, 25)),
   row("quality Low", QHD50, ["fast", "q:Low"], "q", ["1080p", 25, "low"], pic(1920, 1080, 25)),
@@ -421,7 +508,10 @@ describe("A and B. the dialog's pick, through the real export tool, is the expor
 
           // (4) the record says route quick for Fast and has no route key otherwise.
           if (fast) {
-            expect([viaDialog.running.route, viaDialog.done.route], where).toEqual(["quick", "quick"]);
+            expect([viaDialog.running.route, viaDialog.done.route], where).toEqual([
+              "quick",
+              "quick",
+            ]);
           } else {
             expect(viaDialog.running, where).not.toHaveProperty("route");
             expect(viaDialog.done, where).not.toHaveProperty("route");
@@ -439,7 +529,12 @@ describe("A and B. the dialog's pick, through the real export tool, is the expor
     expect(settings).not.toHaveProperty("route");
     expect(callOf(settings).slot).toBeUndefined();
     const call = callOf(settings);
-    const seen = await observe({ canvas: UHD60, args: call.args, slot: call.slot, mode: call.mode });
+    const seen = await observe({
+      canvas: UHD60,
+      args: call.args,
+      slot: call.slot,
+      mode: call.mode,
+    });
     const old = await observe({
       canvas: UHD60,
       args: { resolution: "source", quality: "medium" },

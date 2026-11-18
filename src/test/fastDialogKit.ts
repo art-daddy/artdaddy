@@ -31,7 +31,11 @@ import { resetTestDocuments } from "./timelineKit";
 export type { Any };
 export type Canvas = { w: number; h: number; fps: number };
 export type Picture = { width: number; height: number; fps: number };
-export const pic = (width: number, height: number, fps: number): Picture => ({ width, height, fps });
+export const pic = (width: number, height: number, fps: number): Picture => ({
+  width,
+  height,
+  fps,
+});
 
 /** The tool call the menu bar makes of the settings the dialog hands over (`exportVideo` in MenuBar.tsx: the arguments, the dialog's own pick of the encoder as `exportMode`, and the
  *  route as the slot only where the settings carry one). The menu bar's own mapping is held to this one by MenuBar.fastWire.test.tsx. */
@@ -94,7 +98,10 @@ async function until(done: () => boolean, what: string): Promise<void> {
   if (!done()) throw new Error(`never happened: ${what}`);
 }
 
-export async function world(canvas: Canvas, options: { chip?: boolean; engine?: ExportEngine } = {}) {
+export async function world(
+  canvas: Canvas,
+  options: { chip?: boolean; engine?: ExportEngine } = {},
+) {
   if (current) await finish(current);
   const t = await setupExport();
   current = t;
@@ -139,8 +146,7 @@ export function scrub<T>(value: T, ids: readonly string[] = []): T {
 export const commandOf = (spec: JobSpec): Cmd =>
   scrub({ args: spec.args, steps: spec.steps ?? [] }, [spec.id]);
 export const textOf = (cmd: Cmd): string => [cmd.args, ...cmd.steps].flat().join(" ");
-export const outputOf = (spec: JobSpec): Picture =>
-  (spec.meta.plan as { output: Picture }).output;
+export const outputOf = (spec: JobSpec): Picture => (spec.meta.plan as { output: Picture }).output;
 /** The value after `flag` in the command's last part: the one encode that makes the delivered file (a streamed export's first parts only make the pieces). */
 export const after = (cmd: Cmd, flag: string): string | undefined => {
   const last = [cmd.args, ...cmd.steps].at(-1)!;
