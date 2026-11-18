@@ -9,7 +9,7 @@
 - **Quality guard:** `src/timeline/exportFullGuard.test.ts` with its frozen fixture
   `src/timeline/__fixtures__/exportFullGuard.sha256.json`
 - **Measurements:** one AMD laptop (16 processors, Radeon 780M), lab of 18 Nov 2026, figures as read
-  from the lab's matrix on 19 Nov 2026 at 00:59 (tables are kept outside the repository)
+  from the lab's matrix on 19 Nov 2026 at 01:04 (tables are kept outside the repository)
 
 ## Context
 
@@ -72,14 +72,14 @@ Fast shrinks the picture after every frame is drawn at the project's own size: `
 delivery size as one `scale` at the end of the composite and the delivery rate as the `-r` output
 option. Reading and drawing cost what they cost for Quality; Fast shrinks only the compression share,
 and the chip makes that share nearly free. Time ratios (Quality seconds divided by Fast seconds; above 1
-Fast is faster), one laptop, strong profile, every run flagged busy (other programs used 3.5 to 10.4
+Fast is faster), one laptop, strong profile, every run flagged busy (other programs used 3.5 to 11.3
 cores):
 
 | Project (length tested)              | Fast vs Quality, processor | Fast vs Quality's light compression | Fast vs Quality, chip |
 | ------------------------------------ | -------------------------- | ----------------------------------- | --------------------- |
 | Phone reel 1080x1920 at 30 (2 min)   | 1.40                       | 1.08                                | 0.89                  |
 | Talking head, captions (2 min)       | 1.38                       | 1.00                                | 0.88                  |
-| Horizontal HD, crossfades (2 min)    | 1.33                       | 1.04                                | 0.92                  |
+| Horizontal HD, crossfades (2 min)    | 1.35                       | 1.04                                | 0.99                  |
 | HD at 60 fps (2 min)                 | 2.10                       | (1.20)                              | 0.98                  |
 | Zoom-heavy real reel (2 min)         | 1.07                       | not measured                        | 0.99                  |
 | 4K at 30, 3 clips, streamed (30 s)   | 1.36                       | 0.98                                | 1.01                  |
@@ -91,7 +91,7 @@ and is left out. "Processor" is Quality as the app runs it there (standard compr
 compression" is what Quality's own rule already picks on a slow project without a chip.
 
 - Light compression alone is 1.27 to 1.38 times faster than standard on plain projects, the chip alone
-  1.48 to 2.15 times (1.11 on the zoom-heavy reel). Fast without a chip is mostly the light
+  1.42 to 2.15 times (1.11 on the zoom-heavy reel). Fast without a chip is mostly the light
   compression; the smaller picture adds 0 to 8 percent beyond it on plain projects, and nothing
   beyond the chip (0.88 to 1.01).
 - On 4K and many-clip projects Fast is no faster than Quality's own light compression (0.98 to 1.11).
@@ -101,7 +101,7 @@ compression" is what Quality's own rule already picks on a slow project without 
   faster than Quality; Fast with the chip was slower than Quality with the chip (ratios 0.79 to 0.89).
 - On a chip PC the Fast command differs from the Quality command in one step (and `-r` at 60 fps): the
   lanczos `scale`. It costs about 7 to 10 processor-milliseconds per frame drawn, a little more than
-  the chip saves by encoding the smaller picture, so Fast took about 1 to 6 seconds longer than
+  the chip saves by encoding the smaller picture, so Fast took up to about 6 seconds longer than
   Quality on 2-minute exports. A cheaper resize filter was not tried.
 - Only drawing at the delivery size from the start moved a big project: 4K at 30 fps from about 120 s
   to about 13 s with the chip, the phone reel from about 51 s to 48 s. That is an upper bound: the
