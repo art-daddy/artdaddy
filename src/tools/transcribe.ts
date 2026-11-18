@@ -53,6 +53,13 @@ import { CAP_S } from "./speechPlan";
 import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
 import { measureVoiceStart, type VoiceStart } from "./speechLeadingQuiet";
 import {
+  leadOf,
+  speechFactsOn,
+  type DtwState,
+  type LeadClass,
+  type SpeechRunNotes,
+} from "./speechFacts";
+import {
   type AlignmentOutput,
   retryWithoutWordTimes,
   segmentFollowsWords,
@@ -1406,7 +1413,17 @@ export async function runWhisper(
   let wentOn = false;
   for (let attempt = 0; ; attempt++) {
     try {
-      const done = await runWhisperOnce(ctx, src, size, language, window, redo, joined, refused);
+      const done = await runWhisperOnce(
+        ctx,
+        src,
+        size,
+        language,
+        window,
+        redo,
+        joined,
+        refused,
+        wentOn,
+      );
       // The full-size file ran what the smaller one could not: the smaller file is the likely cause on this PC.
       if (wentOn) smallerFileFailed = true;
       return done;
@@ -1584,6 +1601,9 @@ async function runWhisperOnce(
   joined = false,
   /** This run replaces one that was refused for its language: the telemetry's `rerun`. */
   rerun = redo !== undefined,
+  /** This run is the net: the engine failed on the smaller model file and the request goes on with the full-size one (the
+   *  speech sample's `net`). */
+  net = false,
 ): Promise<ParsedTranscript> {
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
@@ -1664,6 +1684,7 @@ async function runWhisperOnce(
         variant: plan.variant,
         requested: lang,
         ...(rerun ? { rerun: true } : {}),
+        ...(net && speechFactsOn() ? { notes: { net: true as const } } : {}),
         label: fileLabel(src),
         purpose,
         spanS,
@@ -1878,6 +1899,41 @@ function noteWordTimes(meta: JobMeta, on: boolean): void {
   }
 }
 
+/** Say on each transcription's meta how this launch was made, for the speech sample (speechFacts.ts), before the job is made
+ *  from it, so that a page that takes the run over after a crash reports it as the page that ran it would have. Written at
+ *  every launch of the run, so it describes the one whose words are kept; a fact that does not apply is left out, and the
+ *  net run's mark (`net`, put on the meta when the run was made) stays. Nothing is written while the build keeps the facts
+ *  dark, so a launch of such a build leaves the meta exactly as it was. */
+function noteLaunch(
+  meta: JobMeta,
+  how: {
+    ng: boolean;
+    held: boolean;
+    mf: string;
+    dtw: DtwState | undefined;
+    lead: LeadClass | undefined;
+  },
+): void {
+  if (!speechFactsOn()) return;
+  for (const m of meta.kind === "transcripts" ? meta.items : [meta]) {
+    m.notes = {
+      ...(m.notes?.net ? { net: true as const } : {}),
+      ...(how.ng ? { ng: true as const } : {}),
+      ...(how.held ? { held: true as const } : {}),
+      mf: how.mf,
+      ...(how.dtw ? { dtw: how.dtw } : {}),
+      ...(how.lead ? { lead: how.lead } : {}),
+    };
+  }
+}
+
+/** What the speech sample says about how a run was made: what its launch wrote on its meta (the page that took the run over
+ *  reads the same) and the language it was asked for. Nothing while the build keeps the facts dark. */
+function notesOf(meta: TranscriptJobMeta | undefined): { notes?: SpeechRunNotes } {
+  if (!meta || !speechFactsOn()) return {};
+  return { notes: { ...meta.notes, ...(meta.requested ? { lang: meta.requested } : {}) } };
+}
+
 /** The audio files a launch with `args` is handed: the value of each `-f`. */
 function heardBy(args: readonly string[]): string[] {
   return args.flatMap((a, i) => (a === "-f" && i + 1 < args.length ? [args[i + 1]] : []));
@@ -1885,19 +1941,18 @@ function heardBy(args: readonly string[]): string[] {
 
 /** What a launch of `files` adds for the engine's own word times (speechWordTimes.ts): the arguments when the rule allows
  *  them for this model file and engine path and the voice starts later than a second into the ONE file the launch hears,
- *  else nothing. Nothing is read from the audio while the rule cannot apply, so a build, a model or a PC where it is off
- *  does no more than it did. A launch over several files never carries them. Never throws. */
+ *  else nothing; and, for the speech sample, where that voice starts (the rule's own input, null when nothing was measured:
+ *  the rule cannot apply, or the launch hears several files). Nothing is read from the audio while the rule cannot apply,
+ *  so a build, a model or a PC where it is off does no more than it did. A launch over several files never carries them.
+ *  Never throws. */
 async function alignmentFor(
   ctx: ClientToolContext,
   files: readonly string[],
   input: { size: string; cpuOnly: boolean },
-): Promise<string[]> {
-  if (!wordTimesPossible(input)) return [];
-  const voice =
-    files.length === 1
-      ? await measureVoiceStart(ctx.store, files[0])
-      : { kind: "unknown" as const };
-  return wordTimesArgs({ ...input, voice });
+): Promise<{ args: string[]; voice: VoiceStart | null }> {
+  if (!wordTimesPossible(input)) return { args: [], voice: null };
+  const voice = files.length === 1 ? await measureVoiceStart(ctx.store, files[0]) : null;
+  return { args: wordTimesArgs({ ...input, voice: voice ?? { kind: "unknown" } }), voice };
 }
 
 /** For each of the audio files `wavs` a run over several files was about to hear: would a launch of that file ALONE carry
@@ -1977,6 +2032,11 @@ async function engineFor(
   const stopped: { by: StopReason | null } = { by: null };
   /** Set once a launch with the alignment has failed: no later launch of this run carries it. */
   let alignmentFailed = false;
+  /** Where the voice started in the one file the launch heard, as the speech sample says it, once a launch measured it (the
+   *  launch after a failed alignment measures nothing and reports what the first one found). */
+  let lead: LeadClass | undefined;
+  /** The graphics chip was being kept off when this run began (the hold after a crash): read once, at the first launch. */
+  let chipHeld = false;
   const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
     // THE place whisper-cli is started (the test "where the engine is started" in speechModelRun.test.ts walks the
     // sources for any other). The model file `args` name says which path it may take: a file the manifest restricts
@@ -1988,11 +2048,20 @@ async function engineFor(
     // Decided here, at the spawn, from the path this launch takes and the audio it will be handed (speechWordTimes.ts).
     // While the rule cannot apply nothing is awaited, so such a launch is started exactly as it was.
     const alignment = { size, cpuOnly: onProcessor };
-    const wordTimes =
+    const aligned: { args: string[]; voice: VoiceStart | null } =
       alignmentFailed || !wordTimesPossible(alignment)
-        ? []
+        ? { args: [], voice: null }
         : await alignmentFor(ctx, meta.kind === "transcript" ? heardBy(args) : [], alignment);
+    const wordTimes = aligned.args;
+    if (aligned.voice) lead = leadOf(aligned.voice);
     noteWordTimes(meta, wordTimes.length > 0);
+    noteLaunch(meta, {
+      ng: onProcessor,
+      held: chipHeld,
+      mf: size,
+      dtw: alignmentFailed ? "r" : wordTimes.length > 0 ? "1" : undefined,
+      lead,
+    });
     const run = onProcessor ? [...args, "-ng", ...wordTimes] : [...args, ...wordTimes];
     checkLaunch(run);
     const own = new AbortController();
@@ -2066,7 +2135,8 @@ async function engineFor(
   const engine = async (): Promise<EngineRun> => {
     // A file that may only run on the processor makes this a processor run from its first launch: no chip is tried,
     // so a crash is never taken for the chip's and no hold is kept for it.
-    const cpuOnly = cpuOnlyNow() || enginePath(args, false);
+    chipHeld = cpuOnlyNow();
+    const cpuOnly = chipHeld || enginePath(args, false);
     const first = await launchWithFallback(cpuOnly, false);
     if (stopped.by || cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
     const second = await launchWithFallback(true, true);
@@ -2137,6 +2207,10 @@ interface TranscriptJobMeta {
    *  the way it was made, by the page that ran it and by one that adopts it. LOCAL, like the three above: written
    *  only when true, so a launch without them leaves the meta as it was, and never sent anywhere. */
   wordTimes?: boolean;
+  /** How this run was made, for the speech sample (speechFacts.ts): what its launch knew (the processor forced, the chip kept
+   *  off, the model file, the first-word arguments, where the voice started) and whether it is the net run. LOCAL, like the
+   *  fields above, and written only by a build that tells these facts. */
+  notes?: SpeechRunNotes;
 }
 
 /** A run of whisper made into its transcript and kept: the one finish, for the page that ran it
@@ -2212,7 +2286,11 @@ async function finishWhisper(
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
     if (!batch) {
       const facts = whisperRunFacts(run.stderr);
-      reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
+      reportTranscription(facts, undefined, {
+        beam: meta.beam,
+        rerun: meta.rerun,
+        ...notesOf(meta),
+      });
       recordSpeechRun(
         facts.audioSeconds,
         facts.wallSeconds,
@@ -2345,7 +2423,7 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
             reportTranscription(
               whisperRunFacts(jobResult(job).stderr, { batch: true }),
               undefined,
-              { beam: together[0]?.beam, files: kept },
+              { beam: together[0]?.beam, files: kept, ...notesOf(together[0]) },
             );
         })
         .catch(() => undefined)
@@ -2739,6 +2817,7 @@ async function runTogether(
           reportTranscription(whisperRunFacts(run.stderr, { batch: true }), undefined, {
             beam: plan.beam,
             files: kept,
+            ...notesOf(metas[0]),
           });
         if (unavailable) throw unavailable;
       } finally {
