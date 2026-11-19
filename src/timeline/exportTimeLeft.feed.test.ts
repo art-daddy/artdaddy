@@ -173,7 +173,7 @@ describe("recorded real runs through the reader, the reporter, the store, the ca
 
   it("says no time on the card before 5 s of pictures and 'Finishing' only from 90 %, on the real feeds, counted from the samples and not from the rule", () => {
     for (const run of spread()) {
-      const seen = play(run, `gate-${run.id}`);
+      const seen = play(run, `early-${run.id}`);
       const picture = run.samples.find((sample) => sample[1] > 0);
       let finishing = false;
       let timeSaid = 0;

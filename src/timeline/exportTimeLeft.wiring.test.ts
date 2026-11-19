@@ -306,7 +306,7 @@ function agreementViolations(run: { readonly id: string }, beats: readonly Beat[
 }
 
 /** Nothing before a pace can be read (except "Finishing" from 90 %), and the first thing said is a figure or "Finishing", never "taking longer". */
-function gateViolations(run: { readonly id: string }, beats: readonly Beat[]): string[] {
+function earlyViolations(run: { readonly id: string }, beats: readonly Beat[]): string[] {
   const out: string[] = [];
   for (const b of beats) {
     if (paceReadable(b) || b.share >= FINISHING_SHARE) continue;
@@ -377,7 +377,7 @@ function longerViolations(run: { readonly id: string }, beats: readonly Beat[]):
 
 const everyRule = (run: { readonly id: string }, beats: readonly Beat[]): string[] => [
   ...agreementViolations(run, beats),
-  ...gateViolations(run, beats),
+  ...earlyViolations(run, beats),
   ...gridViolations(run, beats),
   ...finishingViolations(run, beats),
   ...flickerViolations(run, beats),
@@ -462,7 +462,7 @@ describe("the words the card and the dialog say, at every report of 88 real runs
 
   it("3 nothing is said before 5 s of pictures, and the first thing said is a figure (or Finishing for a run that was 90 % made before them)", () => {
     const played = PLAYED();
-    expectNone(played.flatMap(({ run, beats }) => gateViolations(run, beats)));
+    expectNone(played.flatMap(({ run, beats }) => earlyViolations(run, beats)));
     // A pace really is read: a run with 5 s of pictures before 90 % made says a figure; one that never had says nothing but "Finishing".
     const noFigure: string[] = [];
     const startsWith = { figure: 0, finishing: 0, nothing: 0 };
@@ -1033,9 +1033,9 @@ describe("the same real feed in another clock and at another cadence", () => {
         bad.push(`${label(run, finishing)}: the first report at 90 % says "${finishing.said}"`);
       const a = beats.find((b) => b.shown !== null);
       const c = coarse.find((b) => b.shown !== null);
-      // A run that is 90 % made within a second or two of its 5 s of pictures can be told a figure by one feed and "Finishing" by the other: the report that reaches 90 % may be one of the dropped.
+      // A run that is 90 % made within a second of its 5 s of pictures can be told a figure by one feed and "Finishing" by the other: the report that reaches 90 % may be one of the dropped.
       const to90 = beats.find((b) => b.share >= FINISHING_SHARE);
-      const borderline = to90 !== undefined && to90.pictured < PICTURE_SPAN_SECONDS + 1.5;
+      const borderline = to90 !== undefined && to90.pictured < PICTURE_SPAN_SECONDS + 1;
       if (!borderline && !a !== !c) {
         bad.push(`${run.id}: a figure in one feed and none in the other`);
       } else if (!borderline && a && c && a.shown !== null && c.shown !== null) {

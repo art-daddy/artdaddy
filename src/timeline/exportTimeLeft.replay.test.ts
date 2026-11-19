@@ -13,8 +13,8 @@
 //   C8  slowdowns built from real feeds (the lab has no genuinely slow run): a 3 times slower tail is caught, a 1.2 times one is not;
 //   C9  the words do not flap: a figure that changes does not go back to the figure it left within a few reports;
 //   C10 the first figure comes within a second of the 5 s of pictures it needs, on every run that lasts that long;
-//   C11 "taking longer" is said at the very report the written reference rule says it (the earlier gate's point is its reference, never the early figure): on
-//       the recorded runs and on the slowed ones;
+//   C11 "taking longer" is said at the very report the written reference rule says it (its reference point is where the render has run 20 s and made 15 %, or run 60 s, never
+//       the early figure): on the recorded runs and on the slowed ones;
 //   C12 the figure's changes in the first minute stay within the allowance, and the early figures are right at 10 to 60 s after the first picture;
 //   C13 a run that never reaches a readable pace (it ends, or stands still, within the span) is never given a figure.
 // Every oracle is computed here from the raw samples and the accepted rule's numbers, never from the rule's own constants or state: a
@@ -52,7 +52,7 @@ const RULE_FINISHING_SHARE = 0.9;
 const UNDER_A_MINUTE_FIGURE = 30;
 const UNDER_A_MINUTE_REAL_SECONDS = 60;
 
-// C1c: the gate really opens (a rule that never said anything would pass every other claim).
+// C1c: figures really are said (a rule that never said anything would pass every other claim).
 const LIVE_CHECKPOINTS = [0.3, 0.5, 0.7];
 const LIVE_MIN_RENDERED_SECONDS = 25;
 const LIVE_MIN_POINTS = 30;
@@ -97,7 +97,8 @@ const EARLY_MIN_SHARE_WITH_FIGURE = 0.98;
 const EARLY_MIN_WITHIN_HALF = 0.8;
 const EARLY_MIN_WITHIN_FACTOR_TWO = 0.95;
 /** The figure's changes in the first minute after the first picture: at most this many in any run (observed 3), this many on average (observed 0.79), and no step between
- *  two figures larger than this multiple (observed 2). */
+ *  two figures larger than this multiple (observed 2). These are guards set at the measured values, not requirements: the figure is said earlier, in a rougher stretch of the
+ *  run, so more of its changes fall inside this minute than when it was said only after 15 % (observed 2 at most, 0.38 on average). */
 const FIRST_MINUTE_SECONDS = 60;
 const FIRST_MINUTE_MAX_CHANGES = 3;
 const FIRST_MINUTE_MAX_MEAN_CHANGES = 1;
@@ -294,7 +295,7 @@ function flapViolations(f: Facts): string[] {
 
 /** The report at which "taking longer" takes its reference, from the raw samples alone: the first moment the render has run RULE_REFERENCE_RENDERED_SECONDS (counted from its
  *  first report) and made RULE_REFERENCE_SHARE (or run RULE_REFERENCE_RENDERED_ALONE_SECONDS) with a pace that can be read, while less than 90 % is made. -1 when there is none.
- *  This is where the figure used to be first said; the figure now said earlier is not a reference. */
+ *  The figure said as soon as a pace can be read is earlier than this and is not a reference. */
 function referenceAt(f: Facts): number {
   const t0 = f.run.samples[0][0];
   const floor = f.share[0];

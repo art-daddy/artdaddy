@@ -15,10 +15,11 @@
 //    (under a minute, whole minutes to 10, 5 minutes to an hour, quarter hours after) so it moves by steps and not by seconds;
 //  - when the average pace since the render began implies a total over 1.5 times the one it implied at the alarm's reference
 //    point, the answer is "longer", for good. The reference point is the first moment the render has run 20 s and either made
-//    15 % or run 60 s, with a pace that can be read: where the first figure used to be said. It is not the first figure. One
-//    said a few seconds in is on average a little too short, and healthy renders pass 1.5 times a total taken from it: replayed
-//    on the recorded runs, that reference says "longer" on a healthy run and catches a 3 times slowdown in 41 of 53 runs
-//    instead of 48.
+//    15 % or run 60 s, with a pace that can be read. It is not the first figure: one said a few seconds in is on average a
+//    little too short, and healthy renders pass 1.5 times a total taken from it. Replayed on the recorded runs, a reference taken
+//    there says "longer" on a healthy run and catches a 3 times slowdown in 41 of 53 runs instead of 48. A stall before the
+//    reference point is therefore met by no alarm: the figure grows while nothing is made, and the reader's own quiet rule ends
+//    it after 60 s.
 // A render made in parts says nothing until its final encode, which is the only part whose pace is the pace of what is left.
 
 /** What may be said about the time left of a running export. */
@@ -242,7 +243,7 @@ function advance(state: PaceState, report: PaceReport): PaceState {
 
   const shown =
     raw === null ? seen.shown : seen.shown === null ? roundTimeLeft(raw) : held(seen.shown, raw);
-  // The alarm's reference is taken once, where the first figure used to be said: later than the first figure, which a few seconds of pictures make too short.
+  // The alarm's reference is taken once, and later than the first figure: a figure said a few seconds in is on average a little too short, and healthy renders pass 1.5 times a total taken from it.
   const reference =
     seen.base === null &&
     total !== null &&

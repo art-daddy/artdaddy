@@ -427,7 +427,7 @@ describe("what the card says about what the export was expected to take", () => 
 });
 
 describe("an export the app starts again", () => {
-  it("starts the second attempt's rule afresh: nothing of the first attempt's Finishing is said of it, on the card or in the dialog, and its own gate is its own", async () => {
+  it("starts the second attempt's rule afresh: nothing of the first attempt's Finishing is said of it, on the card or in the dialog, and its wait for a first figure is its own", async () => {
     useExportJob.getState().begin(null);
     aRoomyPc();
     const first = await launch("film.mp4", { fails: true, described: true });

@@ -96,7 +96,7 @@ const RENDERING_KEYS = [
 const PREPARING_KEYS = ["elapsed_s", "expected_s", "filename", "job_id", "stage", "state"];
 const CHECKING_KEYS = PREPARING_KEYS;
 
-/** The rule, as the owner stated it, for a render that reports at second 1, 2, 3 ...: the card may say a time left once 5 s of pictures are behind it (the first report, at second 1, is the first
+/** The rule, for a render that reports at second 1, 2, 3 ...: the card may say a time left once 5 s of pictures are behind it (the first report, at second 1, is the first
  *  picture) and not once 90 % is made. */
 const mayHaveFigure = (t: number, share: number): boolean => t - 1 >= 5 && share < FINISHING_FROM;
 
@@ -116,7 +116,7 @@ describe("when a running export first has a time left to say", () => {
     return seen;
   }
 
-  const expectGate = (seen: Awaited<ReturnType<typeof played>>, total: number) => {
+  const expectFigures = (seen: Awaited<ReturnType<typeof played>>, total: number) => {
     for (const { t, left, keys } of seen) {
       const present = mayHaveFigure(t, t / total);
       expect(left !== undefined, `${t} s into a render of ${total} s`).toBe(present);
@@ -129,7 +129,7 @@ describe("when a running export first has a time left to say", () => {
 
   it("says its first figure 5 s after the first picture, however little is made by then (a render of 100 s in all)", async () => {
     const seen = await played(100, 89);
-    expectGate(seen, 100);
+    expectFigures(seen, 100);
     // the first figure: 6 s in (the first picture at 1 s, 5 s of pictures, 6 % made), 94 s left at the pace of those 5 s, and the nearest whole minute to that is 2 min = 120 s
     expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 120 });
     // 4 s of pictures at 5 s: nothing
@@ -138,16 +138,16 @@ describe("when a running export first has a time left to say", () => {
 
   it("does not wait for 15 % or for a minute (a render of 1000 s in all)", async () => {
     const seen = await played(1000, 300);
-    expectGate(seen, 1000);
+    expectFigures(seen, 1000);
     // the first figure: 6 s in (0.6 % made), 994 s left; over 10 min the grid is 5 minutes, so the nearest is 15 min = 900 s
     expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 900 });
-    // 20 s and a minute were rendered long before the earlier gate would have opened: the figure had been there for a long time
+    // 4 % is made at 40 s and the figure has been said since 6 s
     expect(seen.find((s) => s.t === 40)?.left).toBeDefined();
   });
 
   it("says its figure in a short render too: a fifth of a render of 50 s made in 10 s, and 'under a minute' from the 6th second", async () => {
     const seen = await played(50, 44);
-    expectGate(seen, 50);
+    expectFigures(seen, 50);
     expect(seen.find((s) => s.t === 5)?.left).toBeUndefined(); // 4 s of pictures
     expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 30 }); // 44 s left: the figure 30 is "under a minute"
   });

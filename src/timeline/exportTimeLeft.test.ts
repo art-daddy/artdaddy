@@ -294,7 +294,7 @@ function modelRun(reps: readonly Rep[]): ModelRun {
       const margin = 0.25 * (cell.hi - cell.lo);
       if (raw < cell.lo - margin || raw >= cell.hi + margin) shown = gridRef(raw);
     }
-    // The reference of "taking longer": the first moment the render has run 20 s and made 15 % (or run 60 s) with a pace that can be read, which is where the figure used to be first said.
+    // The reference of "taking longer": the first moment the render has run 20 s and made 15 % (or run 60 s) with a pace that can be read; the first figure is earlier and is not a reference.
     if (
       base === null &&
       raw !== null &&
@@ -710,7 +710,7 @@ describe("R2 before a pace can be read nothing is said", () => {
   it("says its first figure at the same moment whatever the pace, with no share to reach and no clock to wait for", () => {
     fc.assert(
       fc.property(fc.double({ min: 0.0001, max: 0.0074, noNaN: true }), (pace) => {
-        // under 15 % at 20 s and under 60 s of rendering at 6 s: the earlier gate would have said nothing
+        // at 6 s less than 15 % is made and less than 20 s have been rendered: a rule that waited for either would say nothing
         const vs = valuesOf(steady(pace, 1, 7));
         expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
         expect(vs[6].kind).toBe("left");
@@ -1039,6 +1039,29 @@ describe("R5 no flicker", () => {
     expect(vs.slice(6, 90).every((v) => v.kind === "left")).toBe(true);
     expect(vs.slice(91).every((v) => v.kind === "longer")).toBe(true);
   });
+
+  it("lets a stall before the alarm's reference point grow the figure without a word of taking longer, and forgets it once it has left the 20-s window", () => {
+    // A 256 s render at 1/256 a second: the first picture at 1 s, the first figure at 6 s (250 s left, 4 min). It makes nothing from second 12 to second 27 and then goes
+    // on at the same pace. The alarm's reference point (20 s rendered and 15 % made) is reached at second 54, so the alarm cannot act before it. In the stall the 20-s pace
+    // drops and the time left grows with it: 5 min at second 14 and 15 min at second 27 (976 s left). The stall leaves the window at second 47, where the pace is the
+    // render's own again (224 s left, 4 min).
+    const reps: Rep[] = [
+      ...Array.from({ length: 13 }, (_, t) => ({ t, f: t / 256 })),
+      ...Array.from({ length: 15 }, (_, k) => ({ t: 13 + k, f: 12 / 256 })),
+      ...Array.from({ length: 40 }, (_, k) => ({ t: 28 + k, f: (13 + k) / 256 })),
+    ];
+    const vs = valuesOf(reps);
+    expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+    expect(show(vs[6])).toBe("left 240");
+    expect(show(vs[12])).toBe("left 240");
+    expect(show(vs[14])).toBe("left 300");
+    expect(show(vs[27])).toBe("left 900");
+    const stalled = vs.slice(12, 28).map((v) => (v.kind === "left" ? v.seconds : -1));
+    expect(stalled).toEqual([...stalled].sort((a, b) => a - b));
+    expect(show(vs[47])).toBe("left 240");
+    expect(show(vs[53])).toBe("left 240");
+    expect(vs.slice(6).every((v) => v.kind === "left")).toBe(true);
+  });
 });
 
 // ── R6 ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1105,6 +1128,36 @@ describe("R6 hysteresis: a figure does not flap around a rounding boundary", () 
     [100, 76, 74],
     [none, "left 120", "left 120", "left 60"],
   );
+
+  // The edges themselves. A time left that lands exactly on an edge needs arithmetic with no rounding in it: shares that are whole multiples of
+  // 1/128 or 1/256 and a report a second, so the 20-s pace reads the time left to the digit. The band of a figure is its cell widened by a quarter of
+  // the cell's width on each side, closed at the bottom and open at the top.
+  it("keeps a figure at exactly the bottom of its band and leaves it a second later", () => {
+    // A 128 s render at 1/128 a second, the first picture at 1 s: 128 - t s left at second t. The first figure, at 6 s (122 s left), is 2 min:
+    // cell [90, 150), band [75, 165). 75 s left is second 53.
+    const vs = valuesOf(Array.from({ length: 56 }, (_, t) => ({ t, f: t / 128 })));
+    expect(show(vs[5])).toBe("none");
+    expect(show(vs[6])).toBe("left 120");
+    expect(show(vs[52])).toBe("left 120");
+    expect(show(vs[53])).toBe("left 120");
+    expect(show(vs[54])).toBe("left 60");
+    expect(show(vs[55])).toBe("left 60");
+  });
+
+  it("leaves a figure at exactly the top of its band", () => {
+    // A 256 s render at 1/256 a second that stops making pictures after 124 s (132 s left). The figure has come down to 2 min (band [75, 165)).
+    // The 20-s pace then reads 132 * 20 / (20 - s) s left, s seconds into the stall: 155.3 s at s = 3 and exactly 165 s at s = 4.
+    const reps: Rep[] = [
+      ...Array.from({ length: 125 }, (_, t) => ({ t, f: t / 256 })),
+      ...Array.from({ length: 5 }, (_, k) => ({ t: 125 + k, f: 124 / 256 })),
+    ];
+    const vs = valuesOf(reps);
+    expect(show(vs[122])).toBe("left 120");
+    expect(show(vs[124])).toBe("left 120");
+    expect(show(vs[127])).toBe("left 120");
+    expect(show(vs[128])).toBe("left 180");
+    expect(show(vs[129])).toBe("left 180");
+  });
 
   it("says a figure never further than a quarter of its cell from the time left, and moves it only when the time left leaves that band", () => {
     let moved = 0;

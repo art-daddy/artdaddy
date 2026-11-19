@@ -554,16 +554,16 @@ describe("the time left of the running export, as the store keeps it", () => {
     [4560, 6, 4500, "about 1 h 15 min left"],
   ])(
     "says nothing until 5 s of pictures, then the grid figure of the time left, to the card and the dialog (a %i s render)",
-    (total, gate, figure, words) => {
+    (total, first, figure, words) => {
       begin("a");
-      const { said, lines } = play({ total, from: 0, to: gate + 2, origin: ORIGIN });
-      for (let t = 0; t < gate; t++) {
+      const { said, lines } = play({ total, from: 0, to: first + 2, origin: ORIGIN });
+      for (let t = 0; t < first; t++) {
         expect(said.get(t), `${t} s in`).toEqual(NO_TIME_LEFT);
         expect(lines.get(t), `${t} s in`).not.toMatch(/left|Finishing|longer/);
       }
-      expect(said.get(gate)).toEqual({ kind: "left", seconds: figure });
+      expect(said.get(first)).toEqual({ kind: "left", seconds: figure });
       // The raw pace the reporters publish (12 s left) is not what is said.
-      expect(lines.get(gate)).toMatch(new RegExp(` · ${words}$`));
+      expect(lines.get(first)).toMatch(new RegExp(` · ${words}$`));
       // A steady render's figure holds for the next two seconds, and the dialog reads the same feed and says the same words.
       expect(live().timeLeft).toEqual({ kind: "left", seconds: figure });
       const now = Date.now();
@@ -636,9 +636,10 @@ describe("the time left of the running export, as the store keeps it", () => {
   // that the pace has dropped.
   it("counts a block that says nothing new: a render that stops making pictures is told to be taking longer than expected", () => {
     begin("a");
-    // A 300 s render: the alarm's reference is taken at 45 s (15 % made, 45 s rendered), an implied total of 45 / 0.15 = 300 s; a figure has been said since 6 s.
+    // A 300 s render: the alarm's reference is taken at 45 s (15 % made, 45 s rendered), an implied total of 45 / 0.15 = 300 s; a figure has been said since 6 s. 45 s in, 255 s is left:
+    // the lowest time left the held 5-minute figure (cell [270, 330), band [255, 345)) keeps, so it is still said, and a second later it is 4 min.
     playSteady(report, { total: 300, from: 0, to: 45, origin: ORIGIN });
-    expect(live().timeLeft.kind).toBe("left");
+    expect(live().timeLeft).toEqual({ kind: "left", seconds: 300 });
     const stuck = (t: number) => {
       vi.setSystemTime(ORIGIN + t * 1000);
       report({ fraction: 0.15, frame: 45 * 30 });
