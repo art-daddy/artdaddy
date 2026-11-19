@@ -28,7 +28,7 @@ import {
 } from "../timeline/exportQueue";
 import { answerButtons, planQuestions } from "../timeline/exportQuestions";
 import { describeEstimateLine } from "../timeline/estimateWords";
-import { describeExpected } from "../timeline/exportWords";
+import { describeExpected, describeExpectedForAssistant } from "../timeline/exportWords";
 import { EXPORT_SPEED_REVISION, estimateForDialog } from "../timeline/exportOptions";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import * as host from "../platform/host";
@@ -388,6 +388,27 @@ describe("ExportCard", () => {
       expect(screen.queryByText(/rough guess|Expected:/i)).toBeNull();
       g.open();
     });
+
+    // An assistant is told what this card shows (decision of 19 Nov 2026): the card's sentence for a time worked out from this PC's own earlier exports, and
+    // nothing where the card shows nothing, which is a guess. The card is the person's own view of the very record the assistant's reply and list are made from.
+    it.each([
+      { basis: "earlier exports of this shape", calibrations: [MEASURED], guessed: false },
+      { basis: "nothing like it on this PC yet", calibrations: [], guessed: true },
+    ])(
+      "shows what an assistant is told of how long it is expected to take: $basis",
+      async ({ calibrations, guessed }) => {
+        useExportJob.setState({ calibrations });
+        const g = gated();
+        await start("one.mp4", g.wait, { described: true });
+        render(<ExportCard />);
+        const record = listExportRecords().find((r) => r.filename === "one.mp4")!;
+        expect(record.expected?.guessed).toBe(guessed);
+        const told = describeExpectedForAssistant(record.expected);
+        expect(told === "").toBe(guessed);
+        expect(expectedLine() ?? "").toBe(told);
+        g.open();
+      },
+    );
 
     it("says nothing for an export nothing describes, rather than an estimate of zero", async () => {
       const g = gated();

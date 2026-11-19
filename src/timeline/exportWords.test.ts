@@ -10,6 +10,7 @@ import {
   FAILURE_TEXTS,
   REASONS_WITHOUT_TEXT,
 } from "../test/failureTexts";
+import { totalExpectation, type Expectation } from "./exportOptions";
 import { NO_TIME_LEFT, type TimeLeft } from "./exportTimeLeft";
 import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
@@ -18,6 +19,7 @@ import {
   describeDialogProgress,
   describeEncoder,
   describeExpected,
+  describeExpectedForAssistant,
   describeFailureHere,
   describeLiveStatus,
   describeModeLines,
@@ -29,6 +31,7 @@ import {
   describeTook,
   describeTryAgain,
   describeWaiting,
+  expectationForAssistant,
   failureOf,
   ordinal,
   plainFailure,
@@ -786,6 +789,81 @@ describe("what an export is expected to take, in words", () => {
             if (guessed || scope === "all") expect(line).not.toMatch(/a file of/);
             expect(line.includes("rough guess")).toBe(guessed);
           }
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+});
+
+// What an assistant is told is what the chat card shows (decision of 19 Nov 2026): a time worked out from this PC's own earlier exports, in the card's
+// words, and nothing for a guess from the size of the export: said aloud by an assistant, a guess reads as a promise.
+describe("what an assistant is told of how long an export is expected to take", () => {
+  const known = { seconds: 252, guessed: false, finalBytes: 120_000_000 };
+  const measured = fc.double({ min: 0, max: 1e6, noNaN: true });
+  const bytes = fc.oneof(fc.constant(null), fc.double({ min: 0, max: 1e12, noNaN: true }));
+
+  it("is the card's own sentence for a time worked out from this PC's earlier exports", () => {
+    expect(describeExpectedForAssistant(known)).toBe(
+      "Expected: about 4 min, a file of about 120 MB, from earlier exports on this PC.",
+    );
+    expect(describeExpectedForAssistant({ ...known, seconds: 360 }, "all")).toBe(
+      "Expected: about 6 min in all, from earlier exports on this PC.",
+    );
+  });
+
+  it("is nothing for a guess, whatever it says and however it is asked", () => {
+    expect(describeExpectedForAssistant({ seconds: 30, guessed: true, finalBytes: null })).toBe("");
+    expect(describeExpectedForAssistant({ ...known, guessed: true })).toBe("");
+    expect(describeExpectedForAssistant({ ...known, seconds: 360, guessed: true }, "all")).toBe("");
+  });
+
+  it("is nothing for no expectation, and for one that is not marked as measured", () => {
+    expect(describeExpectedForAssistant(null)).toBe("");
+    expect(describeExpectedForAssistant(undefined)).toBe("");
+    const unmarked = { seconds: 252, finalBytes: null } as unknown as Expectation;
+    expect(expectationForAssistant(unmarked)).toBeNull();
+    expect(describeExpectedForAssistant(unmarked)).toBe("");
+  });
+
+  it("gives back the very expectation when it may be told, and never an edited one", () => {
+    expect(expectationForAssistant(known)).toBe(known);
+    expect(expectationForAssistant({ ...known, guessed: true })).toBeNull();
+    expect(expectationForAssistant(null)).toBeNull();
+  });
+
+  it("says what the card says for a measured time and nothing for a guess, for any numbers", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constant(null), fc.constantFrom(...garbage), fc.double({ min: 0, max: 1e7 })),
+        fc.boolean(),
+        fc.oneof(fc.constant(null), fc.constantFrom(...garbage), fc.double({ min: 0, max: 1e12 })),
+        fc.constantFrom("file", "all" as const),
+        (seconds, guessed, finalBytes, scope) => {
+          const told = describeExpectedForAssistant({ seconds, guessed, finalBytes }, scope);
+          if (guessed) expect(told).toBe("");
+          else expect(told).toBe(describeExpected({ seconds, guessed, finalBytes }, scope));
+          // The words of a guess are never in what an assistant is told.
+          expect(told).not.toMatch(/rough guess|nothing like this/);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("tells the time of several files in all only when every one of them is measured", () => {
+    const part = fc.record({ seconds: measured, guessed: fc.boolean(), finalBytes: bytes });
+    fc.assert(
+      fc.property(
+        fc.array(fc.option(part, { nil: undefined }), { minLength: 0, maxLength: 6 }),
+        (parts) => {
+          const told = describeExpectedForAssistant(totalExpectation(parts), "all");
+          const everyoneMeasured = parts.length > 0 && parts.every((p) => p && !p.guessed);
+          if (everyoneMeasured)
+            expect(told).toMatch(
+              /^Expected: (under a minute|about [^.]+?) in all, from earlier exports on this PC\.$/,
+            );
+          else expect(told).toBe("");
         },
       ),
       { numRuns: 400 },

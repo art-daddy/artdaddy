@@ -376,8 +376,9 @@ export function estimateForDialog(
   };
 }
 
-/** What an export is expected to take, as a fact the chat card and an assistant's answer can say: a time that is a number,
- *  whether it is a guess, and the size when this PC has measured one. */
+/** What an export is expected to take, as a fact the chat card and an assistant's answer are made from: a time that is a number,
+ *  whether it is a guess, and the size when this PC has measured one. The card leaves a guess out, and an assistant is told only a time
+ *  that is not one (`expectationForAssistant`, exportWords.ts). */
 export interface Expectation {
   readonly seconds: number;
   /** `seconds` is a guess from the size of the export: nothing like it has run on this PC yet. */

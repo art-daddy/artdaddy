@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
 
 import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { __setHeldOffByBuild } from "../api/exportFlags";
 import { ensureTimeline } from "./engine";
 import { __resetExportQueue, listExportRecords, whenExportsSettle } from "./exportQueue";
 import { describeExpected } from "./exportWords";
@@ -28,8 +29,13 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-/** Exports a 9 s timeline (270 frames at 30 fps); the end card measures 2.033 s. */
-async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string }): Promise<Any> {
+/** Exports a 9 s timeline (270 frames at 30 fps); the end card measures 2.033 s. `door` is who asks: the Export menu (no origin), the in-app chat (a turn's origin) or an
+ *  outside assistant over MCP. */
+async function exportNineSeconds(o: {
+  brandAssets: boolean;
+  outputPath?: string;
+  door?: "menu" | "chat" | "mcp";
+}): Promise<Any> {
   const fs = new ExportMemFs();
   await fs.writeTextFile("C:/proj/a.mp4", "source video");
   if (o.brandAssets)
@@ -86,7 +92,13 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
   };
   const ctx = { store, runner };
   await addClipsTool({ entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 270 }] }, ctx);
-  return exportTimelineTool(o.outputPath ? { output_path: o.outputPath } : {}, ctx);
+  const asked =
+    o.door === "chat"
+      ? { ...ctx, origin: { chatSessionId: "t1", branchId: 0, executionId: 1 } }
+      : o.door === "mcp"
+        ? { ...ctx, surface: "mcp" as const }
+        : ctx;
+  return exportTimelineTool(o.outputPath ? { output_path: o.outputPath } : {}, asked);
 }
 
 describe("the export reply", () => {
@@ -156,27 +168,74 @@ describe("the export reply", () => {
   });
 
   // An assistant that started an export used to be told nothing about how long it would take, so it could not tell
-  // the person: the estimate was shown only to someone using the Export menu.
+  // the person: the estimate was shown only to someone using the Export menu. It is told what the chat card shows: a time
+  // worked out from this PC's own earlier exports, and nothing for a guess from the size of the export (said aloud, a guess
+  // reads as a promise). Whichever door asked, the same function builds the reply. The build's state is the shipped one.
   describe("how long it is expected to take", () => {
+    const DOORS = ["menu", "chat", "mcp"] as const;
     // Every export that ends adds to what this PC has measured: start each of these knowing nothing, so the
-    // estimate is the guess whose words are asserted.
-    beforeEach(() => useExportJob.setState({ calibrations: [] }));
-
-    it("is said in the reply, in the words the card shows, next to what else the reply says", async () => {
-      const r = await exportNineSeconds({ brandAssets: true });
-      expect(r.ok, JSON.stringify(r)).toBe(true);
-      const record = listExportRecords().find((row) => row.job_id === r.job_id);
-      expect(record?.expected).toBeDefined();
-      expect(String(r.note)).toContain(describeExpected(record!.expected));
-      expect(String(r.note)).toMatch(
-        /Expected: .+ A rough guess: nothing like this has been exported/,
-      );
-      // Nothing it said before was lost to make room for it.
-      expect(String(r.note)).toContain("Downloads");
-      expect(String(r.note)).toMatch(/watermark and end card are added/i);
+    // estimate is a guess until a test exports the project once.
+    beforeEach(() => {
+      __setHeldOffByBuild(true);
+      useExportJob.setState({ calibrations: [] });
+    });
+    afterEach(() => {
+      __setHeldOffByBuild(null);
+      useExportJob.setState({ calibrations: [] });
     });
 
+    it.each(DOORS)(
+      "is not said while it is a guess, and nothing else the reply says is lost to it (%s)",
+      async (door) => {
+        const r = await exportNineSeconds({ brandAssets: true, door });
+        expect(r.ok, JSON.stringify(r)).toBe(true);
+        // The premise: the export was admitted with an expectation, and it is a guess. It is the reply that leaves it out.
+        const record = listExportRecords().find((row) => row.job_id === r.job_id);
+        expect(record?.expected).toMatchObject({ guessed: true });
+        expect(JSON.stringify(r)).not.toMatch(/Expected|rough guess|nothing like this/i);
+        expect(String(r.note)).toContain("Downloads");
+        expect(String(r.note)).toMatch(/watermark and end card are added/i);
+      },
+    );
+
+    it("is no note at all for an export to a path the caller chose, which has nothing else to say", async () => {
+      const r = await exportNineSeconds({ brandAssets: false, outputPath: "D:/Videos/cut.mp4" });
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(r).not.toHaveProperty("note");
+    });
+
+    it.each(DOORS)(
+      "is said in the card's words once this PC has exported the same project, next to what else the reply says (%s)",
+      async (door) => {
+        const first = await exportNineSeconds({ brandAssets: true, door });
+        expect(first.ok, JSON.stringify(first)).toBe(true);
+        await whenExportsSettle();
+        // The earlier export is this PC's own measurement. Its time is made one that needs no heads-up (inside twice the video's length).
+        expect(useExportJob.getState().calibrations.length).toBeGreaterThan(0);
+        useExportJob.setState((state) => ({
+          calibrations: state.calibrations.map((c) => ({ ...c, elapsedSeconds: 12 })),
+        }));
+        const r = await exportNineSeconds({ brandAssets: true, door });
+        expect(r.ok, JSON.stringify(r)).toBe(true);
+        const record = listExportRecords().find((row) => row.job_id === r.job_id);
+        expect(record?.expected).toMatchObject({ guessed: false });
+        expect(String(r.note)).toContain(describeExpected(record!.expected));
+        expect(String(r.note)).toMatch(
+          /Expected: under a minute, a file of about \d+ MB, from earlier exports on this PC\./,
+        );
+        expect(String(r.note)).not.toMatch(/rough guess/);
+        // Nothing it said before was lost to make room for it.
+        expect(String(r.note)).toContain("Downloads");
+        expect(String(r.note)).toMatch(/watermark and end card are added/i);
+      },
+    );
+
     it("is said for an export to a path the caller chose, which has no destination note to put it after", async () => {
+      await exportNineSeconds({ brandAssets: false, outputPath: "D:/Videos/first.mp4" });
+      await whenExportsSettle();
+      useExportJob.setState((state) => ({
+        calibrations: state.calibrations.map((c) => ({ ...c, elapsedSeconds: 12 })),
+      }));
       const r = await exportNineSeconds({ brandAssets: false, outputPath: "D:/Videos/cut.mp4" });
       expect(r.ok, JSON.stringify(r)).toBe(true);
       expect(String(r.note)).toMatch(/^Expected: /);

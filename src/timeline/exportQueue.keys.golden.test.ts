@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { __resetFacts3c } from "../timeline/exportFacts3c";
-import { cancelExport, listExportOutcomes } from "../timeline/exportQueue";
+import { cancelExport, listExportOutcomes, listExportRecords } from "../timeline/exportQueue";
 import { startRun, steady, useKit, waitBehind } from "../test/exportRunKit";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));
@@ -48,10 +48,10 @@ const FROZEN = {
     "state",
     "time_left_s",
   ],
+  // The one set that moved on purpose (decision of 19 Nov 2026): an assistant is not told a time the app marks as a guess, so a row whose expectation is a guess
+  // has neither `expected_s` nor `expected_guessed` (before it had both). Every other set is as it was captured.
   renderingWithAGuess: [
     "elapsed_s",
-    "expected_guessed",
-    "expected_s",
     "filename",
     "job_id",
     "progress_percent",
@@ -101,8 +101,12 @@ describe("the assistant's export list: which fields a Quality export has in each
     expect(rowOf(slow.id).time_left_s).toEqual(expect.any(Number));
     await slow.end("finish");
 
-    // nothing like it on this PC yet: the expectation is a guess, and says so
+    // nothing like it on this PC yet: the expectation is a guess, and the row leaves it out (the card's own line leaves it out too)
     const guessed = await startRun({ dest: "C:/out/guess.mp4" });
+    // the premise: it was admitted with an expectation, and it is a guess
+    expect(listExportRecords().find((r) => r.job_id === guessed.id)?.expected).toMatchObject({
+      guessed: true,
+    });
     await guessed.to(100, steady(400));
     seen.renderingWithAGuess = keysOf(rowOf(guessed.id));
     expect(rowOf(guessed.id).time_left_s).toEqual(expect.any(Number));

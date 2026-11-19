@@ -28,7 +28,7 @@ import type { ExportStory } from "./exportTrace";
 import type { RestartLink } from "./exportAttempts";
 import { limitThatFired } from "./nativeDiagnostics";
 import { totalExpectation, type Expectation, type ExportOptions } from "./exportOptions";
-import { describeExpected } from "./exportWords";
+import { describeExpectedForAssistant } from "./exportWords";
 import type { Rung } from "./exportPlan";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
@@ -426,8 +426,9 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     rendered.length && loaded?.branding?.watermark
       ? "Each clip from the timeline carries the ArtDaddy watermark (no end card)."
       : "",
-    // The clips run one after another: how long all of them are expected to take, or nothing when any has no estimate.
-    rendered.length ? describeExpected(totalExpectation(expectations), "all") : "",
+    // The clips run one after another: how long all of them are expected to take, or nothing when any has no estimate. Told only when it is a time worked out from
+    // this PC's own earlier exports: a total with a guess in it is a guess, and a guess is not told.
+    rendered.length ? describeExpectedForAssistant(totalExpectation(expectations), "all") : "",
   ]
     .filter(Boolean)
     .join(" ");
