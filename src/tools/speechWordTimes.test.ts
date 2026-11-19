@@ -2,10 +2,9 @@
 // used, and how the words of a transcript are settled. What is checked is the outcome of each rule for any input,
 // not how it is computed: the one launch that carries the arguments is named, every other of the 32 is not.
 import fc from "fast-check";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
-import { __resetHostInfo, type HostOs } from "../platform/host";
 import { MODEL_MANIFEST } from "./modelManifest";
 import { WINDOWS_LOAD_FAILURES } from "./speechBackend";
 import { LEADING_QUIET_MS, type VoiceStart } from "./speechLeadingQuiet";
@@ -19,7 +18,6 @@ import {
   settleWords,
   tokenOnSound,
   WINDOW_MS,
-  WORD_TIMES_CHIP_HOSTS,
   WORD_TIMES_CHIP_MODELS,
   WORD_TIMES_CHIP_SHIPPED,
   WORD_TIMES_MODELS,
@@ -29,33 +27,13 @@ import {
   wordTimesPossible,
 } from "./speechWordTimes";
 
-/** What the webview says on each kind of host (the app's own reading of it: platform/host.ts `osFromUserAgent`). */
-const USER_AGENT: Record<HostOs, string> = {
-  windows:
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
-  macos:
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-  linux:
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
-  unknown: "SomeBrowser/1.0",
-};
-const HOSTS = Object.keys(USER_AGENT) as HostOs[];
-const hostIs = (os: HostOs): void => {
-  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(USER_AGENT[os]);
-  __resetHostInfo();
-};
-
-// The PC is a Windows one unless a test says otherwise: that is the host the graphics-chip path was measured on.
 beforeEach(() => {
   __resetExportFlags();
   __resetWordTimesShipped();
-  hostIs("windows");
 });
 afterEach(() => {
   __resetExportFlags();
   __resetWordTimesShipped();
-  vi.restoreAllMocks();
-  __resetHostInfo();
 });
 
 const SIZES = ["small", "base", "large", ""];
@@ -74,24 +52,18 @@ const arguments_ = (
 };
 
 describe("which launches carry word times", () => {
-  // The release decision: this commit arms the graphics chip (its constant and list, on Windows only) and still ships the
-  // behaviour dark: the build's own gate is off. A release that turns it on changes that line on purpose, after the owner
-  // has looked at real captions.
-  it("ships dark: the build's own gate is off, so nothing carries them, on the chip's host too", () => {
+  // The release decision: this build ships the behaviour dark. A release that turns it on changes this line
+  // on purpose, after the owner has looked at real captions and a graphics-chip PC has been measured.
+  it("ships dark: the build's own gate is off, so nothing carries them", () => {
     expect(WORD_TIMES_SHIPPED).toBe(false);
-    expect(WORD_TIMES_CHIP_SHIPPED).toBe(true);
+    expect(WORD_TIMES_CHIP_SHIPPED).toBe(false);
     expect(wordTimesOn()).toBe(false);
-    for (const os of HOSTS) {
-      hostIs(os);
-      for (const size of SIZES)
-        for (const cpuOnly of [true, false])
-          expect(wordTimesArgs({ size, cpuOnly, voice: LATE }), `${os} ${size} ${cpuOnly}`).toEqual(
-            [],
-          );
-    }
+    for (const size of SIZES)
+      for (const cpuOnly of [true, false])
+        expect(wordTimesArgs({ size, cpuOnly, voice: LATE })).toEqual([]);
   });
 
-  it("is ONE kind of launch of the 192 combinations of gate, flag, size, backend and where the voice starts: the processor, on the measured model, with both on, and a voice that starts more than a second in; and, on a Windows host only, the same on the graphics chip", () => {
+  it("is ONE kind of launch of the 192 combinations of gate, flag, size, backend and where the voice starts: the processor, on the measured model, with both on, and a voice that starts more than a second in", () => {
     const voices: VoiceStart[] = [
       { kind: "none" },
       { kind: "unknown" },
@@ -113,21 +85,14 @@ describe("which launches carry word times", () => {
           for (const cpuOnly of [true, false])
             for (const voice of voices) rows.push({ gate, flag, size, cpuOnly, voice });
     expect(rows).toHaveLength(192);
-    const processor = [
+    const carrying = rows.filter(
+      (r) => arguments_(r.gate, r.flag, r.size, r.cpuOnly, r.voice).length > 0,
+    );
+    expect(carrying).toEqual([
       { gate: true, flag: true, size: "small", cpuOnly: true, voice: { kind: "at", ms: 1020 } },
       { gate: true, flag: true, size: "small", cpuOnly: true, voice: LATE },
-    ];
-    const chip = processor.map((r) => ({ ...r, cpuOnly: false }));
-    for (const os of HOSTS) {
-      hostIs(os);
-      const carrying = rows.filter(
-        (r) => arguments_(r.gate, r.flag, r.size, r.cpuOnly, r.voice).length > 0,
-      );
-      expect(carrying, os).toEqual(os === "windows" ? [...processor, ...chip] : processor);
-    }
-    hostIs("windows");
+    ]);
     expect(arguments_(true, true, "small", true)).toEqual(["-dtw", "small", "-nfa"]);
-    expect(arguments_(true, true, "small", false)).toEqual(["-dtw", "small", "-nfa"]);
   });
 
   it("never gives the smaller model file (the processor-only one) word times, with everything on: nobody measured the alignment with it", () => {
@@ -177,13 +142,6 @@ describe("which model files and engine paths the alignment was measured for", ()
     for (const key of [...WORD_TIMES_MODELS, ...WORD_TIMES_CHIP_MODELS])
       expect(MODEL_MANIFEST[key], key).toBeDefined();
     expect(WORD_TIMES_MODELS).toEqual(["small"]);
-    // The graphics chip was measured with the same file, on one host (the line a release that measures another changes).
-    expect(WORD_TIMES_CHIP_MODELS).toEqual(["small"]);
-    expect(WORD_TIMES_CHIP_HOSTS).toEqual(["windows"]);
-    for (const os of WORD_TIMES_CHIP_HOSTS) expect(HOSTS, os).toContain(os);
-    expect(WORD_TIMES_CHIP_HOSTS, "a host the app cannot name is never allowed").not.toContain(
-      "unknown",
-    );
   });
 
   it("refuses every file of the manifest that is not listed for the path, on every combination of the switches", () => {
@@ -203,7 +161,6 @@ describe("which model files and engine paths the alignment was measured for", ()
   it("keeps the graphics chip off while its own constant is off, whatever else is on", () => {
     __setWordTimesShipped(true);
     __setExportFlag("speech_word_times", true);
-    __setWordTimesChipShipped(false);
     expect(wordTimesPossible({ size: "small", cpuOnly: false })).toBe(false);
     expect(wordTimesPossible({ size: "small", cpuOnly: true })).toBe(true);
     // The chip's constant alone is not enough either: the file must be listed for it.
@@ -218,13 +175,10 @@ describe("which model files and engine paths the alignment was measured for", ()
 
   it("treats the chip's constant and its list of files as two keys: neither alone lets a chip launch carry the arguments", () => {
     const chipList = WORD_TIMES_CHIP_MODELS as string[];
-    const asBuilt = [...chipList];
     __setWordTimesShipped(true);
     __setExportFlag("speech_word_times", true);
     try {
-      chipList.length = 0;
       chipList.push("small");
-      __setWordTimesChipShipped(false);
       expect(wordTimesPossible({ size: "small", cpuOnly: false }), "listed, constant off").toBe(
         false,
       );
@@ -237,7 +191,7 @@ describe("which model files and engine paths the alignment was measured for", ()
         false,
       );
     } finally {
-      chipList.splice(0, chipList.length, ...asBuilt);
+      chipList.length = 0;
     }
   });
 
@@ -248,42 +202,6 @@ describe("which model files and engine paths the alignment was measured for", ()
     for (const size of ["", "toString", "__proto__", "constructor", "hasOwnProperty"])
       for (const cpuOnly of [true, false])
         expect(arguments_(true, true, size, cpuOnly), `${size} ${cpuOnly}`).toEqual([]);
-  });
-});
-
-describe("which hosts the graphics-chip path may carry word times on", () => {
-  const chipLaunch = (): string[] => arguments_(true, true, "small", false);
-  const processorLaunch = (): string[] => arguments_(true, true, "small", true);
-
-  it("carries them on a Windows host, where the path was measured, and on no other host: macOS, Linux and a host the app cannot name keep today's launch", () => {
-    for (const os of HOSTS) {
-      hostIs(os);
-      expect(chipLaunch(), os).toEqual(os === "windows" ? [...DTW_ARGS] : []);
-    }
-  });
-
-  it("leaves the processor path alone on every host: the file list decides there, never the host", () => {
-    for (const os of HOSTS) {
-      hostIs(os);
-      expect(processorLaunch(), os).toEqual([...DTW_ARGS]);
-    }
-  });
-
-  it("follows the app's host live: the user agent's first guess, then the answer that replaces it", () => {
-    hostIs("unknown");
-    expect(chipLaunch()).toEqual([]);
-    hostIs("windows");
-    expect(chipLaunch()).toEqual([...DTW_ARGS]);
-    hostIs("macos");
-    expect(chipLaunch()).toEqual([]);
-  });
-
-  it("never lets the host switch on what the build or the server has not: the gate and the flag still decide first", () => {
-    hostIs("windows");
-    expect(arguments_(false, true, "small", false)).toEqual([]);
-    expect(arguments_(true, false, "small", false)).toEqual([]);
-    __setWordTimesChipShipped(false);
-    expect(arguments_(true, true, "small", false)).toEqual([]);
   });
 });
 

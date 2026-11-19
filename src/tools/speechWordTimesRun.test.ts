@@ -20,7 +20,6 @@ vi.mock("../api/appEvents", async (orig) => ({
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
-import { __resetHostInfo } from "../platform/host";
 import { FakeJobs } from "../test/fakeJobs";
 import {
   DIR,
@@ -63,15 +62,6 @@ const configure = (gate: boolean, flag: boolean): void => {
   __setExportFlag("speech_word_times", flag);
 };
 const hold = (): void => holdCpuOnly(CRASH);
-/** The host the app says it runs on. The graphics-chip path carries the arguments on a Windows host only. */
-const WINDOWS_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
-const MAC_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
-const hostIs = (userAgent: string): void => {
-  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
-  __resetHostInfo();
-};
 
 /** A rig whose engine writes what the real one writes for the arguments it was given. The audio each extract holds has
  *  its voice where the clip's first word sounds (SOUND), so the rule that only a voice starting later than a second
@@ -110,8 +100,6 @@ afterEach(() => {
   __resetJobSupervisor();
   __resetExportFlags();
   __resetWordTimesShipped();
-  vi.restoreAllMocks();
-  __resetHostInfo();
 });
 
 /** One transcription of `src` under the conditions given: its launches and its transcript. */
@@ -154,19 +142,7 @@ describe("which launches of the engine carry word times", () => {
     expect(now.transcript.words[0].start_seconds).toBe(SOUND);
   });
 
-  it("gives a launch on the graphics chip of a Windows host the arguments after everything it had before (no `-ng`), and the first word is then on the sound", async () => {
-    hostIs(WINDOWS_UA);
-    const src = freshSource();
-    const today = await transcribed({ gate: false, flag: false, processor: false }, src);
-    const now = await transcribed({ gate: true, flag: true, processor: false }, src);
-    expect(now.launches[0]).not.toContain("-ng");
-    expect(now.launches[0].slice(-3)).toEqual(TAIL);
-    expect(now.launches[0].slice(0, -3)).toEqual(today.launches[0]);
-    expect(now.transcript.words[0].start_seconds).toBe(SOUND);
-  });
-
-  it("gives a launch on the graphics chip of a host it was not measured on none of them, and nothing else changes", async () => {
-    hostIs(MAC_UA);
+  it("gives a launch on the graphics chip none of them, and nothing else changes", async () => {
     const src = freshSource();
     const today = await transcribed({ gate: false, flag: false, processor: false }, src);
     const now = await transcribed({ gate: true, flag: true, processor: false }, src);
@@ -375,8 +351,7 @@ describe("one run over several files", () => {
       );
   });
 
-  it("is 0.27.0 on the chip of a host it was not measured on, and with the behaviour off on the processor", async () => {
-    hostIs(MAC_UA);
+  it("is 0.27.0 on the chip, and with the behaviour off on the processor", async () => {
     const run = async (gate: boolean, flag: boolean, processor: boolean) => {
       localStorage.clear();
       if (processor) hold();
@@ -419,8 +394,7 @@ describe("what a launch records on its job", () => {
     return { spec: jobs.submitted[0], transcript };
   }
 
-  it("carries nothing and records nothing for a launch on the graphics chip of a host it was not measured on, with both switches on", async () => {
-    hostIs(MAC_UA);
+  it("carries nothing and records nothing for a launch on the graphics chip, with both switches on", async () => {
     const { spec, transcript } = await jobOf(false);
     expect(spec.args).not.toContain("-ng");
     expect(spec.args).not.toContain("-dtw");

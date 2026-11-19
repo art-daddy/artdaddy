@@ -47,7 +47,6 @@ import {
   __setWordTimesShipped,
   DTW_ARGS,
   WORD_TIMES_CHIP_MODELS,
-  WORD_TIMES_CHIP_SHIPPED,
   WORD_TIMES_MODELS,
 } from "./speechWordTimes";
 import {
@@ -156,15 +155,6 @@ async function until(pred: () => boolean): Promise<void> {
 
 const WINDOWS_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
-const OTHER_HOSTS = {
-  macos:
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-  linux:
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
-  unknown: "SomeBrowser/1.0",
-} as const;
-/** The graphics-chip list as the build has it: a test that edits it puts it back. */
-const CHIP_LIST_AS_BUILT = [...WORD_TIMES_CHIP_MODELS];
 
 beforeEach(() => {
   localStorage.clear();
@@ -185,11 +175,7 @@ afterEach(() => {
   __resetJobSupervisor();
   __resetExportFlags();
   __resetWordTimesShipped();
-  (WORD_TIMES_CHIP_MODELS as string[]).splice(
-    0,
-    WORD_TIMES_CHIP_MODELS.length,
-    ...CHIP_LIST_AS_BUILT,
-  );
+  (WORD_TIMES_CHIP_MODELS as string[]).length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
   __resetHostInfo();
@@ -295,13 +281,10 @@ describe("which launches can carry it: engine path x model file x switches x whe
         smaller ? /ggml-small-q8_0\.bin$/ : /ggml-small\.bin$/,
       );
       expect(spec.args.includes("-ng"), name).toBe(row.path === "processor");
-      // The rule: the file launched is one the alignment was measured on for the engine path (the lists are the data a
-      // release changes: one line each; on the graphics chip the build's own constant and the host count too, and this
-      // walk runs on a Windows host), and the arguments are carried when the voice is late.
+      // The rule: the file launched is one the alignment was measured on for the processor path (the list is the data a
+      // release changes: one line), and the arguments are carried when the voice is late.
       const listed =
-        row.path === "processor"
-          ? WORD_TIMES_MODELS.includes(smaller ? SMALLER : FULL)
-          : WORD_TIMES_CHIP_SHIPPED && WORD_TIMES_CHIP_MODELS.includes(FULL);
+        row.path === "processor" && WORD_TIMES_MODELS.includes(smaller ? SMALLER : FULL);
       const carries = row.gate && row.flag && listed && row.quiet > 1000;
       expect(spec.args.includes("-dtw"), name).toBe(carries);
       expect(spec.args.includes("-nfa"), name).toBe(carries);
@@ -335,15 +318,11 @@ describe("which launches can carry it: engine path x model file x switches x whe
       return { reads, launches: t.whisper().length };
     };
     const smallerListed = WORD_TIMES_MODELS.includes(SMALLER);
-    const chipListed = WORD_TIMES_CHIP_SHIPPED && WORD_TIMES_CHIP_MODELS.includes(FULL);
     // The smaller file is what a processor PC that holds it is planned: it carries nothing until it is listed.
     expect(await run("processor", [FULL, SMALLER])).toEqual(
       smallerListed ? { reads: 4, launches: 2 } : { reads: 0, launches: 1 },
     );
-    // The chip carries nothing until its constant is on and its file is listed (this runs on a Windows host).
-    expect(await run("chip", [FULL])).toEqual(
-      chipListed ? { reads: 4, launches: 2 } : { reads: 0, launches: 1 },
-    );
+    expect(await run("chip", [FULL])).toEqual({ reads: 0, launches: 1 });
     expect(await run("processor", [FULL])).toEqual({ reads: 4, launches: 2 });
   });
 });
@@ -961,17 +940,14 @@ describe("under the net that runs the request on the full-size file when the eng
   });
 });
 
-describe("the graphics chip (option B: its constant on, `small` listed, Windows hosts only)", () => {
-  /** The chip's constant and list as a release that arms them has them: a no-op where the build already does. */
+describe("the graphics chip, if a later release turns its own constant on and lists a model file for it", () => {
   const chipOn = (): void => {
     __setWordTimesChipShipped(true);
-    const list = WORD_TIMES_CHIP_MODELS as string[];
-    if (!list.includes(FULL)) list.push(FULL);
+    (WORD_TIMES_CHIP_MODELS as string[]).push(FULL);
   };
 
   it("is today's launch while its constant is off, and carries the arguments on the chip, without `-ng`, once both are on and the voice is late", async () => {
     configure(true, true);
-    __setWordTimesChipShipped(false);
     const off = setup();
     await runWhisper(off.rig.ctx(), freshSource(), FULL, "en");
     expect(off.whisper()[0].args).not.toContain("-dtw");
@@ -984,31 +960,6 @@ describe("the graphics chip (option B: its constant on, `small` listed, Windows 
     expect(on.whisper()[0].args.slice(-3)).toEqual([...DTW_ARGS]);
     expect(transcript.words[0].start_seconds).toBe(SOUND);
   });
-
-  it.each(Object.entries(OTHER_HOSTS))(
-    "is today's launch on a %s host, with the constant on and the file listed, and the audio is not read",
-    async (_os, userAgent) => {
-      configure(true, true);
-      chipOn();
-      vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
-      __resetHostInfo();
-      let reads = 0;
-      const t = setup({
-        installed: [FULL],
-        audio: () => {
-          reads++;
-          return wavWithVoiceAt(2000);
-        },
-      });
-      const transcript = await runWhisper(t.rig.ctx(), freshSource(), FULL, "en");
-      expect(t.whisper()).toHaveLength(1);
-      expect(t.whisper()[0].args).not.toContain("-dtw");
-      expect(t.whisper()[0].args).not.toContain("-ng");
-      expect(t.whisper()[0].meta).not.toHaveProperty("wordTimes");
-      expect(reads).toBe(0);
-      expect(transcript.words[0].start_seconds).toBe(STORED);
-    },
-  );
 
   it("makes a failed alignment launch once more on the chip, without the arguments, and does not hold the chip off", async () => {
     configure(true, true);
@@ -1124,7 +1075,7 @@ describe("the decision is taken at the launch, from what is true then", () => {
     expect(transcript.words[0].start_seconds).toBe(STORED);
   });
 
-  it("follows the PC's chip from one run to the next: the processor's launch has `-ng` and the arguments, a later launch back on the chip has no `-ng`, and the arguments only where the chip path ships (this runs on a Windows host)", async () => {
+  it("follows the PC's chip from one run to the next: the processor's launch has the arguments, a later launch back on the chip does not", async () => {
     configure(true, true);
     processor();
     const onProcessor = setup();
@@ -1134,8 +1085,7 @@ describe("the decision is taken at the launch, from what is true then", () => {
     releaseCpuOnly();
     const backOnTheChip = setup();
     await runWhisper(backOnTheChip.rig.ctx(), freshSource(), FULL, "en");
-    const chipCarries = WORD_TIMES_CHIP_SHIPPED && WORD_TIMES_CHIP_MODELS.includes(FULL);
     expect(backOnTheChip.whisper()[0].args).not.toContain("-ng");
-    expect(backOnTheChip.whisper()[0].args.includes("-dtw")).toBe(chipCarries);
+    expect(backOnTheChip.whisper()[0].args).not.toContain("-dtw");
   });
 });

@@ -61,7 +61,6 @@ vi.mock("../api/appEvents", async (orig) => ({
 }));
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
-import { __resetHostInfo } from "../platform/host";
 import { __resetSpeechJobs } from "../store/speechJobs";
 import { shippedSidecar } from "../test/sidecars";
 import { ensureTimeline } from "../timeline/engine";
@@ -477,17 +476,9 @@ function configure(mode: Mode, pc: "processor" | "chip" = PC, allow = ALLOW): vo
   __setWordTimesShipped(rule);
   __setWordTimesChipShipped(rule && pc === "chip" && allow);
   __setExportFlag("speech_word_times", true);
-  // The graphics-chip path carries the arguments on a Windows host only (WORD_TIMES_CHIP_HOSTS), and this harness runs in
-  // node, where the webview's user agent is not Windows's: say what the PC under test is (set again on every call).
-  Object.defineProperty(navigator, "userAgent", {
-    configurable: true,
-    value:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
-  });
-  __resetHostInfo();
 }
 /** Can the rule fire for this model file on this path at all (the app's lists, plus what L13_ALLOW added)? */
-const RULE_CAN_FIRE = MODEL_KEY === "small" || ALLOW;
+const RULE_CAN_FIRE = PC === "processor" ? MODEL_KEY === "small" || ALLOW : ALLOW;
 
 function kindOf(launches: readonly Launch[], error: string | null): Kind {
   if (error !== null) return "error";
