@@ -547,7 +547,7 @@ describe("an export the app starts again by itself is never asked about its time
     via: (typeof VIAS)[number],
     over: Record<string, unknown> = {},
   ) => {
-    attempts.begin("first-attempt");
+    attempts.begin("first-attempt", "elsewhere");
     expect(attempts.registerPending("first-attempt", "auto")).toBe(true);
     return described(store, {
       ...(via === "other" ? {} : { via }),
@@ -604,7 +604,7 @@ describe("an export the app starts again by itself is never asked about its time
         over: { retry: { from: 0, to: 1 } },
       }),
       "a person's Switch": () => {
-        attempts.begin("first-attempt");
+        attempts.begin("first-attempt", "elsewhere");
         return {
           rung: 1 as const,
           over: {
@@ -778,7 +778,7 @@ describe("an export the app starts again by itself is never asked about its time
         "a person's Switch": {
           asked: true,
           spec: (store, fs) => {
-            attempts.begin("first-attempt");
+            attempts.begin("first-attempt", "elsewhere");
             return described(store, {
               via: "mcp",
               restart: { kind: "switch", from: "first-attempt", meta: { restarted: "quick" } },

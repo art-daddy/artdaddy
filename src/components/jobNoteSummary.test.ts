@@ -92,4 +92,22 @@ describe("job note summary", () => {
     const out = jobNoteSummary(jobWakePrompt([job(), words]));
     expect(out).toBe("an image and the words of 2 files ready");
   });
+
+  // A failed export's wake ends with its failure code, for the model; the line a person reads is the sentence.
+  it("shows a failed export as the app's sentence, without the failure code the model is given", () => {
+    const sentence = "Your PC ran short of memory. Close other programs and try again.";
+    const wake = jobWakePrompt([
+      job({
+        tool: "export",
+        label: "the export long.mp4",
+        status: "failed",
+        error: "native render failed: render memory floor crossed",
+        failure: sentence,
+        failure_code: "memory_limit",
+        media_refs: undefined,
+      }),
+    ]);
+    expect(wake).toContain("(failure_code: memory_limit)");
+    expect(jobNoteSummary(wake)).toBe(`the export long.mp4 failed — ${sentence}`);
+  });
 });

@@ -106,7 +106,7 @@ import {
   type ExportSubmission,
   type MovedTo,
 } from "./exportQueue";
-import type { RestartLink } from "./exportAttempts";
+import { attempts, type RestartLink } from "./exportAttempts";
 import type { ExportStory } from "./exportTrace";
 import { describeExpected } from "./exportWords";
 import type { ExportQuestionKind } from "./exportQuestions";
@@ -4436,7 +4436,9 @@ export async function prepareRenderSubmission(
               destPath: request.destPath,
               stagePath: request.stagePath,
               filename: request.filename,
-              startedBy: ctx.origin ? "chat" : "elsewhere",
+              // Who started the export, from its chain (exportAttempts.ts) and not from this context: an attempt the app starts again
+              // runs on a context with no turn, and a page that reloads wakes the chat from this field alone.
+              startedBy: attempts.startedBy(jobId),
               submittedAt,
               plan,
               telemetry: submittedMeta ?? telemetry,

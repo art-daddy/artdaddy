@@ -683,7 +683,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     const quiet = running ? quietSeconds(running, now) : 0;
     const busy = running ? (stories.get(r.job_id)?.watch?.busy() ?? null) : null;
     const left = running ? shownTimeLeftSeconds(running, now) : null;
-    const failure = r.state === "failed" ? failureOf(r.error) : null;
+    const failure =
+      r.state === "failed" ? failureForAssistant(r.error, r.chipFailed === true) : null;
     const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
     // A running export that is slower than said: the two facts, and what the assistant is to do about them (not cancel and start again).
     const slow = r.state === "running" && !r.cancelling ? helpRowOf3c(r.job_id) : null;
@@ -751,20 +752,27 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       // A waiting export: its place in line (1 is next).
       ...(r.state === "queued" && !r.cancelling ? { queue_position: waiting.indexOf(r) + 1 } : {}),
       // A failed export: the reason as a code, and in plain words the person can act on.
-      ...(failure
-        ? {
-            failure_code: failure.code,
-            // 0.27.0's sentence, with what to lower after it where there is something true to say.
-            failure: withLowerAdvice3c(
-              r.chipFailed ? describeChipFailure("assistant") : failure.plain,
-              failure.code,
-              r.chipFailed === true,
-            ),
-            ...(r.chipFailed ? { chip_failed: true } : {}),
-          }
-        : {}),
+      ...(failure ? { ...failure, ...(r.chipFailed ? { chip_failed: true } : {}) } : {}),
     };
   });
+}
+
+/** What the assistant is told about a failed export, in `manage_exports` and in the wake alike: 0.27.0's sentence (the chip's, when the chip
+ *  stopped it) with what to lower after it where there is something true to say, and the failure code. The encoder's own words are not part
+ *  of it: they can name a path on the person's PC, and the assistant can read them, scrubbed, by asking `manage_exports`. */
+function failureForAssistant(
+  error: string | undefined,
+  chipFailed: boolean,
+): { failure_code: string; failure: string } {
+  const { code, plain } = failureOf(error);
+  return {
+    failure_code: code,
+    failure: withLowerAdvice3c(
+      chipFailed ? describeChipFailure("assistant") : plain,
+      code,
+      chipFailed,
+    ),
+  };
 }
 
 /** Where a tool-run export request came from, for its story: the in-app chat (the turn that asked is
@@ -1119,7 +1127,9 @@ export interface ExportSpec {
   filename: string;
   /** The chat execution that asked for this export, when THIS CHAT asked. The Export menu and an
    *  external MCP agent run the SAME tool (deliberately — one renderer), so this is the only thing
-   *  that tells them apart, and it decides whether finishing resumes the conversation. */
+   *  that tells them apart: it decides who started the export, once, as the first attempt is
+   *  admitted, and with that whether finishing resumes the conversation. The export's chain keeps
+   *  the answer (exportAttempts.ts `startedBy`); an attempt the app starts again carries no origin. */
   origin?: MutationOrigin;
   submissionSignal?: AbortSignal;
   workload?: RenderWorkload;
@@ -2027,14 +2037,16 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     }
     throw error;
   }
-  // One export across attempts (exportAttempts.ts). A first attempt starts its chain. One the app started again is linked to
-  // the attempt it continues here, in the same synchronous run as its own admission and the failed row's retirement below:
-  // nothing is awaited between "the new attempt exists" and "the old row is gone", so nobody sees both, or neither.
+  // One export across attempts (exportAttempts.ts). A first attempt starts its chain, and the chain is told who started the
+  // export: this is the one place a chain's starter is decided, because an attempt the app starts again carries no turn (the
+  // export belongs to the queue) and answers its chain instead. One the app started again is linked to the attempt it
+  // continues here, in the same synchronous run as its own admission and the failed row's retirement below: nothing is
+  // awaited between "the new attempt exists" and "the old row is gone", so nobody sees both, or neither.
   let notLinked: string | null = null;
   if (spec.restart) {
     const linked = attempts.link(spec.restart.from, jobId, spec.restart.kind, spec.restart.meta);
     if (!linked.ok) notLinked = linked.why;
-  } else attempts.begin(jobId);
+  } else attempts.begin(jobId, spec.origin ? "chat" : "elsewhere");
   if (notLinked !== null) {
     // A Cancel reached the gap, or the chain has no room for this attempt: the new export's intent is retired through the
     // normal path and nothing is left behind.
@@ -2156,6 +2168,9 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   const staged = spec.stagePath !== spec.destPath;
   const signal = controllers.get(jobId)?.signal ?? new AbortController().signal;
   const story = spec.story;
+  // Who started the export, as its chain has had it since the first attempt was admitted: the same for every attempt of it,
+  // and not the asking turn's, which an attempt the app started again does not carry.
+  const startedBy = attempts.startedBy(jobId);
 
   const run: RunOutcome = { error: null, cancelled: false, warnings: [] };
   let finishActivity: (() => void) | null = null;
@@ -2299,7 +2314,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     filename: spec.filename,
     meta: spec.meta,
     owner: spec.owner,
-    startedBy: spec.origin ? "chat" : "elsewhere",
+    startedBy,
     startedAt,
     ledger,
     supervisor: spec.supervisor,
@@ -2321,6 +2336,8 @@ interface Settle {
   meta?: ExportSpec["meta"];
   /** The account that asked for the export (an adopted render carries it in `meta`). */
   owner?: string;
+  /** Who started the export: its chain's own fact, the same for every attempt of it (exportAttempts.ts). An adopted export, whose chain
+   *  did not survive the page, carries what its native record says. */
   startedBy: "chat" | "elsewhere";
   startedAt: number;
   ledger: Ledger;
@@ -2340,6 +2357,10 @@ interface Settle {
  *  one it adopted after a crash of the page, so both end exactly the same way. */
 async function settle(x: Settle): Promise<void> {
   const delivery = deliveryPorts.get(x.jobId);
+  // The first attempt's id and the restart this attempt was, for the wake: read before anything is awaited, because a row that is
+  // dismissed while this settle is in flight forgets its chain.
+  const publicId = attempts.publicId(x.jobId);
+  const restartedAs = attempts.describe(x.jobId).restarted;
   // What the card's feed said when the run ended, read before the feed is closed: the decision to start the export again
   // wants how much of the project had been produced.
   const live = x.story ? liveFeedOf(useExportJob.getState(), x.jobId) : null;
@@ -2513,8 +2534,6 @@ async function settle(x: Settle): Promise<void> {
     : `saved as ${x.filename}`;
   // The assistant knows the export by its first attempt's id and is told how it ended once: a restart in between is part of
   // the same export (exportAttempts.ts), and is said when it happened.
-  const publicId = attempts.publicId(x.jobId);
-  const restartedAs = attempts.describe(x.jobId).restarted;
   const settled: SettledJob | null = cancelled
     ? null
     : {
@@ -2524,7 +2543,7 @@ async function settle(x: Settle): Promise<void> {
         status: error ? "failed" : "done",
         startedBy: x.startedBy,
         ...(error
-          ? { error }
+          ? { error, ...failureForAssistant(error, chipFailure !== null) }
           : {
               detail: restartedAs
                 ? `${note} (restarted once ${RESTARTED_PHRASE[restartedAs]})`

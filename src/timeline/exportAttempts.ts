@@ -10,10 +10,18 @@
 // person (Switch to Quick). A chain has at most ONE auto link, whatever the reason, and a switch neither uses nor resets
 // that count.
 //
+// A chain also remembers who started the export, the in-app chat or somewhere else (the Export menu, an outside assistant). It is
+// decided once, when the first attempt begins, and every attempt of the chain answers it: the in-app assistant is told how an
+// export ended only when the chat started it, and a restart is part of the same export, so the attempt that ends it must not
+// forget who started it. An attempt the app starts again does not carry the asking turn (the queue owns the export, see
+// exportQueue.ts `registerExportInLibrary`), which is why this is kept here and not read from the turn.
+//
 // The gap between an attempt's end and its successor's admission is a pending restart. It is registered when the restart
 // is decided, before anything is awaited, so that a Cancel in the gap finds it. `link` refuses while the pending restart
 // is cancelled, and clears it when it succeeds, in the same call: the queue sets the successor's controller, links and
 // retires the predecessor's row with nothing awaited in between.
+
+import type { ExportStarter } from "../api/exportVocabulary";
 
 export type LinkKind = "auto" | "switch";
 
@@ -89,14 +97,20 @@ export interface IncomingLink {
 export interface AttemptSnapshot {
   chains: Array<{
     ids: string[];
+    startedBy: ExportStarter;
     links: Array<{ kind: LinkKind; meta: LinkMeta }>;
     pending: { kind: LinkKind; cancelled: boolean } | null;
   }>;
 }
 
 export interface AttemptRegistry {
-  /** Registers the first attempt of an export. False, and nothing changes, when the id is already an attempt of a chain. */
-  begin(id: string): boolean;
+  /** Registers the first attempt of an export, started by `startedBy`: the one time a chain is told. Anything but `"chat"` is
+   *  read as `"elsewhere"`, the direction in which a mistake costs a missed message and not a wake nobody asked for. False, and
+   *  nothing changes, when the id is already an attempt of a chain. */
+  begin(id: string, startedBy: ExportStarter): boolean;
+  /** Who started the export `id` is an attempt of, whichever attempt it is. `"elsewhere"` for an id in no chain: only an export
+   *  whose start is on record is ever said to be the chat's. */
+  startedBy(id: string): ExportStarter;
   /** Makes `nextId` the successor of `prevId`, which must be the LAST attempt of its chain, and clears the chain's pending
    *  restart. A refusal changes nothing. */
   link(prevId: string, nextId: string, kind: LinkKind, meta?: LinkMeta): LinkResult;
@@ -155,6 +169,7 @@ function cleanMeta(meta: LinkMeta | undefined): LinkMeta {
 export function createAttemptRegistry(): AttemptRegistry {
   interface Chain {
     ids: string[];
+    startedBy: ExportStarter;
     links: Array<{ kind: LinkKind; meta: LinkMeta }>;
     pending: { kind: LinkKind; cancelled: boolean } | null;
   }
@@ -167,12 +182,21 @@ export function createAttemptRegistry(): AttemptRegistry {
   const refused = (why: LinkRefusal): LinkResult => ({ ok: false, why });
 
   return {
-    begin(id) {
+    begin(id, startedBy) {
       if (chainOfId.has(id)) return false;
-      const chain: Chain = { ids: [id], links: [], pending: null };
+      const chain: Chain = {
+        ids: [id],
+        startedBy: startedBy === "chat" ? "chat" : "elsewhere",
+        links: [],
+        pending: null,
+      };
       chains.set(id, chain);
       chainOfId.set(id, chain);
       return true;
+    },
+
+    startedBy(id) {
+      return chainOfId.get(id)?.startedBy ?? "elsewhere";
     },
 
     link(prevId, nextId, kind, meta) {
@@ -296,6 +320,7 @@ export function createAttemptRegistry(): AttemptRegistry {
       return {
         chains: [...chains.values()].map((chain) => ({
           ids: [...chain.ids],
+          startedBy: chain.startedBy,
           links: chain.links.map((link) => ({ kind: link.kind, meta: { ...link.meta } })),
           pending: chain.pending ? { ...chain.pending } : null,
         })),
