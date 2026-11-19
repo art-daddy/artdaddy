@@ -35,6 +35,7 @@ import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob, liveFeedOf } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { recordStaging, releaseStaging } from "./exportStaging";
+import { newestProgressBlock } from "./ffmpegProgress";
 import { exportOwnerNow } from "../api/exportOwner";
 import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
@@ -2782,6 +2783,20 @@ function exportMeta(v: JobView): ExportJobMeta | null {
   return m as ExportJobMeta;
 }
 
+/** The reader of a render's progress for a page that joins the render where it is: the way the page that started it read it, from the newest block of what the app process kept of its output
+ *  (a step marker first for a render made in parts, so that block is read as the part it belongs to). Not the whole of that output: it holds minutes of a long render, and read in one instant it
+ *  would look like progress made in no time (ffmpegProgress.ts, `newestProgressBlock`). */
+export async function joinedProgressReader(
+  plan: Pick<import("./render").ExportJobPlan, "duration" | "stepDurations">,
+  v: Pick<JobView, "stdout_tail" | "step">,
+): Promise<(chunk: string) => void> {
+  const { exportProgressReporter } = await import("./render");
+  const read = exportProgressReporter(plan);
+  if (plan.stepDurations) read(`artdaddy_step=${v.step ?? 0}\n`);
+  read(newestProgressBlock(v.stdout_tail));
+  return read;
+}
+
 /** Follow a running export's progress into the export dialog's job, the way the page that started
  *  it did. */
 async function followProgress(
@@ -2789,10 +2804,7 @@ async function followProgress(
   v: JobView,
   plan: import("./render").ExportJobPlan,
 ): Promise<() => void> {
-  const { exportProgressReporter } = await import("./render");
-  const read = exportProgressReporter(plan);
-  if (plan.stepDurations) read(`artdaddy_step=${v.step ?? 0}\n`);
-  read(v.stdout_tail);
+  const read = await joinedProgressReader(plan, v);
   return sup.subscribe(
     () => {},
     (id, chunk) => {

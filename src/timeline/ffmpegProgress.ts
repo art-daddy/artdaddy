@@ -69,6 +69,25 @@ export function parseProgressBlocks(text: string): { records: RenderProgress[]; 
   return { records, rest: text.slice(consumed) };
 }
 
+/** The line that ends a block, with its line break: a block that has not got its break yet is not whole (the parser above keeps it in the remainder). */
+const BLOCK_END = /^progress=[^\r\n]*\r?\n/;
+
+/** What a reader that joins a render already under way is to be given of the output kept so far. The app process keeps the last 64 KiB of a job's output: some 280 blocks, minutes of a
+ *  render, handed over in one go when the page takes the export over after a reload. Read in one instant, those minutes would look like progress made in no time, and the rule that says the
+ *  time left (exportTimeLeft.ts) would take the export for a fast one that then slowed down. So the reader gets the newest whole block (the share, the frame and the speed the card needs are in
+ *  it) and what follows it (a block still being written), together with whatever lies between it and the block before it (a step marker), and none of the older blocks. Output with fewer than
+ *  two whole blocks is returned as it is. */
+export function newestProgressBlock(text: string): string {
+  const ends = new RegExp(BLOCK_END.source, "gm");
+  let newest = -1;
+  let older = -1;
+  for (let hit = ends.exec(text); hit !== null; hit = ends.exec(text)) {
+    older = newest;
+    newest = hit.index + hit[0].length;
+  }
+  return older < 0 ? text : text.slice(older);
+}
+
 /** `HH:MM:SS.ffffff` to milliseconds. ffmpeg emits `N/A` before the first frame lands. */
 export function hhmmssToMs(t: string | undefined): number {
   if (!t) return 0;
