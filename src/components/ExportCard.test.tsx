@@ -243,26 +243,21 @@ describe("ExportCard", () => {
       "the graphics chip, chosen by an app that chose it for long exports (a job that carries the old reason)",
       "amd",
       "over_minute",
-      "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+      "Using your graphics chip to save time · the file is larger",
     ],
     [
       "the graphics chip, chosen by the app because it passed its test",
       "amd",
       "chip_default",
-      "Using your graphics chip · the file is larger and the picture can differ slightly",
+      "Using your graphics chip · the file is larger",
     ],
     [
       "the graphics chip, picked by the person",
       "nvidia",
       "person",
-      "Using your graphics chip · the file is larger and the picture can differ slightly",
+      "Using your graphics chip · the file is larger",
     ],
-    [
-      "the faster setting",
-      "x264_fast",
-      "promise_line",
-      "Using light compression to save time · the picture may be slightly softer",
-    ],
+    ["the faster setting", "x264_fast", "promise_line", "Using light compression to save time"],
   ] as const)(
     "says, under the status line, what an export runs on, and why: %s",
     async (_name, encoder, reason, line) => {
@@ -270,6 +265,11 @@ describe("ExportCard", () => {
       await start("one.mp4", g.wait, { encoder, reason });
       render(<ExportCard />);
       expect(screen.getByText(line)).toBeVisible();
+      // the line is all the card says: no link to switch the chip (or light compression) off
+      expect(screen.queryByRole("button", { name: /turn (it )?(off|on)/i })).toBeNull();
+      expect(screen.queryByText(/^turn (it )?(off|on)$/i)).toBeNull();
+      // the cost the card names is the file's size; it never says the picture differs or is softer
+      expect(document.body.textContent).not.toMatch(/differ|softer|slightly/i);
       g.open();
     },
   );
@@ -280,11 +280,7 @@ describe("ExportCard", () => {
       const g = gated();
       await start("one.mp4", g.wait, { encoder, reason: "chip_default" });
       render(<ExportCard />);
-      expect(
-        screen.getByText(
-          "Using your graphics chip · the file is larger and the picture can differ slightly",
-        ),
-      ).toBeVisible();
+      expect(screen.getByText("Using your graphics chip · the file is larger")).toBeVisible();
       expect(screen.queryByText(/save time|saves time|long exports|over a minute/)).toBeNull();
       g.open();
     },

@@ -1109,8 +1109,7 @@ describe("(h) the Graphics chip row stays mounted behind the closed door, in bot
 });
 
 describe("(i) the light-compression sentence is Quality's only", () => {
-  const SENTENCE =
-    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+  const SENTENCE = "To save time, ArtDaddy will use light compression.";
 
   it("is drawn for Quality where the app's look says the lighter setting will be used, and never with Fast chosen, in either order", async () => {
     vi.mocked(decideExportEncoder).mockImplementation(async () => decision({ faster: true }));

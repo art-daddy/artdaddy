@@ -51,7 +51,7 @@ const NOTES_0280 = {
 const LINK = "Try it again now";
 /** The note for a chip that passed, as the row draws it now: the chip is used whenever it passed. */
 const PASSED_NOTE =
-  "Auto: used on this PC. The file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.";
+  "Auto: used on this PC. The file is usually larger. It passed ArtDaddy's test on this PC.";
 /** The note for a chip that passed in 0.28.0, the previous release, word for word. Written out so that the row is held against what it used to say, never against its own table. */
 const PASSED_NOTE_0280 =
   "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.";
@@ -278,7 +278,9 @@ describe("the chip row's note for a chip that passed, now and in 0.28.0", () => 
   it("says the chip is used on this PC, keeps what it costs, and keeps the sentence about the test", async () => {
     const after = await drawn();
     expect(after).toMatch(/^Auto: used on this PC\./);
-    expect(after).toContain("The file is usually larger and the picture can differ slightly.");
+    expect(after).toContain("The file is usually larger.");
+    // what the chip costs is the size of the file: the row says nothing of the picture
+    expect(after).not.toMatch(/picture|differ|softer|slightly/i);
     expect(after.endsWith(THIRD)).toBe(true);
     // the third sentence is the one 0.28.0 already had: kept, not rewritten
     expect(PASSED_NOTE_0280.endsWith(THIRD)).toBe(true);

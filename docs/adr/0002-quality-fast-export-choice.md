@@ -41,12 +41,17 @@ above that row and records the time-left rule that runs beside it.
    (`FAST_CHOICE_OFFERED`) draws or removes the row and its line.
    - The line behind Advanced settings is built from the shown values, clause by clause, and never names the encoder: "One size
      smaller, up to 30 frames a second, Medium quality." (Fast on 4K at 60), "Project size and frame rate, Medium quality."
-     (Quality at the start). Quality alone also gets "To save time, ArtDaddy will use light compression; the picture may be slightly
-     softer." where the app will use that setting.
+     (Quality at the start). Quality alone also gets "To save time, ArtDaddy will use light compression." where the app will use that
+     setting.
    - One Frame rate list per project serves both choices and holds Fast's own rate where the ladder 60 / 50 / 30 / 25 / 24 has none
      (72 gives 18); a rate is kept only while the list holds it.
    - The chip row's note for a passed chip reads "Auto: used on this PC. ..." under Quality and under Fast alike: the chip is used
      whenever it passed its test for the picture's size, so the note names no saving and no kind of export.
+   - Where the person switches the chip Off and it would have been used (it passed its test for the picture's size, nothing has set it
+     aside, the server's switches allow it), the Off note gains one sentence in the same paragraph: "Without the graphics chip, exports
+     are usually slower." Nowhere else is it said. The chat card has no switch for the chip of its own; it only says that the chip was
+     turned off in the dialog. No screen and no text of the assistant says that the picture differs or is softer because of the chip or
+     light compression (a guard reads every string, comment and tool text for it).
    - A key pressed in the dialog does not leave it (the panel stops every key but Escape). The editor behind it steps the playhead on
      an arrow key and cancels the browser's move between radios, plays on Space and deletes the selected clip on Delete: without this
      the radios could not be operated from the keyboard, and Delete in a dialog control removed a clip, in 0.28.0 as well.

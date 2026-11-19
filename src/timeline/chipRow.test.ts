@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { claimsIn } from "../test/retiredNames";
 import type { ChipPref } from "./chipPref";
 import {
   CHIP_ROW_NOTES,
@@ -51,7 +52,7 @@ const STATES: ChipRowState[] = [
   "set_aside",
   "off",
 ];
-const ACTIONS: (ChipRowAction | null)[] = ["turn_off", "turn_on", "try_again_now", null];
+const ACTIONS: (ChipRowAction | null)[] = ["turn_on", "try_again_now", null];
 
 describe("the graphics-chip row: the states the mockups draw", () => {
   it("checking: a chip is found and nothing is known yet, or its test is running", () => {
@@ -70,8 +71,8 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     expect(model({ verdict: "passed" })).toEqual({
       state: "auto_passed",
       visible: true,
-      note: "Auto: used on this PC. The file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
-      action: "turn_off",
+      note: "Auto: used on this PC. The file is usually larger. It passed ArtDaddy's test on this PC.",
+      action: null,
     });
   });
 
@@ -102,6 +103,16 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     });
   });
 
+  // The person who switches off a chip that was doing them good is told what it costs, in the same note: one voice, one paragraph.
+  it("Off, where the chip passed its test: the same note, and one more sentence that exports are usually slower without the chip", () => {
+    expect(model({ pref: "off", verdict: "passed" })).toEqual({
+      state: "off",
+      visible: true,
+      note: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor. Without the graphics chip, exports are usually slower.",
+      action: "turn_on",
+    });
+  });
+
   it("no row at all when no chip of a known maker is found", () => {
     expect(model({ found: false })).toEqual({
       state: "none",
@@ -121,8 +132,8 @@ describe("the graphics-chip row: the states the mockups draw", () => {
   });
 
   // The Export dialog leaves the old Mode row out where this row is drawn, and that row is where the person was told, before the start, what the chip costs.
-  it("says what the chip costs, the file usually larger and the picture able to differ slightly, in the one state where the chip is used and in no other", () => {
-    const COST = "The file is usually larger and the picture can differ slightly";
+  it("says what the chip costs, the file usually larger and nothing of the picture, in the one state where the chip is used and in no other", () => {
+    const COST = "The file is usually larger.";
     const states = new Set<string>();
     for (const input of everyInput()) {
       const row = chipRowModel(input);
@@ -130,6 +141,8 @@ describe("the graphics-chip row: the states the mockups draw", () => {
       expect(row.note.includes(COST), `${row.state}: ${JSON.stringify(input)}`).toBe(
         row.state === "auto_passed",
       );
+      // no state says the picture differs or is softer, whatever the chip did
+      expect(claimsIn(row.note), `${row.state}: ${JSON.stringify(input)}`).toEqual([]);
       states.add(row.state);
     }
     expect([...states].sort()).toEqual([
@@ -198,13 +211,53 @@ describe("the graphics-chip row: every combination of its inputs (a conformance 
   it("always draws the person's own Off where a chip is found, so it can be undone, whatever the server's switches and the picture's size say", () => {
     const offs = all.filter((input) => input.found && input.pref === "off");
     expect(offs.length).toBeGreaterThan(0);
-    for (const input of offs)
-      expect(chipRowModel(input), JSON.stringify(input)).toEqual({
+    for (const input of offs) {
+      const row = chipRowModel(input);
+      expect(row, JSON.stringify(input)).toMatchObject({
         state: "off",
         visible: true,
-        note: CHIP_ROW_NOTES.off,
         action: "turn_on",
       });
+      // the Off note is always the start of what is said (the sentence about what Off costs may follow it)
+      expect(row.note?.startsWith(CHIP_ROW_NOTES.off), JSON.stringify(input)).toBe(true);
+    }
+  });
+
+  // Off costs speed only where the chip would have been used. Where it would not (no pass, set aside, the server's switches off, a picture size the chip does not serve) the row must not say it does:
+  // the rule is stated through the row's own Auto state, so it follows whatever decides that state.
+  it("says exports are usually slower without the chip exactly where the same PC, left on Auto, would say the chip is used", () => {
+    const WARNING = "Without the graphics chip, exports are usually slower.";
+    let said = 0;
+    let silent = 0;
+    for (const input of all) {
+      const row = chipRowModel(input);
+      if (row.note === null) continue;
+      const says = row.note.includes(WARNING);
+      if (input.pref !== "off") {
+        expect(says, `not Off: ${JSON.stringify(input)}`).toBe(false);
+        continue;
+      }
+      const onAuto = chipRowModel({ ...input, pref: "auto", testing: false, quickFlagOn: true });
+      expect(says, JSON.stringify(input)).toBe(onAuto.state === "auto_passed");
+      if (says) {
+        // the Off note first, then the one sentence, nothing else
+        expect(row.note).toBe(`${CHIP_ROW_NOTES.off} ${WARNING}`);
+        said += 1;
+      } else {
+        expect(row.note).toBe(CHIP_ROW_NOTES.off);
+        silent += 1;
+      }
+    }
+    expect(said).toBeGreaterThan(0);
+    expect(silent).toBeGreaterThan(0);
+  });
+
+  it("says it for a chip that passed whatever the server's Quick export switch says, since that switch decides the row and not whether the chip is used", () => {
+    for (const quickFlagOn of [true, false])
+      expect(
+        model({ pref: "off", verdict: "passed", quickFlagOn }).note,
+        `quickFlagOn ${quickFlagOn}`,
+      ).toContain("exports are usually slower");
   });
 
   it("does not speak for the chip at a picture size it never serves: Auto draws no row there", () => {
@@ -235,13 +288,16 @@ describe("the graphics-chip row: every combination of its inputs (a conformance 
     }
   });
 
-  it("offers a link only where it makes sense: Turn off where the chip is in use, Try again where it was set aside", () => {
+  it("offers a link only where it makes sense: the way back to Auto where the chip is Off, Try again where it was set aside, and never one that switches the chip off", () => {
     for (const input of all) {
       const row = chipRowModel(input);
       expect(row.action === "try_again_now").toBe(row.state === "set_aside");
-      expect(row.action === "turn_off").toBe(row.state === "auto_passed");
       expect(row.action === "turn_on").toBe(row.state === "off");
     }
+    // over every input the links are exactly these two (and none): the chip is switched off in the Export dialog's row alone
+    expect(new Set(all.map((input) => chipRowModel(input).action))).toEqual(
+      new Set([null, "turn_on", "try_again_now"]),
+    );
   });
 
   it("reaches every state the mockups draw, and no state the mockups do not", () => {
@@ -258,7 +314,8 @@ describe("the graphics-chip row: every combination of its inputs (a conformance 
       expect(seen === undefined || seen === row.state).toBe(true);
       wordsOf.set(row.note!, row.state);
     }
-    expect(wordsOf.size).toBe(5);
+    // five states, and the Off state has two sets of words: its own, and its own with the sentence about what Off costs
+    expect(wordsOf.size).toBe(6);
   });
 });
 
@@ -308,7 +365,7 @@ describe("the graphics-chip row: hostile input", () => {
     first.note = "changed";
     first.action = null;
     expect(model({ verdict: "passed" }).note).toBe(CHIP_ROW_NOTES.auto_passed);
-    expect(model({ verdict: "passed" }).action).toBe("turn_off");
+    expect(model({ verdict: "passed" }).action).toBeNull();
     const none = model({ found: false });
     none.visible = true;
     expect(model({ found: false }).visible).toBe(false);

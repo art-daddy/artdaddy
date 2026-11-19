@@ -204,6 +204,46 @@ describe("the Export dialog and the Graphics chip row", () => {
       "Off: the graphics chip is not tested, offered or used on this PC.",
     );
   });
+  it("tells the person, in the Off note, that exports are usually slower without the chip once it passed, and takes the sentence away with Auto", async () => {
+    pcWith([amd]);
+    open();
+    await screen.findByRole("radiogroup", { name: "Graphics chip" });
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note")).toHaveTextContent(/^Auto: used on this PC\./),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(
+        "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor. Without the graphics chip, exports are usually slower.",
+      ),
+    );
+    expect(screen.getAllByText(/exports are usually slower/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note")).toHaveTextContent(/^Auto: used on this PC\./),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
+
+  it("says nothing of speed on a PC with no chip, and where Off was stored before the chip was ever tested", async () => {
+    pcWith([]);
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    const bare = open();
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+    expect(screen.queryByTestId("chip-row")).toBeNull();
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+    bare.unmount();
+
+    pcWith([amd]);
+    open();
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(
+        "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
+      ),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
 });
 
 // The Graphics chip row and the old Mode row (Full quality / Fast) speak for the same chip: where the chip row is drawn the dialog leaves the Mode row out, with what it says under it; where the chip row is not
@@ -234,12 +274,11 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     show();
     await waitFor(() =>
       expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
-        "The file is usually larger and the picture can differ slightly",
+        "The file is usually larger. It passed ArtDaddy's test on this PC.",
       ),
     );
-    expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
-      "It passed ArtDaddy's test on this PC.",
-    );
+    // what the chip costs is the size of the file; the row says nothing of the picture
+    expect(screen.getByTestId("chip-row-note").textContent).not.toMatch(/differ|softer|slightly/);
   });
 
   // What the row says and what the export will do must be one thing: the two artifacts compared are the note on screen and the app's own answer (its real rule, not a scripted one) for the same PC and a short project.
@@ -278,11 +317,7 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     const start = show();
     expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
     expect(screen.queryByTestId("chip-row")).toBeNull();
-    expect(
-      screen.getByText(
-        "The file will be larger and the picture can differ slightly from Full quality.",
-      ),
-    ).toBeVisible();
+    expect(screen.getByText("The file will be larger.")).toBeVisible();
     expect(screen.queryByText(/is selected because|over a minute/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null })); // left as the app chose

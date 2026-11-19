@@ -51,17 +51,19 @@ beforeAll(() => {
 afterAll(() => browserRule.remove());
 
 const NOTES = {
-  passed: "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  passed: "Auto: used on this PC. The file is usually larger.",
   checking: "Checking this PC's graphics chip\u2026",
   not_passed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
   set_aside:
     "The graphics chip stopped an export on this PC, so it is set aside for a day. Try it again now",
   off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
+  /** Off where a chip passed its test: the same note and the owner's sentence about what Off costs. */
+  offSlower:
+    "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor. Without the graphics chip, exports are usually slower.",
 } as const;
 const SUMMARY = "Project size and frame rate, Medium quality.";
-const FASTER =
-  "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+const FASTER = "To save time, ArtDaddy will use light compression.";
 
 const RATES_60: AdvancedSettingsProps["rates"] = [
   { value: null, label: "Same as project (60 fps)" },
@@ -634,7 +636,7 @@ describe("the Graphics chip row", () => {
     await user.click(screen.getByRole("radio", { name: "Off" }));
     expect(chip.onChange).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem(CHIP_PREF_KEY)).toBe("off");
-    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await waitFor(() => expect(note().textContent).toBe(NOTES.offSlower));
   });
 
   describe("is tested at the picture the export will deliver: the shown size and rate, not the project's", () => {

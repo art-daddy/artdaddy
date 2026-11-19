@@ -340,8 +340,7 @@ describe.each(STATES)("$state", ({ row }) => {
     });
   });
 
-  const LIGHT =
-    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+  const LIGHT = "To save time, ArtDaddy will use light compression.";
   const PROJECT = workloadOf(1080, 1920, 30);
 
   describe("the light-compression line", () => {

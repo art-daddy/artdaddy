@@ -267,7 +267,7 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
         "export choice",
         "Typical speed-up; your PC may differ.",
         "Advanced settings",
-        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+        "To save time, ArtDaddy will use light compression.",
         "Are you sure?",
         "This is a big export. Fast would be quicker.",
         "Export at Quality",
@@ -386,7 +386,7 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
         "Advanced settings",
         "Resolution",
         "Are you sure?",
-        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+        "To save time, ArtDaddy will use light compression.",
       ]),
     );
   });
@@ -435,13 +435,7 @@ describe("T16 (2) no D2 component carries a D2 word", () => {
     expect(copiesOf(at("  Advanced   settings "))).not.toEqual([]);
     expect(copiesOf(at("Resolution"))).not.toEqual([]);
     expect(copiesOf(at("Are you sure?"))).not.toEqual([]);
-    expect(
-      copiesOf(
-        at(
-          "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
-        ),
-      ),
-    ).not.toEqual([]);
+    expect(copiesOf(at("To save time, ArtDaddy will use light compression."))).not.toEqual([]);
     expect(copiesOf(at("Hint: Typical speed-up; your PC may differ. (more)"))).not.toEqual([]);
     expect(copiesOf(at("export-choice"))).toEqual([]);
     expect(copiesOf(at("export-advanced"))).toEqual([]);

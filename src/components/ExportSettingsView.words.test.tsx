@@ -121,10 +121,8 @@ const sized = (width: number, height: number, fps: number): RenderWorkload => ({
 });
 const DEFAULT = sized(1080, 1920, 30);
 
-const LIGHT_LINE =
-  "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
-const CHIP_PASSED_NOTE =
-  "Auto: used on this PC. The file is usually larger and the picture can differ slightly.";
+const LIGHT_LINE = "To save time, ArtDaddy will use light compression.";
+const CHIP_PASSED_NOTE = "Auto: used on this PC. The file is usually larger.";
 
 const settleAll = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 30))));
