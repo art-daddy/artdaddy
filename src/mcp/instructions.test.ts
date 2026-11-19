@@ -102,13 +102,11 @@ describe("the export rules an MCP agent is handed", () => {
       /\b(?:twice|double|\d+(?:\.\d+)?\s*(?:x|times))\s+(?:as\s+)?(?:fast|quick|the speed)|\bhalf the time\b|\d+\s*(?:%|percent)\s+(?:faster|quicker)|\b(?:same pixels|identical|unchanged picture)\b/i;
     for (const bad of ["twice as fast", "half the time", "3 times quicker", "the same pixels"])
       expect(`a lower setting takes ${bad}`).toMatch(PROMISE);
-    expect(
-      "a lower setting may render sooner; `time_left_s` is the only time to quote",
-    ).not.toMatch(PROMISE);
+    expect("`time_left_s` is the only time to quote, and only when asked").not.toMatch(PROMISE);
     expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(PROMISE);
-    // The old advice must not come back: the app gives no expected time, and nothing offers a lighter export.
+    // The old advice must not come back: the text gives no expected time, offers no lighter export and hints at no speed-up.
     expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(
-      /lighter export|expected_s|how long it is expected|may be quicker/i,
+      /lighter export|expected_s|how long it is expected|may be quicker|\bmay (?:be|finish|render|run|go)\b[^.]{0,30}\b(?:faster|quicker|sooner)\b/i,
     );
   });
 });
