@@ -91,7 +91,7 @@ const FLAP_WINDOW_REPORTS = 5;
 const FIRST_FIGURE_MAX_LATE_SECONDS = 1;
 /** Seconds after the first picture at which the figure is judged against what the run really took. */
 const EARLY_SECONDS = [10, 15, 20, 30, 45, 60];
-/** Of the runs still going 5 s or more at that moment, this share shows a figure (observed 100 %); of those, this share is within 50 % (observed 85 to 96 %) and this
+/** Of the runs still going 5 s or more at that moment and not yet "finishing", this share shows a figure (observed 100 %); of those, this share is within 50 % (observed 85 to 96 %) and this
  *  share within a factor of 2 (observed 97 to 100 %). */
 const EARLY_MIN_SHARE_WITH_FIGURE = 0.98;
 const EARLY_MIN_WITHIN_HALF = 0.8;
@@ -622,11 +622,16 @@ function buildReport(): string {
   L.push("|---:|---:|---:|---:|---:|");
   for (const seconds of EARLY_SECONDS) {
     const points = ALL.map((f) => pointAfterPicture(f, seconds)).filter(
-      (p): p is NonNullable<typeof p> => p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS,
+      (p): p is NonNullable<typeof p> =>
+        p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS && p.value.kind !== "finishing",
     );
     const shown = points.filter((p) => isFigure(p.value));
-    const half = shown.filter((p) => isRight((p.value as { seconds: number }).seconds, p.real, WITHIN_HALF));
-    const two = shown.filter((p) => withinFactorTwo((p.value as { seconds: number }).seconds, p.real));
+    const half = shown.filter((p) =>
+      isRight((p.value as { seconds: number }).seconds, p.real, WITHIN_HALF),
+    );
+    const two = shown.filter((p) =>
+      withinFactorTwo((p.value as { seconds: number }).seconds, p.real),
+    );
     L.push(
       `| ${seconds} | ${points.length} | ${shown.length} | ${half.length} (${pct0(half.length / Math.max(1, shown.length))}) | ${two.length} (${pct0(two.length / Math.max(1, shown.length))}) |`,
     );
@@ -977,7 +982,8 @@ describe("the recorded runs", () => {
     const failing: string[] = [];
     for (const seconds of EARLY_SECONDS) {
       const points = ALL.map((f) => pointAfterPicture(f, seconds)).filter(
-        (p): p is NonNullable<typeof p> => p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS,
+        (p): p is NonNullable<typeof p> =>
+          p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS && p.value.kind !== "finishing",
       );
       const shown = points.filter((p) => isFigure(p.value));
       const figureOf = (p: NonNullable<ReturnType<typeof pointAfterPicture>>): number =>
