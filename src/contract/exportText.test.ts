@@ -42,8 +42,12 @@ const BANS: ReadonlyArray<{ name: string; pattern: RegExp; bad: readonly string[
   {
     name: "a gentler retry is promised",
     pattern:
-      /\bgentler retry\b|\bretry (?:with|at|using) (?:a )?(?:gentler|lower|smaller|lighter)\b/i,
-    bad: ["After a failure offer ONE gentler retry.", "Then retry with a lower resolution."],
+      /\bgentler retry\b|\b(?:retry|try again) (?:with|at|using) (?:a )?(?:gentler|lower|smaller|lighter)\b/i,
+    bad: [
+      "After a failure offer ONE gentler retry.",
+      "Then retry with a lower resolution.",
+      "After a failure, offer to try again with a smaller picture.",
+    ],
   },
   {
     name: "a speed-up is promised or hinted",
