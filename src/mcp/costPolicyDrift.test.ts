@@ -3,9 +3,11 @@
 // external agents to confirm before calling image_ask / vision_describe / find_content /
 // extract_style long after those were withdrawn, which teaches an agent names it would then try.
 // Anchor the prose to the catalog instead of re-checking it by hand.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { toolDefinition } from "../contract";
 import { paramsByTool, toolNames } from "../contract/views";
 import { COST_POLICY, ASYNC_JOBS, PROJECT_NAVIGATION } from "./instructions";
 
@@ -21,20 +23,29 @@ const offered = new Set(toolNames());
 // callable without appearing in the server catalog.
 const MCP_ONLY = ["manage_project"];
 // Fields a tool's REPLY carries, which are not parameters. The prose names them so an agent reads
-// the reply the way it was meant. Each one counts only while some tool's description in the catalog
-// documents it, so a field that stops being real is a ghost here like any withdrawn tool.
-const REPLY_FIELDS = ["eta_s", "retry_after_s"];
-const described = toolNames()
-  .flatMap((name) => {
-    const tool = toolDefinition(name);
-    return [tool?.description ?? "", tool?.text_variant?.description ?? ""];
-  })
-  .join("\n");
+// the reply the way it was meant. Each one counts only while the code that builds the reply still
+// returns it (a property of that name in the file that builds it), so a field the app stops
+// returning is a ghost here like any withdrawn tool. The tool texts need not repeat it: the
+// export list's old sentence about `retry_after_s` was the only place a catalog description
+// documented that field, and it counted by accident, for a bullet about a different tool.
+const REPLY_FIELDS: Readonly<Record<string, string>> = {
+  eta_s: "tools/refState.ts",
+  retry_after_s: "tools/refState.ts",
+  time_left_s: "timeline/exportQueue.ts",
+};
+const SRC = path.resolve(__dirname, "..");
+
+/** Whether `source` returns `field`: a property of that name (`name:`), which is how a reply object and its type spell one. */
+function returns(source: string, field: string): boolean {
+  return new RegExp(`\\b${field}\\s*:`).test(source);
+}
+const returned = (field: string): boolean =>
+  returns(readFileSync(path.join(SRC, REPLY_FIELDS[field]), "utf8"), field);
 const vocabulary = new Set([
   ...offered,
   ...MCP_ONLY,
   ...Object.values(paramsByTool()).flatMap((t) => t.params),
-  ...REPLY_FIELDS.filter((field) => described.includes(`\`${field}\``)),
+  ...Object.keys(REPLY_FIELDS).filter(returned),
 ]);
 
 describe("MCP instruction prose vs the tool catalog", () => {
@@ -60,5 +71,19 @@ describe("MCP instruction prose vs the tool catalog", () => {
         tool,
       );
     }
+  });
+
+  it("counts a reply field only while the code that builds the reply returns it", () => {
+    // Not vacuous: every field the prose may name is returned today, by the file named for it.
+    for (const field of Object.keys(REPLY_FIELDS)) expect(returned(field), field).toBe(true);
+    // Both directions: a field the code does not return is a ghost; a reply object and its type both spell a real one.
+    expect(returns("return { eta_s: 1, slow };", "retry_after_s")).toBe(false);
+    expect(returns("// the retry_after_s of a reply", "retry_after_s")).toBe(false);
+    expect(returns("const wait = { retry_after_s: 10 };", "retry_after_s")).toBe(true);
+    expect(returns("interface Wait { eta_s: number }", "eta_s")).toBe(true);
+    const ghosts = identifiersIn("pending:true with ghost_field_s and retry_after_s").filter(
+      (n) => !vocabulary.has(n),
+    );
+    expect(ghosts).toEqual(["ghost_field_s"]);
   });
 });
