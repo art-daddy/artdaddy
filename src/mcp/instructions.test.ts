@@ -71,10 +71,10 @@ describe("MCP instructions", () => {
 // the text an agent is actually handed, not the constant's shape.
 describe("the export rules an MCP agent is handed", () => {
   const RULES = [
-    /Exports run one at a time\. Start ONE/,
-    /do not start a second or cancel a running one unless the person asked/,
-    /offer a lighter export \(`resolution`, `quality`, `fps`\) as their choice/,
-    /it may be quicker, but never promise how much/,
+    /Exports run one at a time: start ONE; no second, and no cancel of a running one, unless the person asked/,
+    /Never guess how long one takes; when asked, give manage_exports' `time_left_s`/,
+    /Leave `resolution`, `quality` and `fps` out unless the person names one; never lower them to speed it up/,
+    /On a failure, say in plain words what happened and offer to try again as it was, only on their yes/,
   ];
 
   it("reach the agent with the shared prompt and without it", async () => {
@@ -88,7 +88,7 @@ describe("the export rules an MCP agent is handed", () => {
       for (const rule of RULES) expect(text.replace(/\s+/g, " ")).toMatch(rule);
   });
 
-  it("offer a lighter export only through parameters `export` really has", () => {
+  it("name the export settings only through parameters `export` really has", () => {
     const params = paramsByTool().export?.params ?? [];
     for (const name of ["resolution", "quality", "fps"]) {
       expect(ASYNC_JOBS).toContain(`\`${name}\``);
@@ -96,15 +96,17 @@ describe("the export rules an MCP agent is handed", () => {
     }
   });
 
-  it("promise no speed-up and no picture, and the check can tell the two apart", () => {
+  it("offer no lighter export, quote no expected time, promise no speed-up and no picture", () => {
     // Both directions: a planted promise is caught, and the legitimate words pass.
     const PROMISE =
       /\b(?:twice|double|\d+(?:\.\d+)?\s*(?:x|times))\s+(?:as\s+)?(?:fast|quick|the speed)|\bhalf the time\b|\d+\s*(?:%|percent)\s+(?:faster|quicker)|\b(?:same pixels|identical|unchanged picture)\b/i;
     for (const bad of ["twice as fast", "half the time", "3 times quicker", "the same pixels"])
-      expect(`a lighter export takes ${bad}`).toMatch(PROMISE);
+      expect(`a lower setting takes ${bad}`).toMatch(PROMISE);
     expect(
-      "it may be quicker; a smaller picture and a lower frame rate, over twice expected_s",
+      "a lower setting may render sooner; `time_left_s` is the only time to quote",
     ).not.toMatch(PROMISE);
     expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(PROMISE);
+    // The old advice must not come back: the app gives no expected time, and nothing offers a lighter export.
+    expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(/lighter export|expected_s|how long it is expected|may be quicker/i);
   });
 });

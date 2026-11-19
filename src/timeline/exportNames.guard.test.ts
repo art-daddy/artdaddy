@@ -582,13 +582,6 @@ const ROWS: readonly Row[] = [
     why: 'the two sentences of the question "Are you sure?", which no screen draws in this build',
     text: "quicker",
   },
-  {
-    file: "mcp/instructions.ts",
-    decl: "ASYNC_JOBS",
-    gate: "plain-english",
-    why: '"it may be quicker" says what a smaller picture, a lower rate or a lower quality may do; it names no choice, and it is the same sentence as the server\'s own tool text',
-    text: "it may be quicker, but never promise how much",
-  },
 ];
 
 const sameRow = (row: Row, finding: Finding): boolean =>
