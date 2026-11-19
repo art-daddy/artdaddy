@@ -1045,11 +1045,12 @@ describe.skipIf(!FF || !FP)(
       engineBefore = useExportJob.getState().engine;
       useExportJob.getState().setEngine("partition-pipes-v1");
       // The native program waits for a render to END, at most this long in all and whatever progress it shows (`recv_timeout` in jobs.rs: it then kills the job and prints where the render had
-      // got to; it accepts nothing above two minutes, which is also its default), so the wait is the whole two minutes it allows: a render that is really stuck is still diagnosed there, with its last
-      // progress line, and not at the test's own timeout, which has to cover the three renders of this describe one after the other. A longer wait is not possible, so the file is kept away from load:
-      // alone, this describe's three renders take 72 s (about 24 s each, every one starts `cargo test`), but inside a whole smoke run, with about twenty files and cargo builds at once, the encode of
-      // the same three-second project slowed from 0.59x to 0.23x of real time and the render was cut off at the wait in two whole runs out of two (at 90 s, then at 120 s), and it passed both times when
-      // it ran on its own. So `npm run smoke` (package.json) runs this file in a pass of its own, after all the others.
+      // got to; it accepts nothing above two minutes, which is also its default), so the wait is the whole two minutes it allows: a render that is really stuck is still diagnosed there, and not at
+      // the test's own timeout, which has to cover the three renders of this describe one after the other. Alone, this describe's three renders take 72 s (about 24 s each, every one starts `cargo test`).
+      // Inside a whole smoke run, with about twenty files and cargo builds at once, the third render (x264 on the processor) did not end in two runs out of two, at 90 s and then at 120 s: the sink
+      // that receives the final encode's output held the same 60452 bytes at both ends (the finished file is 66735), with its one upload still open, so a longer wait does not help. Where it
+      // stops and why is not known, and it did not happen when the file ran on its own. So `npm run smoke` (package.json) runs this file in a pass of its own, after all the others. The text that
+      // the log below prints after "real render ended" is the OLDEST 3000 characters of the last 64 KB of the render's progress, not its end: the numbers in it are the render's first seconds.
       waitBefore = process.env.ARTDADDY_QA_RENDER_WAIT_MS;
       process.env.ARTDADDY_QA_RENDER_WAIT_MS = "120000";
     }, 120_000);
