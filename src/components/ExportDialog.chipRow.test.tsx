@@ -101,6 +101,27 @@ const wantsRow = (): ExportEncoderDecision => ({
   fastSeconds: 240,
   facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
 });
+/** The app's answer when a chip has passed for the picture's size, as the rule words it now: the chip is chosen for the person (`chip_default`) whatever the length, so it wants the old Mode row, on Fast, with a note that says only what Fast costs. */
+const chipChosen = (): ExportEncoderDecision => ({
+  ...decision(),
+  mode: "fast",
+  chip: "amd",
+  showRow: true,
+  defaultMode: "fast",
+  reason: "chip_default",
+  fullSeconds: 40,
+  fastSeconds: 15,
+  facts: { encoder: "amd", chip: "amd", reason: "chip_default", tests: [] },
+});
+/** The app's answer when a chip has passed but the app is not choosing it for the person (the server's switch for that is off): the row is on offer and starts on Full quality. */
+const chipOffered = (): ExportEncoderDecision => ({
+  ...decision(),
+  showRow: true,
+  defaultMode: "quality",
+  fullSeconds: 720,
+  fastSeconds: 240,
+  facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
+});
 /** Nothing of the old Mode row is on screen: not the row, not what it says under it, not its amber note and not its "would take" line. */
 const noModeRow = () => {
   expect(screen.queryByRole("radiogroup", { name: "export mode" })).toBeNull();
@@ -213,12 +234,79 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     show();
     await waitFor(() =>
       expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
-        "the file is usually larger and the picture can differ slightly",
+        "The file is usually larger and the picture can differ slightly",
       ),
     );
     expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
       "It passed ArtDaddy's test on this PC.",
     );
+  });
+
+  // What the row says and what the export will do must be one thing: the two artifacts compared are the note on screen and the app's own answer (its real rule, not a scripted one) for the same PC and a short project.
+  it("says the chip is used on this PC, and the app's own answer for this PC and a short project is the chip", async () => {
+    pcWith([amd]);
+    const real = await vi.importActual<typeof import("../timeline/exportChoice")>(
+      "../timeline/exportChoice",
+    );
+    const answers: ExportEncoderDecision[] = [];
+    vi.mocked(decideExportEncoder).mockImplementation(async (input) => {
+      const answer = await real.decideExportEncoder(input);
+      answers.push(answer);
+      return answer;
+    });
+    const start = show(vi.fn(), { ...PROJECT, durationSeconds: 20 });
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note")).toHaveTextContent(/^Auto: used on this PC\./),
+    );
+    await waitFor(() => expect(answers.length).toBeGreaterThan(0));
+    await settleAll();
+    const answer = answers[answers.length - 1];
+    expect({ mode: answer.mode, chip: answer.chip, reason: answer.reason }).toEqual({
+      mode: "fast",
+      chip: "amd",
+      reason: "chip_default",
+    });
+    noModeRow();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null }));
+  });
+
+  it("draws the Mode row, started on Fast, for a chip chosen for the person where the chip row is not drawn: it says what Fast costs and not that the export is long, and a pick of Full quality is sent as the person's choice", async () => {
+    pcWith([amd]);
+    __setExportFlag("quick_export", false); // the server's switch for the chip row: the dialog is the old one
+    vi.mocked(decideExportEncoder).mockImplementation(async () => chipChosen());
+    const start = show();
+    expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
+    expect(screen.queryByTestId("chip-row")).toBeNull();
+    expect(
+      screen.getByText(
+        "The file will be larger and the picture can differ slightly from Full quality.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/is selected because|over a minute/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null })); // left as the app chose
+    expect(useExportJob.getState().modeRowOnScreen).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: "Full quality" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("starts the Mode row on Full quality, offering Fast, where the app is not choosing the chip for the person (the server's switch for that is off), and a pick of Fast is sent", async () => {
+    pcWith([amd]);
+    __setExportFlag("quick_export", false);
+    vi.mocked(decideExportEncoder).mockImplementation(async () => chipOffered());
+    const start = show();
+    expect(await screen.findByRole("radio", { name: "Full quality" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Fast" })).not.toBeChecked();
+    expect(
+      screen.queryByText(/is selected because|over a minute|The file will be larger/),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null }));
+    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "fast" }));
   });
 
   it("draws no Mode row while the chip row has not answered, and then draws it exactly as it was where the chip row is not drawn", async () => {

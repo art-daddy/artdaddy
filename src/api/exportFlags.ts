@@ -7,7 +7,7 @@
 //   pc_floor    stop an export when the PC itself runs short of memory (off: the job's own limits only)
 //   chip_amd, chip_nvidia, chip_intel
 //               that maker's graphics chip may be tested, offered and chosen (off: never; the processor encodes)
-//   chip_default  Fast is chosen for the person when the export would take over a minute (off: still offered)
+//   chip_default  the graphics chip is chosen for the person whenever it passed its test for the picture's size (off: still offered)
 //   faster_x264 the processor's faster setting may be chosen for a slow export when no chip is usable (off: never)
 //   speech_cpu_cap
 //               the "transcribe less" group: a whole-file processor job projected over 10 minutes is not started by

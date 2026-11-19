@@ -31,12 +31,12 @@ export const D2_WORDS = {
   /** S16 the quality row. */
   qualityLabel: "Quality",
   qualityName: "quality",
-  /** S18 the Graphics chip note for the state where the chip passed its test (OD-5, owner's yes of 18 Nov: the page's sentence with the clause "the picture can differ slightly" kept, in 0.28.0's own
-   *  words). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
+  /** S18 the Graphics chip note for the state where the chip passed its test: the chip is used whenever it passed for the size, so the note says it is used and what that costs (the sentence the Fast
+   *  note already had). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
   chipNotePassed:
-    "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
-  /** S18 with Fast chosen: the same note without "when it saves time", because a Fast export uses a chip that passed whether or not it saves time (`chooseEncoder`, request "quick"); the clause about the
-   *  file and the picture is the same. */
+    "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  /** S18 with Fast chosen: the same sentence. Kept as its own entry (the dialog picks it with `fastChosen`) so the two can be worded apart again without touching the component; since the chip is used
+   *  whenever it passed, Quality and Fast say the same. */
   chipNotePassedFast:
     "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
   /** S19, S20 the footer. */

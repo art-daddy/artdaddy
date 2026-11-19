@@ -14,7 +14,7 @@ import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
 import { EXPORT_REASON_CODES } from "../api/exportReason";
-import { EXPORT_ENCODERS } from "../api/exportVocabulary";
+import { EXPORT_ENCODERS, EXPORT_MODE_REASONS } from "../api/exportVocabulary";
 import { retiredIn } from "../test/retiredNames";
 import { exportHelp, type HelpInput } from "./exportHelp";
 import { describeEncoder } from "./exportWords";
@@ -817,10 +817,12 @@ describe("each gate a row names still holds", () => {
 // What the build says: the real words functions, driven with what the build can give them
 // ---------------------------------------------------------------------------------------------------------------------
 
-const REASONS = ["over_minute", "person", "promise_line", "none"] as const;
+const REASONS = ["over_minute", "person", "promise_line", "none", "chip_default"] as const;
 
 describe("the words of the reachable surfaces carry none of the old names", () => {
   it("says what an export runs on in the owner's names, for every encoder and every reason the app records", () => {
+    // The list above is every reason the report can carry: a word added to the vocabulary without its sentence checked here fails.
+    expect([...REASONS].sort()).toEqual([...EXPORT_MODE_REASONS].sort());
     for (const encoder of EXPORT_ENCODERS)
       for (const reason of REASONS) {
         const line = describeEncoder(encoder, reason);

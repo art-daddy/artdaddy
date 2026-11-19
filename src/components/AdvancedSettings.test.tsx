@@ -51,8 +51,7 @@ beforeAll(() => {
 afterAll(() => browserRule.remove());
 
 const NOTES = {
-  passed:
-    "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
+  passed: "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
   checking: "Checking this PC's graphics chip\u2026",
   not_passed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",

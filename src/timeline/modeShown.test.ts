@@ -30,18 +30,30 @@ const talk: Timeline = (() => {
   return raw;
 })();
 
-/** The app's answer when a chip has proven itself and the export is long: it wants the Mode row, started on Fast. */
+/** The app's answer when a chip has proven itself: it chooses it for the person, so it wants the Mode row, started on Fast (whatever the estimate says). */
 const wantsRow: ExportEncoderDecision = {
   mode: "fast",
   chip: "amd",
-  reason: "over_minute",
+  reason: "chip_default",
   showRow: true,
   defaultMode: "fast",
   fullSeconds: 720,
   fastSeconds: 240,
   fullGuessed: false,
   tests: [],
-  facts: { encoder: "amd", chip: "amd", reason: "over_minute", tests: [] },
+  facts: { encoder: "amd", chip: "amd", reason: "chip_default", tests: [] },
+};
+/** The app's answer where no chip can serve: there is no Mode row to show. */
+const noChip: ExportEncoderDecision = {
+  mode: "quality",
+  reason: "none",
+  showRow: false,
+  defaultMode: "quality",
+  fullSeconds: 720,
+  fastSeconds: null,
+  fullGuessed: false,
+  tests: [],
+  facts: { encoder: "x264", reason: "none", tests: [] },
 };
 
 const options: ExportOptions = { resolution: "source", quality: "medium" };
@@ -71,6 +83,29 @@ describe("what an export from the menu says of the Mode row", () => {
     );
   });
 
+  it("says it for a short export with no estimate too: the row is on offer wherever a chip is usable, and what it started on is what the app chose", async () => {
+    useExportJob.getState().setModeRowOnScreen(true);
+    const short = { ...wantsRow, fullSeconds: 12, fastSeconds: null, fullGuessed: true };
+    expect((await optionsFor(menu, short)).choice?.shown).toBe("fast");
+    // The chip's switch off: the row is still on offer, and starts on Full quality.
+    const off = {
+      ...short,
+      mode: "quality" as const,
+      chip: undefined,
+      reason: "none" as const,
+      defaultMode: "quality" as const,
+      facts: { encoder: "x264" as const, chip: "amd" as const, reason: "none" as const, tests: [] },
+    };
+    expect((await optionsFor(menu, off)).choice?.shown).toBe("full");
+  });
+
+  it("claims no row where none is on offer (no chip can serve), whatever the dialog last showed", async () => {
+    for (const onScreen of [true, false, null]) {
+      useExportJob.setState({ modeRowOnScreen: onScreen });
+      expect((await optionsFor(menu, noChip)).choice?.shown, String(onScreen)).toBeUndefined();
+    }
+  });
+
   it("says nothing of a row the dialog did not draw (the Graphics chip row was drawn in its place), and still runs the export as the app decided", async () => {
     useExportJob.getState().setModeRowOnScreen(false);
     const out = await optionsFor(menu);
@@ -79,7 +114,7 @@ describe("what an export from the menu says of the Mode row", () => {
     expect(out).toMatchObject({
       mode: "fast",
       chip: "amd",
-      choice: { encoder: "amd", chip: "amd", reason: "over_minute" },
+      choice: { encoder: "amd", chip: "amd", reason: "chip_default" },
     });
   });
 

@@ -1,6 +1,7 @@
-// The `notes` prop of the Graphics chip row: the Export dialog's Quality / Fast view draws the owner's own sentence for the state where the chip passed its test, while the 0.28.0 dialog (which passes no
-// `notes`) keeps its own words. Drawn from the real chip lookup over a scripted PC and a scripted ffmpeg, with the same boundary mocked as ChipRow.test.tsx. The 0.28.0 words are written out here,
-// never read from the row's own table, so a change to them is a change this file sees.
+// The `notes` prop of the Graphics chip row: the Export dialog's Quality / Fast view draws its own sentence for the state where the chip passed its test, while the 0.28.0-style dialog (which passes no
+// `notes`) draws the row's own words. Drawn from the real chip lookup over a scripted PC and a scripted ffmpeg, with the same boundary mocked as ChipRow.test.tsx. The words are written out here, never read
+// from the row's own table, so a change to them is a change this file sees. Four of the five notes are 0.28.0's; the note for a chip that passed changed on purpose (the chip is used whenever it passed), and
+// the last block holds it against the sentence 0.28.0 drew.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,11 +39,9 @@ const FLAGS: readonly ExportFlagName[] = [
   "quick_export",
 ];
 
-/** The five notes of 0.28.0, word for word ("\u2026" is the ellipsis of the first one). */
+/** The four notes of 0.28.0 that the row still draws, word for word ("\u2026" is the ellipsis of the first one). */
 const NOTES_0280 = {
   checking: "Checking this PC's graphics chip\u2026",
-  auto_passed:
-    "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
   auto_not_passed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
   set_aside:
@@ -50,6 +49,12 @@ const NOTES_0280 = {
   off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
 } as const;
 const LINK = "Try it again now";
+/** The note for a chip that passed, as the row draws it now: the chip is used whenever it passed. */
+const PASSED_NOTE =
+  "Auto: used on this PC. The file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.";
+/** The note for a chip that passed in 0.28.0, the previous release, word for word. Written out so that the row is held against what it used to say, never against its own table. */
+const PASSED_NOTE_0280 =
+  "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.";
 
 type Resources = Awaited<ReturnType<typeof resolveExportResources>>;
 const resourcesWith = (adapters: GraphicsAdapter[]): Resources => ({
@@ -155,23 +160,23 @@ describe("the chip row's notes prop", () => {
     },
   );
 
-  it("does not carry the words of one state over to another: Off is named, and Auto then passes with 0.28.0's words", async () => {
+  it("does not carry the words of one state over to another: Off is named, and Auto then passes with the row's own words", async () => {
     pc([amd]);
     localStorage.setItem(CHIP_PREF_KEY, "off");
     render(<ChipRow notes={{ off: "Own off words" }} />);
     await waitFor(() => expect(note().textContent).toBe("Own off words"));
     fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
-    await waitFor(() => expect(note().textContent).toBe(NOTES_0280.auto_passed));
+    await waitFor(() => expect(note().textContent).toBe(PASSED_NOTE));
     expect(localStorage.getItem(CHIP_PREF_KEY)).toBeNull();
   });
 
   it.each([
     ["no prop", undefined],
     ["an empty prop", {}],
-  ] as const)("is 0.28.0's row, word for word, with %s", async (_what, notes) => {
+  ] as const)("is the row's own, word for word, with %s", async (_what, notes) => {
     pc([amd]);
     render(<ChipRow notes={notes} />);
-    expect((await answered()).textContent).toBe(NOTES_0280.auto_passed);
+    expect((await answered()).textContent).toBe(PASSED_NOTE);
     expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
   });
 
@@ -249,5 +254,35 @@ describe("the chip row's notes prop", () => {
     await settled();
     expect(drawn).not.toHaveBeenCalledWith(true);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// The chip is used whenever it passed its test for the picture's size. The row's note for that state said, in 0.28.0, that the chip is used for long exports where it saves time, which the export no longer does,
+// and a person reads it before the start. The two artifacts compared: the note the real row draws now, and the sentence 0.28.0 drew (written out above, not read from the row's table).
+describe("the chip row's note for a chip that passed, now and in 0.28.0", () => {
+  const drawn = async (notes?: Parameters<typeof ChipRow>[0]["notes"]): Promise<string> => {
+    pc([amd]);
+    render(<ChipRow notes={notes} />);
+    return (await answered()).textContent ?? "";
+  };
+  const THIRD = " It passed ArtDaddy's test on this PC.";
+
+  it("is not the sentence 0.28.0 drew, and no word of that sentence's claim is left", async () => {
+    const after = await drawn();
+    expect(after).not.toBe(PASSED_NOTE_0280);
+    // What the old sentence claimed: the chip is used for a kind of export (long ones), where it saves time. The new one names no kind of export, no saving and no condition.
+    expect(PASSED_NOTE_0280).toMatch(/long exports where it saves time/);
+    expect(after).not.toMatch(/long|exports|saves?|saving|time|minute|when|where/i);
+  });
+
+  it("says the chip is used on this PC, keeps what it costs, and keeps the sentence about the test", async () => {
+    const after = await drawn();
+    expect(after).toMatch(/^Auto: used on this PC\./);
+    expect(after).toContain("The file is usually larger and the picture can differ slightly.");
+    expect(after.endsWith(THIRD)).toBe(true);
+    // the third sentence is the one 0.28.0 already had: kept, not rewritten
+    expect(PASSED_NOTE_0280.endsWith(THIRD)).toBe(true);
+    // one note, three sentences, nothing else
+    expect(after.split(/(?<=\.) /)).toHaveLength(3);
   });
 });

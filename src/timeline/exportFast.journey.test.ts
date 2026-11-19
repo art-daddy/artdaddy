@@ -396,10 +396,17 @@ describe("3. with the switch off a Fast pick is Quality in every byte", () => {
         expect(keysOf(ignored.done), where).toEqual(keysOf(none.done));
         expect(ignored.running, where).not.toHaveProperty("route");
         expect(ignored.done, where).not.toHaveProperty("route");
-        // It is the project's own picture (so the two are not both empty), and the same pick with the switch on is not ignored.
+        // It is the project's own picture (so the two are not both empty), and the same pick with the switch on is not ignored. The control is an export that
+        // really is different from the live pick: without a chip, the unpinned export (the processor, plain); with one, the person's own Full quality (the
+        // processor), because an unpinned export on a PC with a chip that passed is already on the chip, and where Fast leaves the picture as it is (480p24)
+        // the live pick's command can equal it.
         expect(ignored.output, where).toEqual(pic(canvas.w, canvas.h, canvas.fps));
         const on = await observe({ canvas, slot: FAST, chip });
-        expect(on.command, where).not.toEqual(none.command);
+        const control = chip ? await observe({ canvas, chip, mode: "quality" }) : none;
+        expect(control.codec, where).toBe("libx264");
+        expect(on.command, where).not.toEqual(control.command);
+        expect(on.codec, where).toBe(chip ? "h264_amf" : "libx264");
+        if (!chip) expect(after(on.command, "-preset"), where).toBe("veryfast");
       }
   });
 

@@ -53,7 +53,7 @@ const FLAGS: readonly ExportFlagName[] = [
 ];
 const CHIP_PREF = "artdaddy.chipPref.v1";
 const CHIP_PASSED_NOTE =
-  "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.";
+  "Auto: used on this PC. The file is usually larger and the picture can differ slightly.";
 
 function pcWith(adapters: GraphicsAdapter[]): void {
   const scripted = harness(adapters);

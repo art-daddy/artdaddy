@@ -1,7 +1,7 @@
 // The full-quality guard: proof that a change to Quick export moved not one byte of an export that does not name Quick.
 //
 // It makes a SHA-256 of the stable JSON text of what four doors of the exporter produce for a large, fixed table of projects and
-// options, and compares every hash with `__fixtures__/exportFullGuard.sha256.json`:
+// options, and compares every hash with the fixture the constant `FIXTURE` names (see TWO FIXTURES):
 //   A  the command builder, `buildRenderCommand`: the WHOLE plan (arguments, graph, steps, files, facts), not only the arguments, for
 //      ten project shapes on twelve canvases under every option, singly and in pairs and in a seeded sample of everything at once
 //   B  the encoder choice as the export tool makes it, `encoderOptions`, for the requests auto, full and fast: its answer AND the
@@ -11,10 +11,15 @@
 //   D  `encoderOptions` for the request "quick", as 0.28.0 already answers it (the encoder only: the chip where one passed, else
 //      the faster setting), hashed like B and kept apart so the sections can be compared separately
 //
-// THE FIXTURE IS MADE ONCE, ON 0.28.0 (the client at commit 32df78e3, before any Quick change), AND IS NEVER REGENERATED TO MAKE THIS
-// TEST PASS. After a change, run print mode to a DIFFERENT file and compare the two key by key; a key that moved is a change in what
-// an export does, to be explained, not blessed. The combined hash is pinned in this file, so the data cannot be replaced without
-// this file saying so in the same diff.
+// THE FIXTURE IS NEVER REGENERATED TO MAKE THIS TEST PASS. After a change, run print mode to a DIFFERENT file and compare the two key by
+// key; a key that moved is a change in what an export does, to be explained, not blessed. The combined hash is pinned in this file, so
+// the data cannot be replaced without this file saying so in the same diff.
+//
+// TWO FIXTURES. `exportFullGuard.sha256.json` was made once, on 0.28.0 (the client at commit 32df78e3, before any Quick change), and is the
+// record of what that export did: it is kept untouched and its combined hash is pinned below (OLD_COMBINED). The rule for an export nobody
+// pinned then changed on purpose (the graphics chip is used whenever it passed its test for the picture's size and is not Off), and
+// `exportFullGuard.always.sha256.json` was printed from the tree after that change: it is the one the four sections below compare with.
+// The last describe reads both files and checks that what differs between them is what that rule can reach and nothing else.
 //
 //   check mode (the default): every hash is recomputed and compared with the fixture: every key present and equal, no key extra.
 //   print mode: EXPORT_GUARD_PRINT=<absolute path of a NEW file> writes the hashes there (UTF-8, LF, keys sorted) and compares
@@ -84,11 +89,14 @@ import { buildRenderCommand, encoderOptions, type RenderPlan } from "./render";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-const FIXTURE = "src/timeline/__fixtures__/exportFullGuard.sha256.json";
+const FIXTURE = "src/timeline/__fixtures__/exportFullGuard.always.sha256.json";
+const OLD_FIXTURE = "src/timeline/__fixtures__/exportFullGuard.sha256.json";
 const PRINT_TO = process.env.EXPORT_GUARD_PRINT;
 const NOTES_TO = process.env.EXPORT_GUARD_NOTES;
-/** The combined hash of the fixture made on 0.28.0 (set once, when the fixture was made; see the header). */
-const PINNED_COMBINED = "5050b04afc969defc30a2f767c351a22104aeb3717a708f4dd03d1392bacadf5";
+/** The combined hash of the fixture printed after the chip became the rule (set once, when the fixture was made; see the header). */
+const PINNED_COMBINED = "a4e4d59c61535a7fca8c8f5b22418195caffbba86499847ea0bbef56c90bd170";
+/** The combined hash of the fixture made on 0.28.0, which is kept as the record (see the header). */
+const OLD_COMBINED = "5050b04afc969defc30a2f767c351a22104aeb3717a708f4dd03d1392bacadf5";
 const SEED = 20261118;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -209,18 +217,21 @@ function collect(result: Computed, key: string, one: Digest): void {
 
 interface Fixture {
   format: number;
+  /** Only the fixture printed after the rule changed has these two: what it is and the fixture it comes from. */
+  about?: string;
+  derivedFrom?: { file: string; combined: string };
   sections: Record<string, { count: number }>;
   combined: string;
   hashes: Record<string, string>;
 }
 
-function readFixture(): Fixture {
+function readFixture(file: string = FIXTURE): Fixture {
   let text: string;
   try {
-    text = readFileSync(FIXTURE, "utf8");
+    text = readFileSync(file, "utf8");
   } catch {
     throw new Error(
-      `${FIXTURE} is missing: the fixture is made once, in print mode, on the untouched tree`,
+      `${file} is missing: the fixture is made once, in print mode, on the untouched tree`,
     );
   }
   return JSON.parse(text.replace(/\r\n/g, "\n")) as Fixture;
@@ -1745,4 +1756,92 @@ describe("the full-quality guard", () => {
       `lifting the hold on estimate_v2 and pc_check moved ${moved.length} of ${Object.keys(held).length} entries; the first: ${moved.slice(0, 10).join(" ; ")}`,
     ).toEqual([]);
   }, 1_500_000);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What the change of rule moved: the 0.28.0 fixture against the one printed after it (both read from disk, nothing recomputed)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** How many keys of each section differ between the two fixtures. Every one is explained by the rule: a request that is not Full quality, on a PC with a usable
+ *  chip (and, in section C, a Fast pick through the dialog whose Mode row now starts on Fast). A later change of the rule shows up as a change of these numbers. */
+const MOVED_BY_THE_RULE: Record<SectionName, number> = { A: 0, B: 772, C: 621, D: 28 };
+
+describe("what the change of rule moved: the 0.28.0 fixture against the one printed after it", () => {
+  const both = (): { old: Fixture; now: Fixture; moved: string[] } => {
+    const old = readFixture(OLD_FIXTURE);
+    const now = readFixture();
+    const moved = Object.keys(now.hashes)
+      .filter((key) => now.hashes[key] !== old.hashes[key])
+      .sort();
+    return { old, now, moved };
+  };
+  const movedIn = (moved: string[], name: SectionName): string[] =>
+    moved.filter((key) => key.startsWith(`${name}|`));
+  /** A field of a key's text: `req=auto`, `chips=amd`, `who=menu`, ... */
+  const field = (key: string, name: string): string | undefined =>
+    key.match(new RegExp(`[|,]${name}=([^|,]*)`))?.[1];
+  /** A key's PC has a chip of a maker whose switch is on (`chips=` names what is installed, `amd=`, `nv=` and `in=` the switches). */
+  const chipUsable = (key: string): boolean => {
+    const on: Record<ChipMaker, boolean> = {
+      amd: field(key, "amd") === "1",
+      nvidia: field(key, "nv") === "1",
+      intel: field(key, "in") === "1",
+    };
+    return PRESENT[field(key, "chips") as ChipsId].some((maker) => on[maker]);
+  };
+
+  it("keeps the 0.28.0 fixture as the record, and the new one names it as its origin", () => {
+    const { old, now } = both();
+    expect(combinedOf(old.hashes), "the old fixture's own lines").toBe(OLD_COMBINED);
+    expect(old.combined).toBe(OLD_COMBINED);
+    expect(now.derivedFrom).toEqual({
+      file: "exportFullGuard.sha256.json",
+      combined: OLD_COMBINED,
+    });
+    expect(now.about, "the new fixture says why it exists").toMatch(/changed on purpose/);
+  });
+
+  it("has the same keys in both, and the command builder (section A) did not move in any of them", () => {
+    const { old, now, moved } = both();
+    expect(Object.keys(now.hashes).sort()).toEqual(Object.keys(old.hashes).sort());
+    expect(movedIn(moved, "A")).toEqual([]);
+  });
+
+  it("moved as many keys in each section as the rule reaches", () => {
+    const { moved } = both();
+    expect(Object.fromEntries(SECTIONS.map((name) => [name, movedIn(moved, name).length]))).toEqual(
+      MOVED_BY_THE_RULE,
+    );
+  });
+
+  it("moved only keys the rule can reach: no PC without a usable chip, no working render, never the person's Full quality", () => {
+    const { moved } = both();
+    for (const key of [...movedIn(moved, "B"), ...movedIn(moved, "D")]) {
+      expect(chipUsable(key), `${key} moved though no chip of its PC could be used`).toBe(true);
+      expect(field(key, "req"), `${key}: Full quality is the processor, byte for byte`).not.toBe(
+        "full",
+      );
+      expect(field(key, "kind"), `${key}: a working render never uses a chip`).toBe("deliverable");
+    }
+    for (const key of movedIn(moved, "C")) {
+      expect(field(key, "chip"), `${key} moved though its PC has no chip`).toBe("amd");
+      expect(field(key, "who"), `${key}: the person's Full quality is the processor`).not.toBe(
+        "menu-quality",
+      );
+    }
+  });
+
+  it("moved a caller with no dialog only where the encoder itself can change, and Quick only through the dialog's Mode row", () => {
+    const { moved } = both();
+    for (const key of movedIn(moved, "B").filter((one) => field(one, "who") !== "menu")) {
+      const encoderCanChange =
+        (field(key, "req") === "auto" && field(key, "cd") === "1") || field(key, "req") === "fast";
+      expect(
+        encoderCanChange,
+        `${key}: an unpinned request with the switch off keeps the processor`,
+      ).toBe(true);
+    }
+    for (const key of movedIn(moved, "D"))
+      expect(field(key, "who"), `${key}: the request quick keeps its encoder`).toBe("menu");
+  });
 });

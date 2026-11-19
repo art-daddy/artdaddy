@@ -6,7 +6,7 @@
 //  - the orderings of the chip row's first look and the app's look (either first, either never, no chip at all): what Export sends equals what the 0.28.0 dialog sends at every press.
 // Mutants this file must kill: the chip row rendered only while the door is open; the chip row unmounted and mounted again by the door; `mode` read from a chip row that is not mounted; Off changing the object; the 0.28.0
 // "passed" note shown; a chip row drawn without a chip or without a project.
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, configure, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,6 +44,10 @@ vi.mock("../tools/tauri", () => ({
   },
 }));
 
+// The row's first look runs the real chip test, whose modules load on first use: where every test file runs at once that can take longer than the one second `waitFor` allows by default. A wait ends as
+// soon as the note says what it should; this bounds only a note that never does.
+configure({ asyncUtilTimeout: 10_000 });
+
 const FLAGS: readonly ExportFlagName[] = [
   "chip_amd",
   "chip_nvidia",
@@ -54,11 +58,10 @@ const FLAGS: readonly ExportFlagName[] = [
 /** The per-PC switch's key, written out: a rename would orphan every person's stored Off. */
 const CHIP_PREF = "artdaddy.chipPref.v1";
 
-/** The chip row's note in each state. The passed one is the owner's sentence for this view (OD-5); the others are 0.28.0's words. */
+/** The chip row's note in each state. The passed one is this view's sentence (the chip is used whenever it passed); the others are 0.28.0's words. */
 const NOTES = {
   checking: "Checking this PC's graphics chip\u2026",
-  passed:
-    "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
+  passed: "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
   notPassed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
   setAside:

@@ -125,12 +125,12 @@ const EXPORTS = Object.entries(WORDS);
 const FUNCTION_EXPORTS = EXPORTS.filter(([, value]) => typeof value === "function").map(
   ([name]) => name,
 );
-/** Every string of every non-function export: D2_WORDS, RESOLUTION_WORDS, QUALITY_WORDS, CHIP_NOTE_DROPPED_CLAUSES and whatever is added. */
-const WALKED = unique(
-  EXPORTS.filter(([, value]) => typeof value !== "function").flatMap(([, value]) =>
-    stringsOf(value),
-  ),
+/** Every string of every non-function export, once per entry that carries it. */
+const ENTRIES = EXPORTS.filter(([, value]) => typeof value !== "function").flatMap(([, value]) =>
+  stringsOf(value),
 );
+/** Every string of every non-function export: D2_WORDS, RESOLUTION_WORDS, QUALITY_WORDS, CHIP_NOTE_DROPPED_CLAUSES and whatever is added. */
+const WALKED = unique(ENTRIES);
 
 /** The builders that write digits and the letter x and no sentence of their own. */
 const NUMBER_BUILDERS = ["describeFigure", "figureBrackets", "figureNumber", "formatRate"];
@@ -259,7 +259,7 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
     }
   });
 
-  it("holds each sentence or name of 4 characters or more as ONE quoted literal in src, the words file's, except the named legacy ones", () => {
+  it("holds each sentence or name of 4 characters or more in the words file alone, as one quoted literal per entry that carries it, except the named legacy ones", () => {
     const texts = WALKED.filter((text) => text.length >= 4 && !(text in LEGACY_KEPT));
     // not an empty loop: the sentences of the owner's copy are in it
     expect(texts).toEqual(
@@ -277,7 +277,13 @@ describe("T16 (1) every D2 text is written once, in the words file", () => {
     const literals = literalsMentioning(texts);
     for (const text of texts) {
       const where = literals.filter((l) => l.text === text).map((l) => l.file);
-      expect({ text, where }).toEqual({ text, where: [WORDS_FILE] });
+      // One text under two names (the chip's note under Quality and under Fast is one sentence) may be written once or once per entry that carries it: never more often, and never outside the words file.
+      const carried = ENTRIES.filter((entry) => entry === text).length;
+      expect({
+        text,
+        files: unique(where),
+        written: where.length >= 1 && where.length <= carried,
+      }).toEqual({ text, files: [WORDS_FILE], written: true });
     }
   });
 

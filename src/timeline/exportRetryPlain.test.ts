@@ -741,12 +741,13 @@ async function world() {
 type World = Awaited<ReturnType<typeof world>>;
 type Look = Awaited<ReturnType<World["look"]>>;
 
-/** 0.27.0's export of this project, at `minRung`: the same tool with every lean switch off and no retry about it, looked at while it runs. */
+/** 0.27.0's export of this project, at `minRung`: the same tool with every lean switch off and no retry about it, looked at while it runs. It is the processor's
+ *  command on purpose: it asks for the person's Full quality, because an export nobody pinned uses a chip that passed (and the tests that fake one would get its command). */
 async function oldRecipe(t: World, minRung?: Rung): Promise<Look> {
   leanSwitches(false);
   const started = await t.exportNow(
     `old${minRung ?? 0}`,
-    {},
+    { exportMode: "quality" },
     minRung ? { from: 0, minRung } : undefined,
   );
   expect(started.ok, JSON.stringify(started)).toBe(true);

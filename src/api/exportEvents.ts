@@ -106,7 +106,8 @@ export interface ExportEvent extends Partial<Record<ExportFact, number>> {
   encoder?: ExportEncoderKind;
   /** Which maker's graphics chip the PC has, when it has one the app knows (the maker only). */
   chip?: ExportChip;
-  /** Why the mode was what it was: the person chose, the estimate was over a minute, or the product's promise. */
+  /** Why the mode was what it was: the person chose, the app chose the graphics chip because it passed its test for the picture's size, or the product's promise
+   *  (`over_minute` is what an app that chose the chip only for long exports said). */
   mode_reason?: ExportModeReason;
 }
 

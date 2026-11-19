@@ -21,6 +21,7 @@ import {
   longProject as measuredProject,
   progressBlock,
   rungOf,
+  setupExport,
   story,
   type Any,
   type ExportRig,
@@ -259,6 +260,88 @@ describe("a chip that fails an export ends in a finished export on the processor
         "Started again on the processor because the graphics chip stopped the first try. It will take longer. Your export settings are kept.",
       failedAgain: expect.any(String),
     });
+  });
+});
+
+// The chip is chosen for a short export too (it passed its test and nothing asks for the processor), so the net under it has to hold there: no
+// measured time, no minute, no saving stands between the person and a chip that then stops.
+describe("a chip the app chose for a short export, with nothing measured, ends in a finished export on the processor when it stops", () => {
+  const DEST_SHORT = DEST_LONG.replace("long.mp4", "short.mp4");
+
+  describe.each(ENGINES)("on the %s engine", (engine) => {
+    it.each(FAULTS)(
+      "fails %s: the same short export starts again by itself on the processor and finishes",
+      async (when) => {
+        const t = await setupExport(); // two seconds, and this PC has measured nothing
+        vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+        useExportJob.getState().setEngine(engine);
+        const started = await t.exportNow("short");
+        await flush();
+        const first = t.jobs.submitted.at(-1)!;
+        expect(started.ok, JSON.stringify(started)).toBe(true);
+        expect(useExportJob.getState().calibrations, "nothing measured to decide on").toEqual([]);
+        expect(encoderOf(first), "the first attempt runs on the chip, chosen by the app").toBe(
+          "amd",
+        );
+        expect((first.meta.telemetry as Any).choice).toMatchObject({
+          encoder: "amd",
+          chip: "amd",
+          reason: "chip_default",
+        });
+        const jobsBefore = t.jobs.submitted.length;
+        if (when === "after some frames") {
+          t.jobs.stdout(started.job_id, progressBlock(30, 1000));
+          await flush(5);
+          t.jobs.exit(started.job_id, -1, DRIVER_ERROR);
+        } else {
+          failTheCheckOf(t, started.job_id);
+          t.jobs.exit(started.job_id, 0);
+        }
+
+        await until(() => expect(t.jobs.submitted.length).toBe(jobsBefore + 1));
+        await flush(40);
+        expect(t.jobs.submitted.length, "one successor, not two").toBe(jobsBefore + 1);
+        const second = t.jobs.submitted.at(-1)!;
+        expect(second.id).not.toBe(started.job_id);
+        expect(encoderOf(second), "on the processor").toBe("x264");
+        if (engine === "file-sequence-v1") expect(codecOf(second)).toBe("libx264");
+        expect(listExportRecords().map((r) => r.job_id)).toEqual([second.id]);
+        expect(listExportRecords()[0]).toMatchObject({
+          state: "running",
+          attempt: 2,
+          restarted: "processor",
+          restartReason: "chip_failed",
+        });
+        expect(markChipSuspect).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(markChipSuspect).mock.calls[0][0]).toEqual(amdChip().adapter);
+
+        t.jobs.exit(second.id, 0);
+        expect(await whenExportEnds(started.job_id)).toMatchObject({
+          job_id: second.id,
+          state: "done",
+        });
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect(await t.fs.exists(DEST_SHORT)).toBe(true);
+        expect(isDestinationReserved(DEST_SHORT)).toBe(false);
+        expect((await outcomes())[0]).toMatchObject({
+          job_id: started.job_id,
+          state: "done",
+          attempt: 2,
+          restarted: "processor",
+        });
+        // Each attempt told the truth about itself: the first was the chip the app chose, and it failed; the second ran on the processor.
+        expect(reported.map((r) => r.status)).toEqual(["failed", "done"]);
+        expect(reported[0]).toMatchObject({
+          encoder: "amd",
+          chip: "amd",
+          mode_reason: "chip_default",
+        });
+        expect(story(reported[0])).toContain("chip_failed:chip");
+        expect(reported[1]).toMatchObject({ encoder: "x264" });
+        expect(story(reported[1])).not.toContain("chip_failed:chip");
+      },
+    );
   });
 });
 

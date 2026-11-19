@@ -163,8 +163,8 @@ describe.skipIf(MAKER === null)(
         const record = listExportRecords().find((r) => r.job_id === res.job_id);
         return { file: await ctx.store.exportPath(`${name}.mp4`), command: made!, seconds, record };
       };
-      // Fast first: once the processor has measured this tiny project (1.6 s), the chip's predicted saving is under a quarter
-      // and the app, rightly, no longer offers it (I-S4-8).
+      // Both modes are pinned by the call, so the order does not matter: Fast runs on the chip and Full quality on the processor, whatever
+      // the first export measured.
       const fast = await run("fast", "fast");
       const full = await run("quality", "full");
       // eslint-disable-next-line no-console

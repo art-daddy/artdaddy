@@ -138,21 +138,31 @@ describe("Off means off", () => {
     );
     expect(auto.facts.encoder).toBe("amd");
     expect(auto.showRow).toBe(true);
+    // And so is a short one: a chip that passed is used whatever the length, so the switch is the only thing that keeps it away.
+    const SHORT = { ...WORKLOAD, durationSeconds: 5 };
+    const shortAuto = await decideExportEncoder(
+      { request: "auto", workload: SHORT, settings: {}, history: [] },
+      lookup,
+    );
+    expect(shortAuto.facts.encoder).toBe("amd");
+    expect(shortAuto.showRow).toBe(true);
     __resetChipTests();
     h.calls.length = 0;
     h.storage.clear();
     h.storage.set(CHIP_PREF_KEY, "off");
-    for (const request of ["auto", "fast"] as const) {
-      const decision = await decideExportEncoder(
-        { request, workload: WORKLOAD, settings: {}, history: [] },
-        lookup,
-      );
-      expect(decision.facts.encoder, request).toBe("x264");
-      expect(decision.chip, request).toBeUndefined();
-      expect(decision.mode, request).toBe("quality");
-      expect(decision.showRow, request).toBe(false);
-      expect(decision.facts.adapter, request).toBeUndefined();
-    }
+    for (const workload of [WORKLOAD, SHORT])
+      for (const request of ["auto", "fast"] as const) {
+        const decision = await decideExportEncoder(
+          { request, workload, settings: {}, history: [] },
+          lookup,
+        );
+        const which = `${request} ${workload.durationSeconds} s`;
+        expect(decision.facts.encoder, which).toBe("x264");
+        expect(decision.chip, which).toBeUndefined();
+        expect(decision.mode, which).toBe("quality");
+        expect(decision.showRow, which).toBe(false);
+        expect(decision.facts.adapter, which).toBeUndefined();
+      }
     expect(h.calls).toEqual([]);
   });
 });
