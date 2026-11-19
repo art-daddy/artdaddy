@@ -10,12 +10,12 @@ import { describe, expect, it } from "vitest";
 import {
   cellOf,
   FINISHING_FROM,
-  GATE_FRACTION,
-  GATE_RENDERED_ALONE_SECONDS,
-  GATE_RENDERED_SECONDS,
   HOLD_MARGIN,
   IMPLAUSIBLE_SECONDS,
   LONGER_FACTOR,
+  LONGER_REFERENCE_FRACTION,
+  LONGER_REFERENCE_RENDERED_ALONE_SECONDS,
+  LONGER_REFERENCE_RENDERED_SECONDS,
   NO_TIME_LEFT,
   notePace,
   PACE_MIN_SPAN_SECONDS,
@@ -168,7 +168,7 @@ const threeParts = (): Rep[] => [
   ...inPart(line(120, 150, 1, 0.6, 0.004), 3, 4),
 ];
 
-/** 0.01 a second for 20 s (the first figure), a stall that turns it into "taking longer", a sprint, then Finishing. */
+/** 0.01 a second for 20 s (the reference point of the alarm), a stall that turns it into "taking longer", a sprint, then Finishing. */
 const stallSprintFinish = (): Rep[] => [
   ...steady(0.01, 1, 20),
   ...line(21, 40, 1, 0.2, 0),
@@ -207,7 +207,7 @@ function nearEdge(raw: number, shown: number | null): boolean {
   return leaves(down) !== leaves(up);
 }
 
-/** The rule step by step (clean the report, keep the pictures, parts, Finishing, pace, gate, figure, taking longer) for one render in one process. */
+/** The rule step by step (clean the report, keep the pictures, parts, Finishing, pace, first figure, reference point, taking longer) for one render in one process. */
 function modelRun(reps: readonly Rep[]): ModelRun {
   const said: Said[] = [];
   const raws: Array<number | null> = [];
@@ -222,7 +222,7 @@ function modelRun(reps: readonly Rep[]): ModelRun {
   let open = false;
   let longer = false;
   let shown = 0;
-  let base = 0;
+  let base: number | null = null;
   let fragile = false;
   let current: Said = { kind: "none", seconds: null };
 
@@ -285,17 +285,19 @@ function modelRun(reps: readonly Rep[]): ModelRun {
 
     const rendered = (ms - origin) / 1000;
     if (!open) {
-      if (rendered >= 20 && (f >= 0.15 || rendered >= 60) && raw !== null) {
+      if (raw !== null) {
         open = true;
         shown = gridRef(raw);
-        base = rendered / (f - floor);
       }
     } else if (raw !== null) {
       const cell = cellRef(shown);
       const margin = 0.25 * (cell.hi - cell.lo);
       if (raw < cell.lo - margin || raw >= cell.hi + margin) shown = gridRef(raw);
     }
-    if (open && f > floor) {
+    // The reference of "taking longer": the first moment the render has run 20 s and made 15 % (or run 60 s) with a pace that can be read, which is where the figure used to be first said.
+    if (base === null && raw !== null && f > floor && rendered >= 20 && (f >= 0.15 || rendered >= 60))
+      base = rendered / (f - floor);
+    if (base !== null && f > floor) {
       const ratio = rendered / (f - floor) / base;
       if (Math.abs(ratio - 1.5) <= 1e-9) fragile = true;
       if (ratio > 1.5) longer = true;
@@ -483,21 +485,21 @@ function snapshot(root: unknown): unknown {
 describe("the numbers the rule is built on", () => {
   it("are the numbers the specification fixes", () => {
     expect({
-      GATE_RENDERED_SECONDS,
-      GATE_FRACTION,
-      GATE_RENDERED_ALONE_SECONDS,
       PACE_WINDOW_SECONDS,
       PACE_MIN_SPAN_SECONDS,
+      LONGER_REFERENCE_RENDERED_SECONDS,
+      LONGER_REFERENCE_FRACTION,
+      LONGER_REFERENCE_RENDERED_ALONE_SECONDS,
       FINISHING_FROM,
       LONGER_FACTOR,
       IMPLAUSIBLE_SECONDS,
       HOLD_MARGIN,
     }).toEqual({
-      GATE_RENDERED_SECONDS: 20,
-      GATE_FRACTION: 0.15,
-      GATE_RENDERED_ALONE_SECONDS: 60,
       PACE_WINDOW_SECONDS: 20,
       PACE_MIN_SPAN_SECONDS: 5,
+      LONGER_REFERENCE_RENDERED_SECONDS: 20,
+      LONGER_REFERENCE_FRACTION: 0.15,
+      LONGER_REFERENCE_RENDERED_ALONE_SECONDS: 60,
       FINISHING_FROM: 0.9,
       LONGER_FACTOR: 1.5,
       IMPLAUSIBLE_SECONDS: 172_800,
@@ -605,16 +607,17 @@ describe("R1 the rounding grid: words, never seconds", () => {
   });
 });
 
-// ── R2 and R12: before the gate ────────────────────────────────────────────────────────────────
+// ── R2 and R12: before a pace can be read ────────────────────────────────────────────────────────────────
 
-describe("R2 before the gate nothing is said", () => {
-  it("says no figure in the first 20 s of the render's own clock, however fast the pace, and Finishing only from 0.9", () => {
+describe("R2 before a pace can be read nothing is said", () => {
+  it("says no figure in the first 5 s of pictures, however fast the pace, and Finishing only from 0.9", () => {
     fc.assert(
       fc.property(
         fc.double({ min: 0, max: 0.5, noNaN: true }),
         fc.constantFrom(0.25, 0.5, 1, 2),
         (pace, dt) => {
-          const reps = steady(pace, dt, Math.floor(19.9 / dt) * dt);
+          // the first picture comes at dt; the last report is the last one under 5 s after it
+          const reps = steady(pace, dt, (Math.ceil((5 + dt) / dt) - 1) * dt);
           const vs = valuesOf(reps);
           reps.forEach((r, i) => {
             const want = r.f >= 0.9 ? "finishing" : "none";
@@ -626,21 +629,22 @@ describe("R2 before the gate nothing is said", () => {
     );
   });
 
-  it("says nothing before 20 s on the render's clock, nor before 60 s while less than 15 % is made (Finishing only from 0.9), on any feed", () => {
+  it("says nothing before 5 s of pictures (Finishing only from 0.9), on any feed", () => {
     let reachedAFigure = 0;
     fc.assert(
       fc.property(feedSpecArb, (spec) => {
         const reps = buildFeed(spec);
         const vs = valuesOf(reps);
         let best = 0;
+        let firstPictureMs: number | null = null;
         let sawFigure = false;
         reps.forEach((r, i) => {
           best = Math.max(best, r.f);
+          if (firstPictureMs === null && best > 0) firstPictureMs = msOf(r.t);
           if (isFigure(vs[i])) sawFigure = true;
-          const renderedMs = msOf(r.t) - msOf(reps[0].t);
-          if (renderedMs < 20_000 || (renderedMs < 60_000 && best < 0.15)) {
+          if (firstPictureMs === null || msOf(r.t) - firstPictureMs < 5000) {
             if (vs[i].kind !== (best >= 0.9 ? "finishing" : "none")) {
-              throw new Error(`${show(vs[i])} at ${renderedMs} ms with ${best} made`);
+              throw new Error(`${show(vs[i])} at ${r.t} s with ${best} made`);
             }
           }
         });
@@ -651,17 +655,17 @@ describe("R2 before the gate nothing is said", () => {
     expect(reachedAFigure).toBeGreaterThan(40);
   });
 
-  it("never says a figure for an export whose clock is under 20 s in all, only the word Finishing near its end", () => {
+  it("never says a figure for an export whose pictures last under 5 s in all, only the word Finishing near its end", () => {
     const reps: Rep[] = [
       { t: 0, f: 0 },
       { t: 1, f: 0.05 },
-      { t: 3, f: 0.2 },
-      { t: 6, f: 0.45 },
-      { t: 9, f: 0.7 },
-      { t: 12, f: 0.85 },
-      { t: 15, f: 0.8999 },
-      { t: 17, f: 0.9 },
-      { t: 19.999, f: 0.97 },
+      { t: 2, f: 0.15 },
+      { t: 3, f: 0.3 },
+      { t: 4, f: 0.55 },
+      { t: 5, f: 0.8 },
+      { t: 5.5, f: 0.8999 },
+      { t: 5.9, f: 0.9 },
+      { t: 6.5, f: 0.97 },
     ];
     expect(shows(reps)).toEqual([
       "none",
@@ -676,45 +680,47 @@ describe("R2 before the gate nothing is said", () => {
     ]);
   });
 
-  it("opens at exactly 20 s on a fast steady feed, not a report sooner and not a report later", () => {
-    // 0.012 a second: at 20 s 24 % is made and 0.76 is left, which is 63 s
-    expect(shows(steady(0.012, 1, 24))).toEqual([
-      ...Array(20).fill("none"),
-      ...Array(5).fill("left 60"),
+  it("says its first figure at exactly 5 s of pictures on a fast steady feed, not a report sooner and not a report later", () => {
+    // 0.012 a second from the first picture at 1 s: 5 s later (6 s) 7.2 % is made and 0.928 is left, which is 77 s
+    expect(shows(steady(0.012, 1, 8))).toEqual([
+      ...Array(6).fill("none"),
+      ...Array(3).fill("left 60"),
     ]);
   });
 
-  it("opens as soon as 15 % is made when that comes between 20 s and 60 s", () => {
-    // 0.005 a second: 14.5 % at 29 s, exactly 15 % at 30 s; 0.85 left is 170 s
-    expect(shows(steady(0.005, 1, 33))).toEqual([
-      ...Array(30).fill("none"),
+  it("does not wait for 15 % or for a minute: a slow feed says its first figure at the same 5 s of pictures", () => {
+    // 0.001 a second: 0.6 % at 6 s; 0.994 left is 994 s, which rounds to 15 min
+    expect(shows(steady(0.001, 1, 9))).toEqual([
+      ...Array(6).fill("none"),
+      ...Array(4).fill("left 900"),
+    ]);
+    // 0.005 a second: 3 % at 6 s; 0.97 left is 194 s, which rounds to 3 min
+    expect(shows(steady(0.005, 1, 9))).toEqual([
+      ...Array(6).fill("none"),
       ...Array(4).fill("left 180"),
     ]);
   });
 
-  it("opens by the 60 s clock alone when 15 % is not reached, at exactly 60 s", () => {
-    // 0.001 a second: 6 % at 60 s; 0.94 left is 940 s, which rounds to 15 min
-    expect(shows(steady(0.001, 1, 63))).toEqual([
-      ...Array(60).fill("none"),
-      ...Array(4).fill("left 900"),
-    ]);
+  it("says its first figure at the same moment whatever the pace, with no share to reach and no clock to wait for", () => {
+    fc.assert(
+      fc.property(fc.double({ min: 0.0001, max: 0.0074, noNaN: true }), (pace) => {
+        // under 15 % at 20 s and under 60 s of rendering at 6 s: the earlier gate would have said nothing
+        const vs = valuesOf(steady(pace, 1, 7));
+        expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+        expect(vs[6].kind).toBe("left");
+        expect(vs[7].kind).toBe("left");
+      }),
+      { numRuns: 300 },
+    );
   });
 
-  it("opens on whichever of 15 % or 60 s comes first: 20 s alone at 14 % is not enough", () => {
-    // 0.007 a second: 14 % at 20 s, 14.7 % at 21 s, 15.4 % at 22 s; 0.846 left is 121 s
-    expect(shows(steady(0.007, 1, 24))).toEqual([
-      ...Array(22).fill("none"),
-      ...Array(3).fill("left 120"),
-    ]);
-  });
-
-  it("starts the render's clock at its first report, not at its first picture", () => {
-    // no picture for 10 s, then 20 % made and 0.02 a second: the gate is the first report plus 20 s
+  it("counts the 5 s from the first picture, not from the first report", () => {
+    // no picture for 10 s, then 20 % made and 0.02 a second: the first figure is 5 s after the first picture, at 15 s, whatever the clock before it said
     const reps = [...quiet(0, 9), ...line(10, 24, 1, 0.2, 0.02)];
-    expect(shows(reps)).toEqual([...Array(20).fill("none"), ...Array(5).fill("left 30")]);
+    expect(shows(reps)).toEqual([...Array(15).fill("none"), ...Array(10).fill("left 30")]);
   });
 
-  it("needs 5 s of pictures before a pace can be read, even when the clock is long past the gate", () => {
+  it("needs 5 s of pictures before a pace can be read, even when the clock is long past 20 s", () => {
     // first picture at 19 s with 30 % made and 0.03 a second: 4 s of pictures at 23 s, 5 s at 24 s
     const reps = [...quiet(0, 18), ...line(19, 25, 1, 0.3, 0.03)];
     expect(shows(reps)).toEqual([...Array(24).fill("none"), "left 30", "left 30"]);
@@ -733,7 +739,9 @@ describe("R2 before the gate nothing is said", () => {
     // 10 s window would say 70 s (60), the whole feed would say 154 s (180)
     const reps = [...line(0, 20, 1, 0, 0.002), ...line(21, 30, 1, 0.052, 0.012)];
     const vs = valuesOf(reps);
-    expect(vs.slice(0, 30).every((v) => v.kind === "none")).toBe(true);
+    // the first picture is at 1 s: the first figure is at 6 s, on the slow pace, and by 30 s the figure has followed the new one
+    expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+    expect(vs.slice(6, 30).every((v) => v.kind === "left")).toBe(true);
     expect(show(vs[30])).toBe("left 120");
   });
 
@@ -741,13 +749,14 @@ describe("R2 before the gate nothing is said", () => {
     // reports at 0, 10, 30 and 40 s; at 40 s the window starts at 20 s, between the reports at 10 and 30
     // share at 20 s = 0.02 + 0.02 * 10 / 20 = 0.03; made = 0.34 - 0.03 over 20 s; 0.66 left is 43 s
     // (the oldest report instead would give 0.01067 a second and 62 s)
+    // the first figure is at 10 s (the pace from 0 s is 0.001 a second, 0.98 left is 980 s: 15 min) and holds at 30 s (960 s)
     const reps: Rep[] = [
       { t: 0, f: 0.01 },
       { t: 10, f: 0.02 },
       { t: 30, f: 0.04 },
       { t: 40, f: 0.34 },
     ];
-    expect(shows(reps)).toEqual(["none", "none", "none", "left 30"]);
+    expect(shows(reps)).toEqual(["none", "left 900", "left 900", "left 30"]);
 
     // The same reading with numbers that tell the right denominator from a wrong one (the example above says "under a minute" with either). The window at
     // 40 s starts at 20 s, between the reports at 0 s and 21 s: the report at 21 s is the SECOND of the three kept, not the newest one.
@@ -767,12 +776,13 @@ describe("R2 before the gate nothing is said", () => {
   it("keeps the one report at or before the start of the window, so that the start can be interpolated", () => {
     // reports at 0, 5 and 50 s: the window at 50 s starts at 30 s, 25 s into the 45 s between the last two
     // share there = 0.02 + 0.48 * 25 / 45; made = 0.5 - 0.2867 over 20 s; 0.5 left is 47 s
+    // (the first figure, at 5 s, is 0.98 left at 0.002 a second: 490 s, 8 min)
     const reps: Rep[] = [
       { t: 0, f: 0.01 },
       { t: 5, f: 0.02 },
       { t: 50, f: 0.5 },
     ];
-    expect(shows(reps)).toEqual(["none", "none", "left 60"]);
+    expect(shows(reps)).toEqual(["none", "left 480", "left 60"]);
   });
 
   it("reads two reports at one instant as the later one", () => {
@@ -809,40 +819,38 @@ describe("R2 before the gate nothing is said", () => {
   });
 
   it("never says a time left beyond 48 hours, and says one just inside", () => {
-    // pace chosen so that the raw time left is `raw` s at the 60-s gate: the pace is 1 / (raw + 60)
-    const sayAt60 = (raw: number): string => {
-      const reps = steady(1 / (raw + 60), 1, 62);
-      return shows(reps)[60];
+    // pace chosen so that the raw time left is `raw` s at the first report that can be read (6 s on this feed): the pace is 1 / (raw + 6)
+    const sayFirst = (raw: number): string => {
+      const reps = steady(1 / (raw + 6), 1, 8);
+      return shows(reps)[6];
     };
-    expect(sayAt60(100_000)).toBe("left 99900");
-    expect(sayAt60(171_000)).toBe("left 171000");
-    expect(sayAt60(172_790)).toBe("left 172800");
-    expect(sayAt60(172_810)).toBe("none");
-    expect(sayAt60(174_000)).toBe("none");
-    expect(sayAt60(200_000)).toBe("none");
-    expect(sayAt60(333_000)).toBe("none");
+    expect(sayFirst(100_000)).toBe("left 99900");
+    expect(sayFirst(171_000)).toBe("left 171000");
+    expect(sayFirst(172_790)).toBe("left 172800");
+    expect(sayFirst(172_810)).toBe("none");
+    expect(sayFirst(174_000)).toBe("none");
+    expect(sayFirst(200_000)).toBe("none");
+    expect(sayFirst(333_000)).toBe("none");
     // no figure at all for the whole stretch while it stays beyond 48 h
     expect(shows(steady(1 / 400_060, 1, 62)).every((s) => s === "none")).toBe(true);
   });
 });
 
-describe("R12 20 s alone is not enough, and a render with no picture has no figure", () => {
-  it("stays silent from 20 s to 60 s while under 15 % is made, whatever the pace", () => {
-    fc.assert(
-      fc.property(fc.double({ min: 0.0001, max: 0.0074, noNaN: true }), (pace) => {
-        // under 0.0075 a second the share is under 0.15 at 20 s; stop before it reaches 0.15 or 60 s
-        const stop = Math.min(59, Math.ceil(0.15 / pace) - 1);
-        fc.pre(stop >= 20);
-        const vs = valuesOf(steady(pace, 1, stop));
-        expect(vs.every((v) => v.kind === "none")).toBe(true);
-      }),
-      { numRuns: 300 },
-    );
-  });
-
+describe("R12 a render with no picture has no figure, and a slow one is not made to wait", () => {
   it("has no figure at 60 s when nothing has been drawn yet, nor ever while the share is 0", () => {
     const vs = valuesOf(quiet(0, 300, 5));
     expect(vs.every((v) => v.kind === "none")).toBe(true);
+  });
+
+  it("says nothing for a render whose pictures never move on, and a figure once they do", () => {
+    // 3 % made at the first picture and then nothing for 40 s: no progress to read a pace from
+    const stuck: Rep[] = [{ t: 0, f: 0 }, ...line(1, 41, 1, 0.03, 0)];
+    expect(valuesOf(stuck).every((v) => v.kind === "none")).toBe(true);
+    // the same render, moving again at 41 s: the window of the last 20 s has progress in it, so there is a pace and a figure
+    const moving: Rep[] = [...stuck, ...line(42, 46, 1, 0.04, 0.01)];
+    const vs = valuesOf(moving);
+    expect(vs.slice(0, 42).every((v) => v.kind === "none")).toBe(true);
+    expect(vs.slice(42).some((v) => v.kind === "left")).toBe(true);
   });
 });
 
@@ -853,81 +861,63 @@ describe("R3 the figure itself", () => {
     fc.double({ min: 0.008, max: 0.044, noNaN: true }),
     fc.double({ min: 0.00003, max: 0.0024, noNaN: true }),
   );
-  // fast feeds open at 20 s (15 % is made by then); slow ones at 60 s
-  const gateOf = (pace: number): number => (pace > 0.0075 ? 20 : 60);
+  // the first report that can be read on a steady feed whose first picture is at dt: the first one 5 s or more after it
+  const firstAt = (dt: number): number => dt * (1 + Math.ceil(5 / dt));
   const stableCell = (raw: number): boolean =>
     gridRef(raw * (1 - 1e-6)) === gridRef(raw * (1 + 1e-6));
 
-  it("is, on a steady feed, the grid rounding of the true time left, said at the gate", () => {
+  it("is, on a steady feed, the grid rounding of the true time left, said as soon as 5 s of pictures can be read", () => {
     fc.assert(
       fc.property(paceArb, fc.constantFrom(0.25, 0.5, 1, 2), (pace, dt) => {
-        const gate = gateOf(pace);
-        const trueLeft = 1 / pace - gate;
+        const first = firstAt(dt);
+        const trueLeft = 1 / pace - first;
         fc.pre(stableCell(trueLeft));
-        const reps = steady(pace, dt, gate + 4 * dt);
+        const reps = steady(pace, dt, first + 4 * dt);
         const vs = valuesOf(reps);
-        const first = vs.findIndex((v) => v.kind !== "none");
-        expect(reps[first].t).toBe(gate);
-        expect(show(vs[first])).toBe(`left ${gridRef(trueLeft)}`);
+        const at = vs.findIndex((v) => v.kind !== "none");
+        expect(reps[at].t).toBe(first);
+        expect(show(vs[at])).toBe(`left ${gridRef(trueLeft)}`);
       }),
       { numRuns: 400 },
     );
   });
 
-  it("is also said, between 20 s and 60 s, at the first report that reaches 15 %", () => {
-    fc.assert(
-      fc.property(
-        fc.double({ min: 0.0026, max: 0.0074, noNaN: true }),
-        fc.constantFrom(0.25, 0.5, 1, 2),
-        (pace, dt) => {
-          const steps = 0.15 / pace / dt;
-          fc.pre(Math.abs(steps - Math.round(steps)) > 1e-6);
-          const gate = Math.max(20, Math.ceil(steps) * dt);
-          const trueLeft = 1 / pace - gate;
-          fc.pre(stableCell(trueLeft));
-          const reps = steady(pace, dt, gate + 2 * dt);
-          const vs = valuesOf(reps);
-          const first = vs.findIndex((v) => v.kind !== "none");
-          expect(reps[first].t).toBe(gate);
-          expect(show(vs[first])).toBe(`left ${gridRef(trueLeft)}`);
-        },
-      ),
-      { numRuns: 300 },
-    );
-  });
-
-  it("is the same whether reports come every 0.25 s, 0.5 s or 2 s", () => {
+  it("follows the pace after the first figure: the figure is the grid rounding of the time left whenever it moves", () => {
     fc.assert(
       fc.property(paceArb, (pace) => {
-        const gate = gateOf(pace);
-        const trueLeft = 1 / pace - gate;
-        fc.pre(stableCell(trueLeft));
-        const firsts = [0.25, 0.5, 2].map((dt) => {
-          const vs = valuesOf(steady(pace, dt, gate + 8));
-          return show(vs[vs.findIndex((v) => v.kind !== "none")]);
+        const vs = valuesOf(steady(pace, 1, 60));
+        let previous: TimeLeft = NO_TIME_LEFT;
+        vs.forEach((v, t) => {
+          if (v.kind !== "left") return;
+          if (previous.kind === "left" && previous.seconds !== v.seconds) {
+            // it moved: to the rounding of the time left at that moment (the pace is steady, so that is 1 / pace less the clock)
+            const trueLeft = 1 / pace - t;
+            if (stableCell(trueLeft) && v.seconds !== gridRef(trueLeft))
+              throw new Error(`${t} s: moved to ${v.seconds}, the time left is ${trueLeft}`);
+          }
+          previous = v;
         });
-        expect(firsts).toEqual(Array(3).fill(`left ${gridRef(trueLeft)}`));
       }),
-      { numRuns: 300 },
+      { numRuns: 200 },
     );
   });
 
   it.each([
-    [0.04, 20, "left 30"],
-    [0.02, 20, "left 30"],
-    [0.012, 20, "left 60"],
-    [0.01, 20, "left 60"],
-    [0.008, 20, "left 120"],
-    [0.002, 60, "left 420"],
-    [0.001, 60, "left 900"],
-    [0.0007, 60, "left 1500"],
-    [0.0004, 60, "left 2400"],
-    [0.0001, 60, "left 9900"],
-    [0.00002, 60, "left 49500"],
-  ])("for %s of the render a second the answer at %s s is %s", (pace, gate, said) => {
-    const vs = valuesOf(steady(pace, 1, gate));
-    expect(vs.slice(0, gate).every((v) => v.kind === "none")).toBe(true);
-    expect(show(vs[gate])).toBe(said);
+    [0.04, "left 30"],
+    [0.02, "left 30"],
+    [0.012, "left 60"],
+    [0.01, "left 120"],
+    [0.008, "left 120"],
+    [0.002, "left 480"],
+    [0.001, "left 900"],
+    [0.0007, "left 1500"],
+    [0.0004, "left 2400"],
+    [0.0001, "left 9900"],
+    [0.00002, "left 50400"],
+  ])("for %s of the render a second the first answer, at 6 s, is %s", (pace, said) => {
+    const vs = valuesOf(steady(pace, 1, 6));
+    expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+    expect(show(vs[6])).toBe(said);
   });
 });
 
@@ -948,7 +938,7 @@ describe("R4 finishing", () => {
     ).toEqual(["left", "left", "finishing"]);
   });
 
-  it("is said by a short export that never opened the gate, and by a run joined at 0.95", () => {
+  it("is said by a short export that never had 5 s of pictures before 0.9, and by a run joined at 0.95", () => {
     const short: Rep[] = [
       { t: 0, f: 0 },
       { t: 3, f: 0.5 },
@@ -1036,11 +1026,11 @@ describe("R5 no flicker", () => {
   });
 
   it("keeps a figure through a stall until it says taking longer, and never says nothing", () => {
-    // 0.001 a second: the first figure at 60 s (6 % made); then no progress at all.
-    // The average-pace total grows as t / 0.06, which passes 1.5 times its first value (1000 s) after 90 s.
+    // 0.001 a second: the first figure at 6 s (the first picture at 1 s); the reference of the alarm at 60 s (6 % made); then no progress at all.
+    // The average-pace total grows as t / 0.06, which passes 1.5 times its value at the reference (1000 s) after 90 s.
     const vs = valuesOf([...steady(0.001, 1, 60), ...line(61, 95, 1, 0.06, 0)]);
-    expect(vs.slice(0, 60).every((v) => v.kind === "none")).toBe(true);
-    expect(vs.slice(60, 90).every((v) => v.kind === "left")).toBe(true);
+    expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+    expect(vs.slice(6, 90).every((v) => v.kind === "left")).toBe(true);
     expect(vs.slice(91).every((v) => v.kind === "longer")).toBe(true);
   });
 });
@@ -1087,22 +1077,22 @@ describe("R6 hysteresis: a figure does not flap around a rounding boundary", () 
   scenario(
     "holds 15 min while the time left wobbles by 10 s around the 750 s boundary",
     [760, 740, 760, 740, 760, 740, 770, 735],
-    [none, none, none, ...Array(6).fill("left 900")],
+    [none, ...Array(8).fill("left 900")],
   );
   scenario(
     "keeps 15 min at 1120 s and moves to 20 min at 1130 s (the band reaches 75 s past the cell)",
     [760, 740, 760, 1120, 1130],
-    [none, none, none, "left 900", "left 900", "left 1200"],
+    [none, "left 900", "left 900", "left 900", "left 900", "left 1200"],
   );
   scenario(
     "keeps 15 min at 680 s and moves to 10 min at 670 s (the band reaches 75 s below the cell)",
     [760, 740, 760, 680, 670],
-    [none, none, none, "left 900", "left 900", "left 600"],
+    [none, "left 900", "left 900", "left 900", "left 900", "left 600"],
   );
   scenario(
     "moves to a far figure in one step",
     [760, 740, 760, 1500],
-    [none, none, none, "left 900", "left 1500"],
+    [none, "left 900", "left 900", "left 900", "left 1500"],
   );
   scenario(
     "keeps 2 min at 76 s and moves to 1 min at 74 s (the band reaches 15 s below the cell)",
@@ -1182,8 +1172,8 @@ describe("R7 taking longer", () => {
     expect(vs.slice(20).every((v) => v.kind === "left")).toBe(true);
   });
 
-  it("turns when the average-pace total passes 1.5 times its first value: a stall of 29.8 s is still a figure, 30.2 s is taking longer", () => {
-    // 0.01 a second for 20 s: first figure, total 20 s / 0.2 = 100 s. Then no progress: the total at t is t / 0.2.
+  it("turns when the average-pace total passes 1.5 times its value at the reference point: a stall of 29.8 s is still a figure, 30.2 s is taking longer", () => {
+    // 0.01 a second for 20 s: the reference point (20 s rendered, 20 % made), total 20 s / 0.2 = 100 s. Then no progress: the total at t is t / 0.2.
     const upTo = (end: number): Rep[] => [...steady(0.01, 1, 20), ...line(20.2, end, 0.2, 0.2, 0)];
     const before = valuesOf(upTo(29.8));
     const after = valuesOf(upTo(30.2));
@@ -1192,25 +1182,25 @@ describe("R7 taking longer", () => {
     expect(after[after.length - 1].kind).toBe("longer");
   });
 
-  it("turns exactly where the average-pace total crosses 1.5 times its first value: 1.49 times is a figure, 1.51 times is taking longer", () => {
+  it("turns exactly where the average-pace total crosses 1.5 times its value at the reference point: 1.49 times is a figure, 1.51 times is taking longer", () => {
     fc.assert(
       fc.property(
         fc.double({ min: 0.008, max: 0.025, noNaN: true }),
         fc.integer({ min: 1, max: 80 }),
         (pace, extra) => {
           const end = 30 + extra;
-          const gateShare = round12(pace * 20);
+          const referenceShare = round12(pace * 20);
           for (const [ratio, want] of [
             [1.49, "left"],
             [1.51, "longer"],
           ] as const) {
-            // a share at `end` that makes the total there `ratio` times its value at the first figure (20 s)
+            // a share at `end` that makes the total there `ratio` times its value at the reference point (20 s)
             const endShare = (end * pace) / ratio;
-            fc.pre(endShare > gateShare && endShare < 0.85);
-            const slope = (endShare - gateShare) / (end - 20);
+            fc.pre(endShare > referenceShare && endShare < 0.85);
+            const slope = (endShare - referenceShare) / (end - 20);
             const reps = [
               ...steady(pace, 1, 19),
-              ...line(20, end, (end - 20) / 20, gateShare, slope),
+              ...line(20, end, (end - 20) / 20, referenceShare, slope),
             ];
             const vs = valuesOf(reps);
             const last = vs[vs.length - 1];
@@ -1223,9 +1213,9 @@ describe("R7 taking longer", () => {
     );
   });
 
-  it("is not yet taking longer when the total is exactly 1.5 times the first one, and is a millisecond later", () => {
+  it("is not yet taking longer when the total is exactly 1.5 times the one at the reference point, and is a millisecond later", () => {
     // A feed whose numbers are all exact in binary, so that no rounding decides the equality. 0.0125 a second is a pace of 1/80 of the render: at 20 s a
-    // quarter is made, the gate opens and the implied total is 20 / 0.25 = 80 s. Then the render stands still at a quarter, so the total at t is t / 0.25:
+    // quarter is made, the reference point is taken and the implied total is 20 / 0.25 = 80 s. Then the render stands still at a quarter, so the total at t is t / 0.25:
     // exactly 120 s = 1.5 x 80 s at 30 s (the equality, not yet "grown past 1.5 times"), 120.004 s at 30.001 s.
     const reps: Rep[] = [
       ...steady(0.0125, 1, 20),
@@ -1234,12 +1224,29 @@ describe("R7 taking longer", () => {
     ];
     const vs = valuesOf(reps);
     const at = (t: number): TimeLeft => vs[reps.findIndex((r) => r.t === t)];
-    expect(at(19).kind).toBe("none"); // 19 s rendered: the gate is not open yet
-    expect(at(20).kind).toBe("left"); // the first figure, and the total it is measured from
+    expect(at(5).kind).toBe("none"); // 4 s of pictures: no pace to read yet
+    expect(at(19).kind).toBe("left"); // a figure for 13 s already, and no reference point yet
+    expect(at(20).kind).toBe("left"); // the reference point, and the total it is measured from
     expect(at(29).kind).toBe("left"); // total 116 s
     expect(at(30).kind).toBe("left"); // total 120 s: exactly 1.5 times
     expect(at(30.001).kind).toBe("longer");
     expect(vs.slice(0, -1).some((v) => v.kind === "longer")).toBe(false);
+  });
+
+  it("does not take a fast start for a reason to say taking longer: the reference point is not the early figure", () => {
+    // 0.01 a second for the first 12 s, then 0.006 a second (a healthy render whose first seconds are cheaper than the rest). The figure said at 6 s is 94 s left, 2 min
+    // (the true time left is 134 s). The total the average pace implies was 100 s at 6 s and is 119 s at the reference point (20 s, 16.8 % made): taken from the figure at
+    // 6 s, 1.5 times is 150 s, which the average pace passes at 73 s; taken from the reference point it is 179 s, which a render with this pace never reaches.
+    const reps: Rep[] = [
+      { t: 0, f: 0 },
+      ...line(1, 12, 1, 0.01, 0.01),
+      ...line(13, 140, 1, 0.126, 0.006),
+    ];
+    const vs = valuesOf(reps);
+    expect(vs.slice(0, 6).every((v) => v.kind === "none")).toBe(true);
+    expect(show(vs[6])).toBe("left 120");
+    expect(vs.some((v) => v.kind === "longer")).toBe(false);
+    expect(vs.slice(6).every((v) => v.kind === "left")).toBe(true);
   });
 
   it("stays 'taking longer' after a sprint, until Finishing replaces it at 0.9, and Finishing then stays", () => {
@@ -1252,9 +1259,9 @@ describe("R7 taking longer", () => {
       { t: 44, f: 0.5 },
     ];
     const kinds = valuesOf(reps).map((v) => v.kind);
-    expect(kinds.slice(0, 20)).toEqual(Array(20).fill("none"));
-    expect(kinds.slice(20, 30)).toEqual(Array(10).fill("left"));
-    // 41 s and 42 s: the average-pace total is far under its first value again, and it is still said
+    expect(kinds.slice(0, 6)).toEqual(Array(6).fill("none"));
+    expect(kinds.slice(6, 31)).toEqual(Array(25).fill("left"));
+    // 41 s and 42 s: the average-pace total is far under its value at the reference point again, and it is still said
     expect(kinds.slice(31, 43)).toEqual(Array(12).fill("longer"));
     expect(kinds.slice(43)).toEqual(["finishing", "finishing"]);
   });
@@ -1263,12 +1270,15 @@ describe("R7 taking longer", () => {
 // ── R8 ─────────────────────────────────────────────────────────────────────────────────────────
 
 describe("R8 a render in parts", () => {
-  it("says nothing in any part before the last, and the final encode says its first figure only after its own 20 s", () => {
-    // the final encode: 68 % at 140 s, 0.004 a second, 0.32 left is 80 s
-    expect(shows(threeParts())).toEqual([...Array(140).fill("none"), ...Array(11).fill("left 60")]);
+  it("says nothing in any part before the last, and the final encode says its first figure only after 5 s of its own pictures", () => {
+    // the final encode starts at 120 s at 60 %, 0.004 a second: 5 s later 62 % is made and 0.38 left is 95 s, 2 min
+    const said = shows(threeParts());
+    expect(said.slice(0, 125)).toEqual(Array(125).fill("none"));
+    expect(said[125]).toBe("left 120");
+    expect(said.slice(125).every((s) => s.startsWith("left"))).toBe(true);
   });
 
-  it("says nothing in any part before the last, whatever the pace, and nothing in the final encode before its own gate", () => {
+  it("says nothing in any part before the last, whatever the pace, and nothing in the final encode before 5 s of its own", () => {
     fc.assert(
       fc.property(
         fc.array(
@@ -1297,7 +1307,7 @@ describe("R8 a render in parts", () => {
             if (i < partCount && v.kind !== "none") throw new Error(`part report ${i}: ${show(v)}`);
             if (i < partCount) return;
             const own = reps[i].t - finalStart;
-            if (isFigure(v) && (own < 20 || (own < 60 && reps[i].f < 0.15))) {
+            if (isFigure(v) && own < 5) {
               throw new Error(`final encode, ${own} s in, ${reps[i].f} made: ${show(v)}`);
             }
           });
@@ -1320,37 +1330,37 @@ describe("R8 a render in parts", () => {
     expect(shows(reps)).toEqual(["none", "none", "none"]);
   });
 
-  it("restarts the clock and the gate on a change of part: back in the final encode, a figure waits for its own 20 s", () => {
+  it("restarts the clock and the span of pictures on a change of part: back in the final encode, a figure waits for 5 s of its own pictures", () => {
     const reps = [
       ...inPart(line(0, 30, 1, 0.5, 0.004), 3, 4),
       ...inPart(line(31, 40, 1, 0.2, 0), 1, 4),
       ...inPart(line(41, 70, 1, 0.7, 0.004), 3, 4),
     ];
-    // the first final encode says 120 from 20 s on; the part says nothing; the second final encode says
-    // nothing for 20 s and then 60 (0.22 left at 0.004 a second is 55 s)
+    // the first final encode says 120 from 5 s on (0.48 left at 0.004 a second is 120 s); the part says nothing; the second final encode says
+    // nothing for 5 s and then 60 (0.28 left at 0.004 a second is 70 s)
     expect(shows(reps)).toEqual([
-      ...Array(20).fill("none"),
-      ...Array(11).fill("left 120"),
+      ...Array(5).fill("none"),
+      ...Array(26).fill("left 120"),
       ...Array(10).fill("none"),
-      ...Array(20).fill("none"),
-      ...Array(10).fill("left 60"),
+      ...Array(5).fill("none"),
+      ...Array(25).fill("left 60"),
     ]);
   });
 
-  it("restarts the clock and the gate when only the number of parts changes", () => {
-    // the final encode of a plan of 4 (a figure from 20 s), 5 s of a plan of 5 (3 of 5 is a part before the last),
-    // then the final encode of 4 again: it waits for its own 20 s, the figure then is 55 s, a minute
+  it("restarts the clock and the span of pictures when only the number of parts changes", () => {
+    // the final encode of a plan of 4 (a figure from 5 s), 5 s of a plan of 5 (3 of 5 is a part before the last),
+    // then the final encode of 4 again: it waits for 5 s of its own pictures, the figure then is 70 s, a minute
     const reps = [
       ...inPart(line(0, 30, 1, 0.5, 0.004), 3, 4),
       ...inPart(line(31, 35, 1, 0.2, 0), 3, 5),
       ...inPart(line(36, 70, 1, 0.7, 0.004), 3, 4),
     ];
     expect(shows(reps)).toEqual([
-      ...Array(20).fill("none"),
-      ...Array(11).fill("left 120"),
       ...Array(5).fill("none"),
-      ...Array(20).fill("none"),
-      ...Array(15).fill("left 60"),
+      ...Array(26).fill("left 120"),
+      ...Array(5).fill("none"),
+      ...Array(5).fill("none"),
+      ...Array(30).fill("left 60"),
     ]);
   });
 
@@ -1553,12 +1563,12 @@ describe("R10 the answer depends on the feed, not on the clock it was read from"
   });
 
   it("treats a late join (the first report already at 0.45, as after a reload) as a fresh clock whose starting share was not made here", () => {
-    // 0.004 a second from 0.45: no figure before 20 s of its own although 45 % is "made";
-    // at 20 s 0.47 is left: 117.5 s
+    // 0.004 a second from 0.45: no figure before 5 s of its own pictures although 45 % is "made";
+    // at 5 s 0.53 is left at 0.004 a second: 132.5 s
     const reps = line(0, 100, 1, 0.45, 0.004);
     const vs = valuesOf(reps);
-    expect(vs.slice(0, 20).every((v) => v.kind === "none")).toBe(true);
-    expect(show(vs[20])).toBe("left 120");
+    expect(vs.slice(0, 5).every((v) => v.kind === "none")).toBe(true);
+    expect(show(vs[5])).toBe("left 120");
     // the average pace here is the 0.004 a second made here, so 'taking longer' never comes
     expect(vs.some((v) => v.kind === "longer")).toBe(false);
   });
@@ -1678,12 +1688,12 @@ describe("R14 a report that goes back in time is read as the same instant as the
   });
 
   it("reads a report from 10 s ago as being now: the share it carries is counted over the last 20 s up to now", () => {
-    // 0.002 a second to 80 s (the figure 7 min from 60 s), then a report stamped 70 s with 38.42 % made.
+    // 0.002 a second to 80 s (the figure 8 min at 6 s, 7 min from 66 s), then a report stamped 70 s with 38.42 % made.
     // As a report at 80 s: 26.42 % over the window from 60 s, 0.01321 a second, 0.6158 left is 47 s (1 min).
     // Read at 70 s it would be 0.01421 a second and 43 s (under a minute)
     const reps: Rep[] = [...steady(0.002, 1, 80), { t: 70, f: 0.3842 }];
     const vs = valuesOf(reps);
-    expect(show(vs[60])).toBe("left 420");
+    expect(show(vs[60])).toBe("left 480");
     expect(show(vs[80])).toBe("left 420");
     expect(show(vs[81])).toBe("left 60");
   });
@@ -1784,9 +1794,9 @@ describe("R18 reports that come very fast", () => {
     const slow = valuesOf(steady(0.01, 0.5, 25));
     const firstFigure = (vs: TimeLeft[]): string =>
       show(vs[vs.findIndex((v) => v.kind !== "none")]);
-    // 0.01 a second: 80 s left at 20 s
-    expect(firstFigure(fast)).toBe("left 60");
-    expect(firstFigure(slow)).toBe("left 60");
-    expect(fast.findIndex((v) => v.kind !== "none")).toBe(1000);
+    // 0.01 a second: 5 s after the first picture 5 % is made and 95 s are left
+    expect(firstFigure(fast)).toBe("left 120");
+    expect(firstFigure(slow)).toBe("left 120");
+    expect(fast.findIndex((v) => v.kind !== "none")).toBe(251);
   });
 });
