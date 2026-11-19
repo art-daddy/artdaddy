@@ -204,21 +204,25 @@ interface Computed {
   tags: Record<string, string[]>;
   /** The text of the first entries of the section, for the notes file only: what a hash is made of. */
   samples: Record<string, string>;
+  /** What a key's entry says besides its hash, for the notes file only (section C: the reply's note, and the hash of everything else). */
+  extras: Record<string, Record<string, unknown>>;
 }
 interface Digest {
   hash: string;
   text: string;
   tags: string[];
+  extra?: Record<string, unknown>;
 }
 const computed: Partial<Record<SectionName, Computed>> = {};
-const emptyComputed = (): Computed => ({ hashes: {}, tags: {}, samples: {} });
-const digest = (value: unknown, tags: string[]): Digest => {
+const emptyComputed = (): Computed => ({ hashes: {}, tags: {}, samples: {}, extras: {} });
+const digest = (value: unknown, tags: string[], extra?: Record<string, unknown>): Digest => {
   const text = stable(value);
-  return { hash: sha256(text), text, tags };
+  return { hash: sha256(text), text, tags, ...(extra ? { extra } : {}) };
 };
 function collect(result: Computed, key: string, one: Digest): void {
   result.hashes[key] = one.hash;
   result.tags[key] = one.tags;
+  if (one.extra) result.extras[key] = one.extra;
   if (Object.keys(result.samples).length < 3) result.samples[key] = one.text.slice(0, 40_000);
 }
 
@@ -293,6 +297,7 @@ function notesOf(result: Computed) {
     samples: result.samples,
     keys: result.tags,
     hashes: result.hashes,
+    ...(Object.keys(result.extras).length ? { extras: result.extras } : {}),
   };
 }
 
@@ -1540,7 +1545,10 @@ async function runC(row: CRow): Promise<Digest> {
       tags.push(`encoder:${telemetry.choice.encoder}`, `reason:${telemetry.choice.reason}`);
     if (plan.selection) tags.push(`backend:${plan.selection.backend}`);
     if (spec?.steps?.length) tags.push("steps");
-    return digest(record, tags);
+    // For the notes file only: the reply's own note, and the hash of the whole record but for that note, so a diff can say that the note's words are all that moved.
+    const { note, ...replyBesidesNote } = reply;
+    const besides = hashOf({ ...record, reply: scrub({ ...replyBesidesNote }) });
+    return digest(record, tags, { note: typeof note === "string" ? note : null, besides });
   } finally {
     // End every job the case started, and leave nothing behind for the next one.
     for (const spec of t.jobs.submitted) cancelExport(spec.id);
