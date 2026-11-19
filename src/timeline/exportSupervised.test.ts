@@ -30,6 +30,7 @@ import {
   listExportOutcomes,
   listExportRecords,
   localDeliveryPort,
+  makerCode,
   manageExportsTool,
   retryExport,
   submitExport,
@@ -41,6 +42,7 @@ import { describeLiveStatus } from "./exportWords";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
 import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
+import { harness, nvidia } from "../test/chipHarness";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -702,6 +704,64 @@ describe("the graphics chip, from the export tool to the card", () => {
     expect(story(reported.at(-1)!)).toEqual(
       expect.arrayContaining(["mode_shown:full", "mode_selected:full"]),
     );
+  });
+
+  // The two artifacts compared: the report of an export whose chip test failed in the plain way, and the report of the same export whose
+  // chip test failed with the maker's own refusal of the driver. Everything the new word adds to what the server receives is that one word.
+  it("tells why the chip test failed: a refused driver and a plain failure make two reports that differ in the word of one step, and nowhere else", async () => {
+    const actual = await vi.importActual<typeof import("./chipTest")>("./chipTest");
+    __setExportFlag("chip_nvidia", true);
+    const reportFor = async (name: string, chipStderr: string): Promise<Any> => {
+      actual.__resetChipTests();
+      useExportJob.setState({ calibrations: [] });
+      const pc = harness([nvidia], { chipStderr });
+      vi.mocked(findChip).mockImplementation((size, options) =>
+        actual.findChip(size, options, pc.deps),
+      );
+      const t = await setup();
+      const started = await t.exportNow(name);
+      await flush();
+      expect(codec(t.jobs.submitted.at(-1)!), "no chip passed: the processor encodes").toBe(
+        "libx264",
+      );
+      t.jobs.exit(started.job_id, 0);
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      return structuredClone(reported.at(-1)!);
+    };
+    const plain = await reportFor("plain", "Error while opening encoder");
+    const refused = await reportFor(
+      "refused",
+      [
+        "[h264_nvenc @ 000001e3b9d6c0c0] Driver does not support the required nvenc API version. Required: 13.1 Found: 12.1",
+        "[h264_nvenc @ 000001e3b9d6c0c0] The minimum required Nvidia driver for nvenc is 610.00 or newer",
+        "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.",
+      ].join("\n"),
+    );
+    const step = (report: Any) => (report.trace as Any[]).findIndex((e) => e.e === "chip_test");
+    expect(step(plain)).toBeGreaterThanOrEqual(0);
+    expect(plain.trace[step(plain)]).toMatchObject({ v: "encode_failed", n: 2 });
+    expect(refused.trace[step(refused)]).toMatchObject({ v: "driver_too_old", n: 2 });
+    // Clocks differ between two runs of anything; the rest of the two bodies is compared leaf by leaf.
+    const withoutClocks = (report: Any): Any => ({
+      ...report,
+      elapsed_ms: 0,
+      active_ms: 0,
+      trace: (report.trace as Any[]).map((event) => ({ ...event, t: 0 })),
+    });
+    const differences = (a: Any, b: Any, path = "report"): string[] =>
+      typeof a === "object" && a !== null && typeof b === "object" && b !== null
+        ? [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap((key) =>
+            differences(a[key], b[key], Array.isArray(a) ? `${path}[${key}]` : `${path}.${key}`),
+          )
+        : Object.is(a, b)
+          ? []
+          : [path];
+    expect(differences(withoutClocks(plain), withoutClocks(refused))).toEqual([
+      `report.trace[${step(plain)}].v`,
+    ]);
+    // The number of the step is the maker, plus ten for the 4K class.
+    expect([makerCode("nvidia", "hd"), makerCode("nvidia", "uhd")]).toEqual([2, 12]);
   });
 
   it("replays the journey: the chip fails in the middle, the card says so, one click runs the same export on the processor, and the chip is set aside", async () => {

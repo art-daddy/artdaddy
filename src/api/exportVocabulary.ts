@@ -93,6 +93,7 @@ export const EXPORT_TRACE_VALUES = [
   "passed",
   "no_device",
   "encode_failed",
+  "driver_too_old",
   "garbled",
   "below_x264",
   "wrong_frames",

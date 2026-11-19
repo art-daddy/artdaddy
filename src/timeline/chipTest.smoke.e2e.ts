@@ -157,12 +157,17 @@ describe("each maker's chip, on this PC", () => {
           expect(seconds).toBeLessThan(30);
           expect(results.length).toBeGreaterThan(0);
           expect(
-            results.every((result) => result === "no_device" || result === "encode_failed"),
+            results.every(
+              (result) =>
+                result === "no_device" || result === "encode_failed" || result === "driver_too_old",
+            ),
           ).toBe(true);
         } else {
-          // A chip that encodes is judged on its picture: never refused as missing, broken or too slow.
+          // A chip that encodes is judged on its picture: never refused as missing, broken, too old a driver or too slow.
           for (const result of results)
-            expect(["no_device", "encode_failed", "timed_out"]).not.toContain(result);
+            expect(["no_device", "encode_failed", "driver_too_old", "timed_out"]).not.toContain(
+              result,
+            );
           if (EXPECTED === maker) {
             expect(found.chip, JSON.stringify(found.events)).not.toBeNull();
             expect(found.chip!.maker).toBe(maker);

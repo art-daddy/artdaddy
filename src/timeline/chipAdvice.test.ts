@@ -28,6 +28,7 @@ const RESULTS: ReadonlyArray<ChipTestResult | null> = [
   "passed",
   "no_device",
   "encode_failed",
+  "driver_too_old",
   "garbled",
   "below_x264",
   "wrong_frames",
@@ -228,13 +229,17 @@ const PROCESSORS: ReadonlyArray<string | null> = [
 ];
 
 describe("the two hints, over every combination of what the app reads", () => {
-  // What each hint is for, written out here: the NVIDIA line for an NVIDIA chip whose test failed in the encoder and whose driver is
-  // below 610; the Intel line for an Intel processor with graphics when every adapter the app sees is of another maker.
+  // What each hint is for, written out here: the NVIDIA line for an NVIDIA chip whose test failed in the encoder (the catch-all, or the
+  // maker's own refusal of the driver) and whose driver is below 610; the Intel line for an Intel processor with graphics when every
+  // adapter the app sees is of another maker.
+  const FAILED_IN_THE_ENCODER: ReadonlyArray<ChipTestResult | null> = [
+    "encode_failed",
+    "driver_too_old",
+    "cached_fail",
+  ];
   const nvidiaFacts = (adapters: readonly Adapter[]) =>
     adapters
-      .filter(
-        (a) => a.maker === "nvidia" && (a.result === "encode_failed" || a.result === "cached_fail"),
-      )
+      .filter((a) => a.maker === "nvidia" && FAILED_IN_THE_ENCODER.includes(a.result))
       .map((a) => nvidiaDriverUnits(a.driver))
       .filter((units): units is number => units !== null && units < NVIDIA_MIN_DRIVER * 100);
   const intelWanted = (adapters: readonly Adapter[], processor: string | null) =>
@@ -252,10 +257,7 @@ describe("the two hints, over every combination of what the app reads", () => {
           processor: null,
         });
         const units = nvidiaDriverUnits(driver);
-        const wanted =
-          (result === "encode_failed" || result === "cached_fail") &&
-          units !== null &&
-          units < 61_000;
+        const wanted = FAILED_IN_THE_ENCODER.includes(result) && units !== null && units < 61_000;
         if (wanted) {
           shown++;
           expect(advice, label).toEqual({
@@ -279,6 +281,28 @@ describe("the two hints, over every combination of what the app reads", () => {
     expect(failed(NEW)).toBeNull();
     expect(failed("garbage")).toBeNull();
     expect(failed("32.0.16.0999")?.text).toBe(nvidiaLine("609.99"));
+  });
+
+  // The maker's own refusal of the driver is the case this hint is for: it must read exactly as the catch-all did, or the hint
+  // vanishes for the people it was written for.
+  it("shows the same NVIDIA line for the maker's own refusal of the driver as for the catch-all, and says nothing at 610 or newer", () => {
+    const told = (driver: string, result: ChipTestResult) =>
+      chipAdvice({ adapters: [{ maker: "nvidia", driver, result }], processor: null });
+    for (const driver of [OLD, OLDER, "32.0.16.0999"]) {
+      expect(told(driver, "driver_too_old"), driver).toEqual(told(driver, "encode_failed"));
+      expect(told(driver, "driver_too_old")?.kind, driver).toBe("nvidia_driver");
+    }
+    expect(told(OLD, "driver_too_old")?.text).toBe(nvidiaLine("560.94"));
+    for (const driver of [AT_FLOOR, NEW, "garbage", ""])
+      expect(told(driver, "driver_too_old"), driver).toBeNull();
+    // Not for another maker's chip: the refusal is NVIDIA's own sentence.
+    for (const maker of ["amd", "intel"] as const)
+      expect(
+        chipAdvice({
+          adapters: [{ maker, driver: OLD, result: "driver_too_old" }],
+          processor: null,
+        }),
+      ).toBeNull();
   });
 
   it("shows the Intel line exactly for an Intel processor with graphics when the only adapters seen are another maker's", () => {

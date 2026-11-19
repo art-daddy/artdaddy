@@ -16,6 +16,8 @@ export const ssimText = (all: number, frames = TEST_FRAMES) =>
 /** How the scripted ffmpeg behaves. */
 export interface Behaviour {
   chip?: "ok" | "fail" | "no_device" | "slow" | "busy" | "stopped";
+  /** The chip's encode exits with an error and says exactly this (what a maker's loader prints), whatever `chip` says. */
+  chipStderr?: string;
   chipSsim?: number;
   chipFrames?: number;
   decodeFails?: boolean;
@@ -50,6 +52,7 @@ export function harness(
       if (options.kind.includes("encode")) {
         const codec = args[args.indexOf("-c:v") + 1];
         if (codec === "libx264") return ran("");
+        if (behaviour.chipStderr !== undefined) return ran(behaviour.chipStderr, 1);
         const mode = behaviour.chip ?? "ok";
         if (mode === "busy") return { kind: "busy" };
         if (mode === "stopped") return { kind: "stopped" };

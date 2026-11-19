@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,6 +13,7 @@ import {
   chipEncodeArgs,
   chipStatusOf,
   chipTestSource,
+  encodeFailure,
   findChip,
   judge,
   markChipSuspect,
@@ -32,8 +34,10 @@ import {
 import { buildRenderCommand } from "./render";
 import type { Timeline } from "./model";
 import { __setExportFlag } from "../api/exportFlags";
+import { EXPORT_TRACE_VALUES } from "../api/exportVocabulary";
 import { amd, harness, intel, nvidia, ssimText, type Behaviour } from "../test/chipHarness";
 import { CHIP_PREF_KEY } from "./chipPref";
+import { chipAdvice } from "./chipAdvice";
 
 beforeEach(() => {
   __resetChipTests();
@@ -1051,5 +1055,300 @@ describe("the person turns the chip off while it is being tested", () => {
     expect(await lookup).toEqual({ chip: null, events: [] });
     expect(h.calls).toEqual([]);
     expect(takeChipTestEvents()).toEqual([]);
+  });
+});
+
+// WHY a test failed: the maker's own refusal of the driver. The two sentences are the NVENC loader's, word for word, as the pinned
+// ffmpeg prints them (master snapshot N-127021); the lines around them are what ffmpeg prints after an encoder that could not open.
+const DRIVER_SENTENCES = [
+  "Driver does not support the required nvenc API version. Required: 13.1 Found: 12.1",
+  "The minimum required Nvidia driver for nvenc is 610.00 or newer",
+] as const;
+const NVENC_LOADER = "[h264_nvenc @ 000001e3b9d6c0c0]";
+const AFTER_AN_OPEN_THAT_FAILED = [
+  "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.",
+  "[vf#0:0 @ 000001e3b9d5f400] Error sending frames to consumers: Function not implemented",
+  "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Could not open encoder before EOF",
+  "[out#0/mp4 @ 000001e3b9d4cc80] Nothing was written into output file, because at least one of its streams received no packets.",
+  "Conversion failed!",
+] as const;
+/** ffmpeg's report of an NVENC open that was refused: the loader's sentences, then the lines every failed open ends with. */
+const stderrOf = (...sentences: readonly string[]): string =>
+  [
+    ...sentences.map((sentence) => `${NVENC_LOADER} ${sentence}`),
+    ...AFTER_AN_OPEN_THAT_FAILED,
+  ].join("\n") + "\n";
+const DRIVER_STDERR = stderrOf(...DRIVER_SENTENCES);
+const NO_DEVICE_STDERR = stderrOf("Cannot load nvcuda.dll", "No capable devices found");
+/** One sentence for each way the pattern for a missing device can be met. */
+const NO_DEVICE_SENTENCES = [
+  "[h264_nvenc @ 0000] Cannot load nvcuda.dll",
+  "[h264_nvenc @ 0000] No capable devices found",
+  "[h264_amf @ 0000] No AMF capable device",
+  "[h264_qsv @ 0000] No device available for encoding",
+  "Device not found",
+  "[h264_amf @ 0000] Component AMFVideoEncoderVCE_AVC not found",
+  "[h264_nvenc @ 0000] OpenEncodeSessionEx failed: unsupported device (2)",
+] as const;
+const UNRELATED_FAILURES = [
+  "Error while opening encoder",
+  "",
+  "Conversion failed!",
+  stderrOf("OpenEncodeSessionEx failed: out of memory (10)"),
+  "[h264_nvenc @ 0000] Nvidia driver reported an error",
+] as const;
+const ADAPTER: Record<ChipMaker, typeof amd> = { amd, nvidia, intel };
+const MEMORY_KEY = "artdaddy.chipTest.v1";
+
+describe("why a chip's test failed: the maker's own refusal of the driver", () => {
+  /** What one look at one size class finds on a PC whose chip's encode exits with an error and says exactly `stderr`. */
+  async function lookAt(maker: ChipMaker, stderr: string, sizeClass: SizeClass = "hd") {
+    const h = harness([ADAPTER[maker]], { chipStderr: stderr });
+    const found = await findChip(sizeClass, { allowRun: true }, h.deps);
+    return { h, found, results: found.events.map((event) => event.result) };
+  }
+
+  it.each(["hd", "uhd"] as const)(
+    "files the driver's refusal under its own word when the %s look is made, and the event says the maker and nothing about the driver",
+    async (sizeClass) => {
+      const { h, found } = await lookAt("nvidia", DRIVER_STDERR, sizeClass);
+      expect(found.chip).toBeNull();
+      // The 4K class is only asked of a chip that passed the HD test, so a refused driver ends the look at the HD test.
+      expect(found.events).toEqual([
+        { maker: "nvidia", sizeClass: "hd", result: "driver_too_old", ms: 0, ssimMilli: 0 },
+      ]);
+      expect(h.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true);
+      // What the next export's report is told is the same event, once.
+      expect(takeChipTestEvents()).toEqual(found.events);
+      expect(takeChipTestEvents()).toEqual([]);
+    },
+  );
+
+  it("files it under its own word at the 4K class too, when that is where the maker said it", async () => {
+    const h = harness([nvidia]);
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) =>
+        options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
+          ? { kind: "ran", code: 1, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
+          : h.deps.probe(args, options),
+    };
+    const found = await findChip("uhd", { allowRun: true }, deps);
+    expect(found.chip).toBeNull();
+    expect(found.events.map((event) => [event.sizeClass, event.result])).toEqual([
+      ["hd", "passed"],
+      ["uhd", "driver_too_old"],
+    ]);
+  });
+
+  it.each(DRIVER_SENTENCES)(
+    "recognises the sentence %j on its own, in any letter case",
+    async (sentence) => {
+      for (const text of [sentence, sentence.toLowerCase(), sentence.toUpperCase()])
+        expect((await lookAt("nvidia", stderrOf(text))).results, text).toEqual(["driver_too_old"]);
+    },
+  );
+
+  it("says driver_too_old for a stderr that also says there is no device, in either order, and no_device when only that is said", async () => {
+    for (const stderr of [
+      stderrOf("No capable devices found", ...DRIVER_SENTENCES),
+      stderrOf(...DRIVER_SENTENCES, "Cannot load nvcuda.dll"),
+    ])
+      expect((await lookAt("nvidia", stderr)).results).toEqual(["driver_too_old"]);
+    expect((await lookAt("nvidia", NO_DEVICE_STDERR)).results).toEqual(["no_device"]);
+  });
+
+  it.each(CHIP_MAKERS)(
+    "still files every 'no device' sentence as no_device, and every unrelated failure as encode_failed, for %s",
+    async (maker) => {
+      for (const sentence of NO_DEVICE_SENTENCES)
+        expect((await lookAt(maker, sentence)).results, sentence).toEqual(["no_device"]);
+      for (const stderr of UNRELATED_FAILURES)
+        expect((await lookAt(maker, stderr)).results, stderr).toEqual(["encode_failed"]);
+    },
+  );
+
+  it.each(["amd", "intel"] as const)(
+    "does not call the same sentences a driver refusal when %s's chip says them: only NVIDIA's loader says it",
+    async (maker) => {
+      expect((await lookAt(maker, DRIVER_STDERR)).results).toEqual(["encode_failed"]);
+      expect(
+        (await lookAt(maker, stderrOf(...DRIVER_SENTENCES, "No capable devices found"))).results,
+      ).toEqual(["no_device"]);
+    },
+  );
+
+  it("does not read a warning of a chip that encoded as a refusal: with exit 0 the test goes on to the picture and passes", async () => {
+    const h = harness([nvidia]);
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) =>
+        options.kind === "chip-test-encode"
+          ? { kind: "ran", code: 0, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
+          : h.deps.probe(args, options),
+    };
+    expect((await findChip("hd", { allowRun: true }, deps)).chip).toMatchObject({
+      maker: "nvidia",
+      result: "passed",
+    });
+  });
+
+  it("stays on the catch-all when ffmpeg's text cannot even be read", async () => {
+    const h = harness([nvidia]);
+    const hostile = {
+      toString() {
+        throw new Error("not a text");
+      },
+    } as unknown as string;
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) =>
+        options.kind === "chip-test-encode"
+          ? { kind: "ran", code: 1, stdout: "", stderr: hostile, ms: 1 }
+          : h.deps.probe(args, options),
+    };
+    expect((await findChip("hd", { allowRun: true }, deps)).events).toEqual([
+      expect.objectContaining({ result: "encode_failed" }),
+    ]);
+  });
+
+  it("is driver_too_old exactly when the maker is NVIDIA and a driver sentence is there, else no_device exactly when a no-device sentence is there, else encode_failed (property)", () => {
+    type Part = { readonly text: string; readonly kind: "driver" | "no_device" | "noise" };
+    const parts: Part[] = [
+      ...DRIVER_SENTENCES.flatMap((sentence) =>
+        [sentence, sentence.toLowerCase(), sentence.toUpperCase()].map((text) => ({
+          text: `${NVENC_LOADER} ${text}`,
+          kind: "driver" as const,
+        })),
+      ),
+      ...NO_DEVICE_SENTENCES.map((text) => ({ text, kind: "no_device" as const })),
+      ...AFTER_AN_OPEN_THAT_FAILED.map((text) => ({ text, kind: "noise" as const })),
+      { text: "", kind: "noise" },
+    ];
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...CHIP_MAKERS),
+        fc.array(fc.constantFrom(...parts), { maxLength: 8 }),
+        (maker, said) => {
+          const has = (kind: Part["kind"]) => said.some((part) => part.kind === kind);
+          const expected =
+            maker === "nvidia" && has("driver")
+              ? "driver_too_old"
+              : has("no_device")
+                ? "no_device"
+                : "encode_failed";
+          expect(encodeFailure(maker, said.map((part) => part.text).join("\n"))).toBe(expected);
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+});
+
+describe("a refused driver is remembered like any failure", () => {
+  it("is remembered for a day: the next look says cached_fail and runs nothing; a new day tests again, and so does a new driver", async () => {
+    const behaviour: Behaviour = { chipStderr: DRIVER_STDERR };
+    const h = harness([nvidia], behaviour);
+    const first = await findChip("hd", { allowRun: true }, h.deps);
+    expect(first.events).toEqual([expect.objectContaining({ result: "driver_too_old" })]);
+    const calls = h.calls.length;
+    const again = await findChip("hd", { allowRun: true }, h.deps);
+    expect(again.chip).toBeNull();
+    expect(again.events).toEqual([expect.objectContaining({ result: "cached_fail" })]);
+    expect(h.calls.length).toBe(calls);
+    // What the chip row reads is the word itself, not the cache's.
+    expect((await chipStatusOf("hd", h.deps)).adapters[0].result).toBe("driver_too_old");
+    // A day later the same driver is asked again, and says the same.
+    h.now.t += FAIL_TTL_MS + 1;
+    const later = await findChip("hd", { allowRun: true }, h.deps);
+    expect(h.calls.length).toBeGreaterThan(calls);
+    expect(later.events).toEqual([expect.objectContaining({ result: "driver_too_old" })]);
+    // The person updates the driver: another key, a fresh test, and now the chip is accepted.
+    delete behaviour.chipStderr;
+    const updated: ChipDeps = {
+      ...h.deps,
+      adapters: async () => [{ ...nvidia, driver: "32.0.16.1012" }],
+    };
+    expect((await findChip("hd", { allowRun: true }, updated)).chip).toMatchObject({
+      maker: "nvidia",
+    });
+  });
+
+  it("still reads back a failure that the build before this one wrote, and refuses a damaged entry that carries the new word", async () => {
+    const h = harness([nvidia], { chip: "fail" });
+    await findChip("hd", { allowRun: true }, h.deps);
+    const memory = JSON.parse(h.storage.get(MEMORY_KEY)!);
+    const [key] = Object.keys(memory.results);
+    // The shape the old build wrote for the catch-all: nothing about it changed.
+    expect(memory.results[key]).toMatchObject({ ok: false, result: "encode_failed" });
+    const calls = h.calls.length;
+    expect((await findChip("hd", { allowRun: true }, h.deps)).events).toEqual([
+      expect.objectContaining({ result: "cached_fail" }),
+    ]);
+    expect(h.calls.length).toBe(calls);
+    expect((await chipStatusOf("hd", h.deps)).adapters[0].result).toBe("encode_failed");
+    // The new word with ok true is not something this module could have written: tested again, never believed.
+    memory.results[key] = { ...memory.results[key], ok: true, result: "driver_too_old" };
+    h.storage.set(MEMORY_KEY, JSON.stringify(memory));
+    const found = await findChip("hd", { allowRun: true }, h.deps);
+    expect(h.calls.length).toBeGreaterThan(calls);
+    expect(found.events).toEqual([expect.objectContaining({ result: "encode_failed" })]);
+  });
+});
+
+describe("what the person is told for a refused driver", () => {
+  it("is the NVIDIA driver line, built from what the test itself remembered, for a driver under 610 (and not for a newer one)", async () => {
+    const hint = async (driver: string) => {
+      const h = harness([{ ...nvidia, driver }], { chipStderr: DRIVER_STDERR });
+      await findChip("hd", { allowRun: true }, h.deps);
+      const status = await chipStatusOf("hd", h.deps);
+      expect(status.verdict).toBe("not_passed");
+      return chipAdvice({
+        adapters: status.adapters.map(({ adapter, result }) => ({
+          maker: adapter.maker,
+          driver: adapter.driver,
+          result,
+        })),
+        processor: null,
+      });
+    };
+    expect((await hint("31.0.15.5123"))?.text).toContain("Your NVIDIA graphics driver is 551.23.");
+    expect(await hint("32.0.16.1012")).toBeNull();
+  });
+});
+
+describe("the words a chip test can say are words a report may carry, and words the memory can keep", () => {
+  const source = readFileSync("src/timeline/chipTest.ts", "utf8").replace(/\r\n/g, "\n");
+  const union = /export type ChipTestResult\s*=((?:\s*\|\s*"[a-z_0-9]+")+);/.exec(source);
+  const words = union ? [...union[1].matchAll(/"([a-z_0-9]+)"/g)].map((found) => found[1]) : [];
+  // Made when the memory is read, or nothing was learned: never stored.
+  const NEVER_STORED = ["cached_pass", "cached_fail", "skipped_busy"];
+
+  it("reads the type it guards (a parse that found nothing would pass everything below)", () => {
+    expect(words.length).toBeGreaterThanOrEqual(11);
+    expect(new Set(words).size).toBe(words.length);
+    expect(words).toContain("passed");
+  });
+
+  it("has every member of ChipTestResult in the list a report is cleaned against", () => {
+    for (const word of words)
+      expect(EXPORT_TRACE_VALUES as readonly string[], word).toContain(word);
+  });
+
+  it("keeps every result a test can end in, and reads it back as the same word; the words that are never stored are refused", async () => {
+    const h = harness([amd]);
+    await findChip("hd", { allowRun: true }, h.deps);
+    const memory = JSON.parse(h.storage.get(MEMORY_KEY)!);
+    const [key] = Object.keys(memory.results);
+    const readBack = async (word: string): Promise<string | null> => {
+      memory.results = {
+        [key]: { ...memory.results[key], ok: word === "passed", result: word },
+      };
+      h.storage.set(MEMORY_KEY, JSON.stringify(memory));
+      return (await chipStatusOf("hd", h.deps)).adapters[0].result;
+    };
+    for (const word of words.filter((w) => !NEVER_STORED.includes(w)))
+      expect(await readBack(word), word).toBe(word);
+    for (const word of NEVER_STORED) expect(await readBack(word), word).toBeNull();
   });
 });

@@ -50,6 +50,7 @@ export type ChipTestResult =
   | "passed"
   | "no_device"
   | "encode_failed"
+  | "driver_too_old"
   | "garbled"
   | "below_x264"
   | "wrong_frames"
@@ -236,6 +237,7 @@ const RESULTS: ReadonlySet<string> = new Set<ChipTestResult>([
   "passed",
   "no_device",
   "encode_failed",
+  "driver_too_old",
   "garbled",
   "below_x264",
   "wrong_frames",
@@ -346,6 +348,25 @@ export function markChipSuspect(adapter: GraphicsAdapter, given?: ChipDeps): voi
 const NO_DEVICE =
   /no (?:\w+ )?capable|cannot load|no device|device not found|not found|unsupported device/i;
 
+/** The maker's own refusal of a driver that is older than the video tool accepts. Both sentences are in the NVENC loader of
+ *  the ffmpeg build `scripts/sidecarStaging.mjs` pins (master snapshot N-127021, 30 Sep 2026): "Driver does not support the
+ *  required nvenc API version. Required: %d.%d Found: %d.%d" and "The minimum required Nvidia driver for nvenc is %s or
+ *  newer". The words are the loader's; the floor number inside the second sentence is the build's. A different pinned build
+ *  needs this looked at again (its sentences, not its number). */
+const DRIVER_TOO_OLD =
+  /minimum required Nvidia driver|Driver does not support the required nvenc API version/i;
+
+/** What a non-zero exit of the chip's own encode means. The driver's refusal is asked first and only of NVIDIA, whose loader
+ *  says it: the same words from another maker's run are not a driver refusal. Anything the loader did not say that way is the
+ *  catch-all, so a refusal of the driver is never filed under it. */
+export function encodeFailure(
+  maker: ChipMaker,
+  stderr: string,
+): "driver_too_old" | "no_device" | "encode_failed" {
+  if (maker === "nvidia" && DRIVER_TOO_OLD.test(stderr)) return "driver_too_old";
+  return NO_DEVICE.test(stderr) ? "no_device" : "encode_failed";
+}
+
 interface Run {
   readonly result: ChipTestResult;
   readonly ssimMilli: number;
@@ -376,7 +397,7 @@ async function runTest(
     if (encoded.kind === "timeout") return { result: "timed_out", ssimMilli: 0, ms: spent() };
     if (encoded.code !== 0)
       return {
-        result: NO_DEVICE.test(encoded.stderr) ? "no_device" : "encode_failed",
+        result: encodeFailure(adapter.maker, encoded.stderr),
         ssimMilli: 0,
         ms: spent(),
       };
