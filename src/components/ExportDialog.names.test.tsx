@@ -99,8 +99,7 @@ const drawn = (): string =>
     ...Array.from(document.body.querySelectorAll("*"), (element) => element.textContent ?? ""),
   ].join("\n");
 /** The owner's sentence for the processor's lighter setting, written out here. */
-const LIGHT_COMPRESSION =
-  "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+const LIGHT_COMPRESSION = "To save time, ArtDaddy will use light compression.";
 const door = () => screen.getByRole("button", { name: "Advanced settings" });
 const fastRadio = () => screen.getByRole("radio", { name: "Fast" });
 const qualityRadio = () => screen.getByRole("radio", { name: "Quality" });

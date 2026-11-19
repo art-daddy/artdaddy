@@ -328,8 +328,7 @@ export interface ModeLines {
 
 export const FAST_HINT =
   "Fast uses your graphics chip: usually quicker, and the file is usually larger.";
-export const FASTER_SETTING_LINE =
-  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+export const FASTER_SETTING_LINE = "To save time, ArtDaddy will use a faster setting.";
 
 /** The words of the Export dialog's Mode row (exporter document, Appendix A): the row, what it starts on and why, what
  *  each way takes, and the faster setting where there is no row. `picked` is what the person chose in the row, or null
@@ -359,8 +358,8 @@ export function describeModeLines(view: ModeView | null, picked: ExportMode | nu
     selected !== "fast"
       ? null
       : picked === null && view.reason === "over_minute"
-        ? `Fast is selected because this export would take over a minute on this PC${full ? ` (${full})` : ""}. The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.`
-        : "The file will be larger and the picture can differ slightly from Full quality.";
+        ? `Fast is selected because this export would take over a minute on this PC${full ? ` (${full})` : ""}. The file will be larger. Choose Full quality for the smallest file.`
+        : "The file will be larger.";
   return { selected, hint: FAST_HINT, note, alternative, faster: null };
 }
 
@@ -368,9 +367,8 @@ export function describeModeLines(view: ModeView | null, picked: ExportMode | nu
  *  Nothing for the normal setting, which needs no explaining. */
 export function describeEncoder(encoder: unknown, reason: unknown): string {
   if (encoder === "amd" || encoder === "nvidia" || encoder === "intel")
-    return `Using your graphics chip${reason === "over_minute" ? " to save time" : ""} · the file is larger and the picture can differ slightly`;
-  if (encoder === "x264_fast")
-    return "Using light compression to save time · the picture may be slightly softer";
+    return `Using your graphics chip${reason === "over_minute" ? " to save time" : ""} · the file is larger`;
+  if (encoder === "x264_fast") return "Using light compression to save time";
   return "";
 }
 

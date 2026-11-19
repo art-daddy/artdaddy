@@ -22,23 +22,20 @@ export const D2_WORDS = {
   resolutionName: "resolution",
   /** S10 the door. */
   door: "Advanced settings",
-  /** S14 the line behind the door, Quality only, where the app will use the processor's lighter setting for the export (the owner's name for it, and the 0.28.0 sentence with that name). */
-  lightCompressionLine:
-    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+  /** S14 the line behind the door, Quality only, where the app will use the processor's lighter setting for the export (the owner's name for it, and the 0.28.0 sentence with that name and without its claim about the picture). */
+  lightCompressionLine: "To save time, ArtDaddy will use light compression.",
   /** S15 the frame rate row. */
   rateLabel: "Frame rate",
   rateName: "frame rate",
   /** S16 the quality row. */
   qualityLabel: "Quality",
   qualityName: "quality",
-  /** S18 the Graphics chip note for the state where the chip passed its test: the chip is used whenever it passed for the size, so the note says it is used and what that costs (the sentence the Fast
-   *  note already had). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
-  chipNotePassed:
-    "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  /** S18 the Graphics chip note for the state where the chip passed its test: the chip is used whenever it passed for the size, so the note says it is used and what that costs (the size of the file; the picture is not
+   *  spoken of). The other four notes are 0.28.0's (`CHIP_ROW_NOTES`). */
+  chipNotePassed: "Auto: used on this PC. The file is usually larger.",
   /** S18 with Fast chosen: the same sentence. Kept as its own entry (the dialog picks it with `fastChosen`) so the two can be worded apart again without touching the component; since the chip is used
    *  whenever it passed, Quality and Fast say the same. */
-  chipNotePassedFast:
-    "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  chipNotePassedFast: "Auto: used on this PC. The file is usually larger.",
   /** S19, S20 the footer. */
   cancel: "Cancel",
   exportAction: "Export",
@@ -56,8 +53,8 @@ export const D2_WORDS = {
   useFastSettings: "Use Fast's settings",
 } as const;
 
-/** OD-5: the clause of the 0.28.0 chip note that is still left out ("When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.").
- *  "the picture can differ slightly" is back in `D2_WORDS.chipNotePassed` (the owner's yes); this one stays out until the owner asks. Restoring it is one edit there; nothing reads it. */
+/** OD-5: the clause of the 0.28.0 chip note that is still left out of the new dialog's note ("It passed ArtDaddy's test on this PC."): it stays out until the owner asks. Restoring it is one edit in
+ *  `D2_WORDS.chipNotePassed`; nothing reads this entry. */
 export const CHIP_NOTE_DROPPED_CLAUSES = Object.freeze({
   passedTest: "It passed ArtDaddy's test",
 });

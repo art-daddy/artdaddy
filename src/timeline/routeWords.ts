@@ -77,8 +77,7 @@ export function describeFullRow(input: FullRowInput): string {
     const parts: (string | false)[] = [`Your settings above (${settings})`];
     if (input.route === "chip")
       parts.push("uses your graphics chip", measured || "the file is usually larger");
-    else if (input.route === "faster")
-      parts.push("a faster setting", "the picture may be slightly softer", measured);
+    else if (input.route === "faster") parts.push("a faster setting", measured);
     else parts.push(measured || "the smallest file for this quality");
     parts.push(timeOf(input.seconds));
     return joined(parts);
@@ -99,14 +98,13 @@ export interface QuickRowInput {
   changedFps: boolean;
 }
 
-/** What Quick's file is like: a measured size, else "smaller" where the picture or the rate came down, else what its encoder does. */
+/** What Quick's file is like: a measured size, else "smaller" where the picture or the rate came down, else what its encoder does to the size of the file. */
 function quickFileWords(input: QuickRowInput, surface: "dialog" | "card"): string {
   const measured = measuredFile(input.bytes);
   if (measured) return measured;
   if (input.changedSize || input.changedFps) return "a smaller file";
   if (input.encoder === "chip")
     return surface === "dialog" ? "the file is usually larger" : "usually a larger file";
-  if (input.encoder === "faster") return "the picture may be slightly softer";
   return "";
 }
 
@@ -148,11 +146,8 @@ export function describeQuickSelected(input: QuickSelectedInput): string | null 
         ? "Quick is selected because this PC could not finish its speed check, so ArtDaddy treats it as slower than most."
         : `Quick is selected because this PC is slower than most${plain ? ` (a plain video takes about ${plain} times its length here)` : ""}.`;
     const picture = pictureText(input.picture);
-    const cost =
-      input.changedSize && picture
-        ? `The picture is smaller (${picture}) and can look slightly softer.`
-        : "The picture can look slightly softer.";
-    return `${why} ${cost} Choose Full quality to keep your settings.`;
+    const cost = input.changedSize && picture ? ` The picture is smaller (${picture}).` : "";
+    return `${why}${cost} Choose Full quality to keep your settings.`;
   } catch {
     return null;
   }
@@ -187,9 +182,7 @@ export function describeQuickCardLine(input: QuickCardLineInput): string {
       "Quick export",
       pictureText(input.picture),
       fpsText(input.fps),
-      input.changedSize
-        ? "the picture is smaller and may look slightly softer"
-        : "the picture may look slightly softer",
+      input.changedSize ? "the picture is smaller" : "",
     ]);
   } catch {
     return "";
@@ -326,7 +319,8 @@ export interface RouteQuestionInput {
 const FULL_FILE_WORDS: Record<FullRoute, string> = {
   processor: "the smallest file",
   chip: "usually a larger file",
-  faster: "the picture may be slightly softer",
+  // nothing to say of the file: a measured size is added where there is one
+  faster: "",
 };
 
 const ROUTE_TITLE = "Export at full quality or Quick?";

@@ -110,8 +110,7 @@ const workload: RenderWorkload = {
   peakMediaLayers: 2,
 };
 
-const NOTE =
-  "Auto: used on this PC. The file is usually larger and the picture can differ slightly.";
+const NOTE = "Auto: used on this PC. The file is usually larger.";
 /** What the note must never claim: a saving, a length or a kind of export. */
 const CLAIMS_A_SAVING = /saves? time|saving|long exports|minute/i;
 

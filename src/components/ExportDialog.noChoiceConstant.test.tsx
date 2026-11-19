@@ -124,10 +124,6 @@ describe("the real dialog with FAST_CHOICE_OFFERED false", () => {
     mount();
     await settle();
     fireEvent.click(door());
-    expect(
-      screen.getByText(
-        "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
-      ),
-    ).toBeVisible();
+    expect(screen.getByText("To save time, ArtDaddy will use light compression.")).toBeVisible();
   });
 });

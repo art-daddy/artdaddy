@@ -41,8 +41,8 @@ above that row and records the time-left rule that runs beside it.
    (`FAST_CHOICE_OFFERED`) draws or removes the row and its line.
    - The line behind Advanced settings is built from the shown values, clause by clause, and never names the encoder: "One size
      smaller, up to 30 frames a second, Medium quality." (Fast on 4K at 60), "Project size and frame rate, Medium quality."
-     (Quality at the start). Quality alone also gets "To save time, ArtDaddy will use light compression; the picture may be slightly
-     softer." where the app will use that setting.
+     (Quality at the start). Quality alone also gets "To save time, ArtDaddy will use light compression." where the app will use that
+     setting.
    - One Frame rate list per project serves both choices and holds Fast's own rate where the ladder 60 / 50 / 30 / 25 / 24 has none
      (72 gives 18); a rate is kept only while the list holds it.
    - The chip row's note for a passed chip reads "Auto: used on this PC. ..." under Quality and under Fast alike: the chip is used

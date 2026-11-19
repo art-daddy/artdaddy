@@ -304,9 +304,7 @@ describe("ExportDialog", () => {
     expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null }));
     fireEvent.click(fast);
     expect(fast).toBeChecked();
-    expect(
-      screen.getByText(/The file will be larger and the picture can differ slightly/),
-    ).toBeVisible();
+    expect(screen.getByText("The file will be larger.")).toBeVisible();
     expect(screen.getByText("Full quality would take under a minute.")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(start).toHaveBeenLastCalledWith({
@@ -326,7 +324,7 @@ describe("ExportDialog", () => {
     expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
     expect(
       screen.getByText(
-        "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.",
+        "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger. Choose Full quality for the smallest file.",
       ),
     ).toBeVisible();
     expect(screen.getByText("Full quality would take about 12 min.")).toBeVisible();
@@ -347,11 +345,7 @@ describe("ExportDialog", () => {
     const start = vi.fn();
     render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
     expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
-    expect(
-      screen.getByText(
-        "The file will be larger and the picture can differ slightly from Full quality.",
-      ),
-    ).toBeVisible();
+    expect(screen.getByText("The file will be larger.")).toBeVisible();
     expect(screen.queryByText(/is selected because|over a minute/)).toBeNull();
     expect(screen.getByText("Full quality would take under a minute.")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
@@ -387,9 +381,7 @@ describe("ExportDialog", () => {
     );
     render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
     expect(
-      await screen.findByText(
-        "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
-      ),
+      await screen.findByText("To save time, ArtDaddy will use a faster setting."),
     ).toBeVisible();
     expect(screen.queryByRole("radio", { name: "Fast" })).not.toBeInTheDocument();
   });

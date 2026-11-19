@@ -15,12 +15,22 @@ import { describe, expect, it, vi } from "vitest";
 
 import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { EXPORT_ENCODERS, EXPORT_MODE_REASONS } from "../api/exportVocabulary";
-import { retiredIn } from "../test/retiredNames";
+import { claimsIn, retiredIn } from "../test/retiredNames";
+import { CHIP_ROW_NOTES, chipRowModel, type ChipRowInput } from "./chipRow";
+import { D2_WORDS, RESOLUTION_WORDS, QUALITY_WORDS } from "./exportChoiceWords";
 import { exportHelp, type HelpInput } from "./exportHelp";
-import { describeEncoder } from "./exportWords";
+import { describeEncoder, describeModeLines, type ModeView } from "./exportWords";
 import { describeLower } from "./lowerWords";
 import { quickAvailable } from "./quickAvailable";
-import { BANNER_BUTTON_LABELS } from "./routeWords";
+import {
+  BANNER_BUTTON_LABELS,
+  describeFullRow,
+  describeQuickCardLine,
+  describeQuickRow,
+  describeQuickSelected,
+  describeRouteQuestion,
+} from "./routeWords";
+import { PC_CLASSES, ROUTE_KINDS } from "./exportTypes3c";
 
 // The scans below read and parse every shipped file. Alone that takes a few seconds; a run of the whole suite puts every test file on every core, where it takes several times as long, so the file asks for a longer wall clock.
 vi.setConfig({ testTimeout: 120_000 });
@@ -663,9 +673,11 @@ describe("the guard fails only on the old names, wherever new words are added", 
     "Finishing",
     "This is taking longer than expected",
     "One size smaller, up to 30 frames a second, Medium quality, light compression.",
-    "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+    "To save time, ArtDaddy will use light compression.",
     "Up to 30 frames a second, Medium quality, graphics chip.",
     "Using light compression to save time",
+    "Auto: used on this PC. The file is usually larger.",
+    "Without the graphics chip, exports are usually slower.",
   ];
 
   it("takes new sentences made of the owner's names, and of a time left, without a word", () => {
@@ -678,6 +690,8 @@ describe("the guard fails only on the old names, wherever new words are added", 
       "Using a faster setting to save time",
       "Choose Full quality for the smallest file",
       "Quick export would take about 3 min",
+      "To save time, ArtDaddy will use light compression; the picture may be slightly softer.",
+      "Using your graphics chip · the file is larger and the picture can differ slightly",
     ];
     const found = unaccounted(scan(withWords([...NEW_WORDS, ...old])));
     expect(found).toHaveLength(old.length);
@@ -685,6 +699,363 @@ describe("the guard fails only on the old names, wherever new words are added", 
       const hit = found.find((line) => line.includes(`ADDED_WORDS_${NEW_WORDS.length + index} `));
       expect(hit, text).toContain(JSON.stringify(text));
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The claims: nothing a person can read says that the graphics chip or light compression changes the picture
+// ---------------------------------------------------------------------------------------------------------------------
+// The owner took that claim out of everything a person reads on 19 Nov 2026 ("the picture can differ slightly", "the picture may be slightly softer", and every wording of them: the dialog, the chat card, the
+// assistant's text). The scan above already finds a claim in a string that something reaches (a claim is a retired name). The checks here are stricter, because a claim that nothing reaches today is one wiring
+// away from a person: no string of any shipped file may carry it, reached or not, nor a sentence that a `+` joins out of literals, nor a comment that quotes it; and the real words functions are run over every
+// input they take, so a sentence made by code is held as well as one that is written out.
+
+const BREAK = "\u0001";
+
+interface Assembled {
+  line: number;
+  decl: string;
+  text: string;
+  pieces: string[];
+}
+
+/** The sentences that a chain of `+` joins out of literals ("the picture " + "may differ"), read whole. A part that is not a literal reads as a break, so the words on either side of it never join. */
+function assembledOf(facts: Facts): Assembled[] {
+  const found: Assembled[] = [];
+  const inChain = new Set<ts.Node>();
+  const isPlus = (node: ts.Node): node is ts.BinaryExpression =>
+    ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken;
+  const piecesOf = (node: ts.Expression): string[] => {
+    let inner = node;
+    while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+    if (ts.isStringLiteral(inner) || ts.isNoSubstitutionTemplateLiteral(inner)) return [inner.text];
+    if (ts.isTemplateExpression(inner))
+      return [
+        inner.head.text,
+        ...inner.templateSpans.flatMap((span) => [BREAK, span.literal.text]),
+      ];
+    if (isPlus(inner)) {
+      inChain.add(inner);
+      return [...piecesOf(inner.left), ...piecesOf(inner.right)];
+    }
+    return [BREAK];
+  };
+  const visit = (node: ts.Node): void => {
+    if (isPlus(node) && !inChain.has(node)) {
+      const pieces = piecesOf(node);
+      found.push({
+        line: facts.source.getLineAndCharacterOfPosition(node.getStart(facts.source)).line + 1,
+        decl: enclosingDeclaration(node),
+        text: pieces.join(""),
+        pieces,
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(facts.source);
+  return found;
+}
+
+/** The joined sentences that carry a claim no single piece of them carries: the ones the scan of single literals cannot see. */
+const assembledClaims = (facts: Facts): Assembled[] =>
+  assembledOf(facts).filter(({ text, pieces }) =>
+    claimsIn(text).some((name) => !pieces.some((piece) => claimsIn(piece).includes(name))),
+  );
+
+describe("no claim that the picture differs is made anywhere in the shipped build", () => {
+  const claimed = (result: Scan): string[] =>
+    result.findings.filter((f) => claimsIn(f.text).length > 0).map(describeFinding);
+  const assembled = (result: Scan): string[] =>
+    [...result.facts.values()].flatMap((facts) =>
+      assembledClaims(facts).map(
+        (a) =>
+          `${facts.file}:${a.line} in ${a.decl} ${JSON.stringify(a.text.split(BREAK).join("…"))}`,
+      ),
+    );
+
+  it("finds a claim in a string, a template part, JSX text and a sentence joined from pieces, reached or not, and not a plain sentence, nor words a variable keeps apart", () => {
+    const project = new Map<string, string>([
+      [
+        "claims.ts",
+        [
+          'export const plain = "The picture can differ slightly.";',
+          'export const joined = "The file is larger and the picture " + "may be " + "different.";',
+          "export const template = `Using ${what} · the file is larger and the picture can look slightly softer`;",
+          'const hidden = "the picture can differ";',
+          "export const holder = (): string => hidden;",
+          'export const apart = "the picture " + word + " may differ";',
+          'export const fine = "The picture is smaller (720p), and " + "the file is usually larger.";',
+        ].join("\n"),
+      ],
+      [
+        "view.tsx",
+        [
+          'import { plain, holder } from "./claims";',
+          'import { other } from "./unreached";',
+          "export const View = () => <p>{plain}{holder()}{other} The picture may look slightly softer.</p>;",
+        ].join("\n"),
+      ],
+      [
+        "unreached.ts",
+        'export const other = "fine"; export const nobody = "the picture may be slightly softer";',
+      ],
+    ]);
+    const result = scan(project);
+    expect(
+      result.findings
+        .filter((f) => claimsIn(f.text).length > 0)
+        .map((f) => f.decl)
+        .sort(),
+    ).toEqual(["View", "hidden", "nobody", "plain", "template"]);
+    expect(
+      [...result.facts.values()].flatMap((facts) => assembledClaims(facts).map((a) => a.decl)),
+    ).toEqual(["joined"]);
+    // reached or not is told apart (the scan above lists the reached ones), yet both are found
+    const lives = Object.fromEntries(
+      result.findings.filter((f) => claimsIn(f.text).length > 0).map((f) => [f.decl, f.live]),
+    );
+    expect(lives).toMatchObject({ plain: true, hidden: true, nobody: false });
+  });
+
+  it("finds none in the real sources: no string of any shipped file says it, reached or not, and none is joined from pieces", () => {
+    const result = real();
+    expect(result.facts.size).toBeGreaterThan(300);
+    expect(
+      claimed(result),
+      "a string says the picture differs or is softer (the chip or light compression): take the sentence out, reached or not",
+    ).toEqual([]);
+    expect(
+      assembled(result),
+      "a sentence joined from pieces says the picture differs or is softer",
+    ).toEqual([]);
+  });
+
+  it("finds none in any comment either: a comment that quotes the claim is a second copy of it", () => {
+    const found = [...realSources()]
+      .map(([file, text]) => ({ file, claims: claimsIn(normalised(text)) }))
+      .filter(({ claims }) => claims.length > 0);
+    expect(found).toEqual([]);
+  });
+
+  it("finds a claim added to the real sources: in a string that something reaches, in one nothing reaches, and in one joined from pieces", () => {
+    const edited = new Map(realSources());
+    edited.set(
+      "timeline/exportWords.ts",
+      [
+        edited.get("timeline/exportWords.ts") ?? "",
+        'export const ADDED_CLAIM = "the picture can differ slightly";',
+        'const ADDED_DEAD = "the picture may be slightly softer";',
+        'export const ADDED_JOINED = "the picture " + "may be " + "different";',
+      ].join("\n"),
+    );
+    const result = scan(edited);
+    expect(
+      result.findings
+        .filter((f) => claimsIn(f.text).length > 0)
+        .map((f) => f.decl)
+        .sort(),
+    ).toEqual(["ADDED_CLAIM", "ADDED_DEAD"]);
+    expect(assembled(result)).toHaveLength(1);
+    expect(assembled(result)[0]).toContain("ADDED_JOINED");
+  });
+
+  // The words are taken from the code that makes them, not from a list of sentences: a claim a function builds is as visible to a person as one that is written out.
+  const CLAIMS = [
+    "the picture can differ slightly",
+    "The picture may be slightly softer",
+    "The picture can look slightly softer.",
+    "the picture is smaller and may look slightly softer",
+    "The file will be larger and the picture can differ slightly from Full quality.",
+    "Fast looks slightly different",
+    "the picture will differ slightly",
+    "the picture looks different",
+    "the picture might be a little softer",
+  ];
+  const PLAIN = [
+    "Quality",
+    "Fast",
+    "light compression",
+    "graphics chip",
+    "Medium",
+    "The picture is smaller (720p).",
+    "The file is usually larger.",
+    "Without the graphics chip, exports are usually slower.",
+    "Using your graphics chip to save time",
+    "the file is larger",
+    "lower the picture size or frame rate",
+    "a smaller picture",
+    "Switch to another project",
+    "the file is usually larger",
+    "Cancel",
+  ];
+  const plain = fc
+    .array(fc.constantFrom(...PLAIN), { maxLength: 6 })
+    .map((words) => words.join(" "));
+
+  it("reads every wording of the claim inside any text made of plain words, and nothing plain as a claim", () => {
+    fc.assert(
+      fc.property(
+        plain,
+        fc.constantFrom(...CLAIMS),
+        plain,
+        (before, claim, after) => claimsIn(`${before} ${claim} ${after}`).length > 0,
+      ),
+    );
+    fc.assert(fc.property(plain, (words) => claimsIn(words).length === 0));
+  });
+
+  function* chipInputs(): Generator<ChipRowInput> {
+    for (const found of [false, true])
+      for (const pref of ["auto", "off"] as const)
+        for (const testing of [false, true])
+          for (const verdict of ["passed", "not_passed", "unknown"] as const)
+            for (const setAside of [false, true])
+              for (const flagsOn of [false, true])
+                for (const quickFlagOn of [false, true])
+                  for (const sizeServed of [false, true])
+                    yield {
+                      found,
+                      pref,
+                      testing,
+                      verdict,
+                      setAside,
+                      flagsOn,
+                      quickFlagOn,
+                      sizeServed,
+                    };
+  }
+
+  const modeLines = (): string[] => {
+    const out: string[] = [];
+    for (const showRow of [true, false])
+      for (const defaultMode of ["quality", "fast"] as const)
+        for (const reason of REASONS)
+          for (const faster of [true, false])
+            for (const seconds of [null, 700])
+              for (const picked of [null, "quality", "fast"] as const) {
+                const view: ModeView = {
+                  showRow,
+                  defaultMode,
+                  reason,
+                  faster,
+                  fullSeconds: seconds,
+                  fastSeconds: seconds === null ? null : 300,
+                };
+                const lines = describeModeLines(view, picked);
+                for (const text of [lines.hint, lines.note, lines.alternative, lines.faster])
+                  if (text !== null) out.push(text);
+              }
+    return out;
+  };
+
+  const heldRouteWords = (): string[] => {
+    const out: string[] = [];
+    for (const route of ["processor", "chip", "faster"] as const)
+      for (const bytes of [null, 300_000_000])
+        for (const seconds of [null, 600])
+          out.push(
+            describeFullRow({
+              route,
+              seconds,
+              bytes,
+              picture: "1080p",
+              fps: 30,
+              quality: "medium",
+            }),
+          );
+    for (const encoder of ["chip", "faster", "processor"] as const)
+      for (const changedSize of [false, true])
+        for (const changedFps of [false, true])
+          for (const bytes of [null, 300_000_000]) {
+            const quick = {
+              seconds: 300,
+              bytes,
+              picture: "720p",
+              fps: 30,
+              encoder,
+              changedSize,
+              changedFps,
+            };
+            out.push(
+              describeQuickRow(quick),
+              describeQuickCardLine({ picture: "720p", fps: 30, changedSize }),
+            );
+            for (const route of ["processor", "chip", "faster"] as const)
+              for (const pcClass of PC_CLASSES)
+                for (const selected of ROUTE_KINDS)
+                  out.push(
+                    ...describeRouteQuestion({
+                      pcClass,
+                      plainTimes: 9,
+                      selected,
+                      full: { seconds: 900, bytes: null, route },
+                      quick,
+                    }).lines,
+                  );
+          }
+    for (const pcClass of PC_CLASSES)
+      for (const changedSize of [false, true]) {
+        const text = describeQuickSelected({
+          pcClass,
+          plainTimes: 9,
+          picture: "720p",
+          changedSize,
+        });
+        if (text !== null) out.push(text);
+      }
+    return out;
+  };
+
+  /** Each surface's words, by name, with a sentence it must contain (so that a list that came out empty is not a pass). */
+  const SURFACES: readonly { name: string; texts: () => string[]; has: string }[] = [
+    {
+      name: "the Graphics chip row: every note of the row, and every note its model gives",
+      texts: () => [
+        ...Object.values(CHIP_ROW_NOTES),
+        ...[...chipInputs()].flatMap((input) => chipRowModel(input).note ?? []),
+      ],
+      has: "Auto: used on this PC.",
+    },
+    {
+      name: "the new dialog's own words (every entry of its words file)",
+      texts: () => [
+        ...Object.values(D2_WORDS),
+        ...Object.values(RESOLUTION_WORDS),
+        ...Object.values(QUALITY_WORDS),
+      ],
+      has: "To save time, ArtDaddy will use light compression",
+    },
+    {
+      name: "the old dialog's Mode row and its faster-setting line, over every view and pick",
+      texts: modeLines,
+      has: "To save time, ArtDaddy will use a faster setting",
+    },
+    {
+      name: "the chat card's line, for every encoder and every reason",
+      texts: () =>
+        EXPORT_ENCODERS.flatMap((encoder) =>
+          REASONS.map((reason) => describeEncoder(encoder, reason)),
+        ),
+      has: "Using light compression to save time",
+    },
+    {
+      name: "the held Quick route's words, over every route, encoder, size change and PC class",
+      texts: heldRouteWords,
+      has: "Quick export",
+    },
+  ];
+
+  it.each(SURFACES)("$name: no sentence says the picture differs", ({ texts, has }) => {
+    const all = texts();
+    expect(all.length).toBeGreaterThan(3);
+    expect(
+      all.some((text) => text.includes(has)),
+      `the list holds "${has}"`,
+    ).toBe(true);
+    expect(
+      all.filter((text) => claimsIn(text).length > 0),
+      "a sentence the code writes says the picture differs or is softer",
+    ).toEqual([]);
   });
 });
 

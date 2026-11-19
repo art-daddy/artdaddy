@@ -51,7 +51,7 @@ beforeAll(() => {
 afterAll(() => browserRule.remove());
 
 const NOTES = {
-  passed: "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  passed: "Auto: used on this PC. The file is usually larger.",
   checking: "Checking this PC's graphics chip\u2026",
   not_passed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
@@ -60,8 +60,7 @@ const NOTES = {
   off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
 } as const;
 const SUMMARY = "Project size and frame rate, Medium quality.";
-const FASTER =
-  "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
+const FASTER = "To save time, ArtDaddy will use light compression.";
 
 const RATES_60: AdvancedSettingsProps["rates"] = [
   { value: null, label: "Same as project (60 fps)" },

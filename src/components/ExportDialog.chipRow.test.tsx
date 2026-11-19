@@ -234,12 +234,11 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     show();
     await waitFor(() =>
       expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
-        "The file is usually larger and the picture can differ slightly",
+        "The file is usually larger. It passed ArtDaddy's test on this PC.",
       ),
     );
-    expect(screen.getByTestId("chip-row-note")).toHaveTextContent(
-      "It passed ArtDaddy's test on this PC.",
-    );
+    // what the chip costs is the size of the file; the row says nothing of the picture
+    expect(screen.getByTestId("chip-row-note").textContent).not.toMatch(/differ|softer|slightly/);
   });
 
   // What the row says and what the export will do must be one thing: the two artifacts compared are the note on screen and the app's own answer (its real rule, not a scripted one) for the same PC and a short project.
@@ -278,11 +277,7 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     const start = show();
     expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
     expect(screen.queryByTestId("chip-row")).toBeNull();
-    expect(
-      screen.getByText(
-        "The file will be larger and the picture can differ slightly from Full quality.",
-      ),
-    ).toBeVisible();
+    expect(screen.getByText("The file will be larger.")).toBeVisible();
     expect(screen.queryByText(/is selected because|over a minute/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null })); // left as the app chose

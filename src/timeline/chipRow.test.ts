@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { claimsIn } from "../test/retiredNames";
 import type { ChipPref } from "./chipPref";
 import {
   CHIP_ROW_NOTES,
@@ -70,7 +71,7 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     expect(model({ verdict: "passed" })).toEqual({
       state: "auto_passed",
       visible: true,
-      note: "Auto: used on this PC. The file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
+      note: "Auto: used on this PC. The file is usually larger. It passed ArtDaddy's test on this PC.",
       action: "turn_off",
     });
   });
@@ -121,8 +122,8 @@ describe("the graphics-chip row: the states the mockups draw", () => {
   });
 
   // The Export dialog leaves the old Mode row out where this row is drawn, and that row is where the person was told, before the start, what the chip costs.
-  it("says what the chip costs, the file usually larger and the picture able to differ slightly, in the one state where the chip is used and in no other", () => {
-    const COST = "The file is usually larger and the picture can differ slightly";
+  it("says what the chip costs, the file usually larger and nothing of the picture, in the one state where the chip is used and in no other", () => {
+    const COST = "The file is usually larger.";
     const states = new Set<string>();
     for (const input of everyInput()) {
       const row = chipRowModel(input);
@@ -130,6 +131,8 @@ describe("the graphics-chip row: the states the mockups draw", () => {
       expect(row.note.includes(COST), `${row.state}: ${JSON.stringify(input)}`).toBe(
         row.state === "auto_passed",
       );
+      // no state says the picture differs or is softer, whatever the chip did
+      expect(claimsIn(row.note), `${row.state}: ${JSON.stringify(input)}`).toEqual([]);
       states.add(row.state);
     }
     expect([...states].sort()).toEqual([

@@ -318,19 +318,17 @@ describe("the encoder an export runs on, in words", () => {
     for (const chip of ["amd", "nvidia", "intel"] as const) {
       // A job or a report from an app that chose the chip only for long exports still carries this reason: it keeps its own words.
       expect(describeEncoder(chip, "over_minute")).toBe(
-        "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+        "Using your graphics chip to save time · the file is larger",
       );
       // Chosen because it passed its test for the picture's size: no saving is claimed, since none was measured.
       expect(describeEncoder(chip, "chip_default")).toBe(
-        "Using your graphics chip · the file is larger and the picture can differ slightly",
+        "Using your graphics chip · the file is larger",
       );
       // Picked by the person: no need to say why it is used.
-      expect(describeEncoder(chip, "person")).toBe(
-        "Using your graphics chip · the file is larger and the picture can differ slightly",
-      );
+      expect(describeEncoder(chip, "person")).toBe("Using your graphics chip · the file is larger");
     }
     expect(describeEncoder("x264_fast", "promise_line")).toBe(
-      "Using light compression to save time · the picture may be slightly softer",
+      "Using light compression to save time",
     );
   });
 
@@ -406,7 +404,7 @@ describe("what the Export dialog says about the mode, in words", () => {
     );
     expect(lines.selected).toBe("fast");
     expect(lines.note).toBe(
-      "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.",
+      "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger. Choose Full quality for the smallest file.",
     );
     expect(lines.alternative).toBe("Full quality would take about 12 min.");
   });
@@ -425,9 +423,7 @@ describe("what the Export dialog says about the mode, in words", () => {
         null,
       );
       expect(lines.selected, `${fullSeconds}`).toBe("fast");
-      expect(lines.note, `${fullSeconds}`).toBe(
-        "The file will be larger and the picture can differ slightly from Full quality.",
-      );
+      expect(lines.note, `${fullSeconds}`).toBe("The file will be larger.");
     }
   });
 
@@ -459,15 +455,13 @@ describe("what the Export dialog says about the mode, in words", () => {
     expect(full.alternative).toBe("Fast would take about 4 min.");
     const fast = describeModeLines(row({ fullSeconds: 720, fastSeconds: 240 }), "fast");
     expect(fast.selected).toBe("fast");
-    expect(fast.note).toBe(
-      "The file will be larger and the picture can differ slightly from Full quality.",
-    );
+    expect(fast.note).toBe("The file will be larger.");
     expect(fast.note).not.toMatch(/is selected because/); // the person picked it: nothing to explain
   });
 
   it("says the faster setting will be used only where there is no row and the app will use it", () => {
     expect(describeModeLines(row({ showRow: false, faster: true }), null).faster).toBe(
-      "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
+      "To save time, ArtDaddy will use a faster setting.",
     );
     expect(describeModeLines(row({ showRow: false, faster: false }), null).faster).toBeNull();
     expect(describeModeLines(row({ showRow: true, faster: true }), null).faster).toBeNull();

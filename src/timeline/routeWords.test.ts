@@ -52,7 +52,7 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
       "Your settings above (1080p · 30 fps · Medium) · uses your graphics chip · the file is usually larger · about 15 min",
     );
     expect(describeFullRow({ ...full, route: "faster", seconds: 600 })).toBe(
-      "Your settings above (1080p · 30 fps · Medium) · a faster setting · the picture may be slightly softer · about 10 min",
+      "Your settings above (1080p · 30 fps · Medium) · a faster setting · about 10 min",
     );
   });
 
@@ -63,9 +63,9 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
     expect(describeFullRow({ ...full, route: "processor", bytes: 480e6 })).toBe(
       "Your settings above (1080p · 30 fps · Medium) · a file of about 480 MB · about 21 min",
     );
-    // The faster setting keeps its caveat about the picture next to a measured size: the size does not answer it.
+    // A measured size is said after the faster setting's name.
     expect(describeFullRow({ ...full, route: "faster", seconds: 600, bytes: 300e6 })).toBe(
-      "Your settings above (1080p · 30 fps · Medium) · a faster setting · the picture may be slightly softer · a file of about 300 MB · about 10 min",
+      "Your settings above (1080p · 30 fps · Medium) · a faster setting · a file of about 300 MB · about 10 min",
     );
   });
 
@@ -100,8 +100,8 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
     const kept = { ...quickRow, changedSize: false, changedFps: false };
     expect(describeQuickRow({ ...kept, encoder: "chip" })).toContain("the file is usually larger");
     expect(describeQuickRow({ ...kept, encoder: "chip" })).not.toContain("smaller");
-    expect(describeQuickRow({ ...kept, encoder: "faster" })).toContain(
-      "the picture may be slightly softer",
+    expect(describeQuickRow({ ...kept, encoder: "faster" })).toBe(
+      "720p · 30 fps · faster setting · about 9 min",
     );
     expect(describeQuickRow({ ...kept, encoder: "faster" })).not.toContain("smaller");
     // Either one is enough to make it smaller.
@@ -113,7 +113,7 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
     expect(
       describeQuickSelected({ pcClass: "weak", plainTimes: 9, picture: "720p", changedSize: true }),
     ).toBe(
-      "Quick is selected because this PC is slower than most (a plain video takes about 9 times its length here). The picture is smaller (720p) and can look slightly softer. Choose Full quality to keep your settings.",
+      "Quick is selected because this PC is slower than most (a plain video takes about 9 times its length here). The picture is smaller (720p). Choose Full quality to keep your settings.",
     );
     expect(
       describeQuickSelected({
@@ -123,7 +123,7 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
         changedSize: true,
       }),
     ).toBe(
-      "Quick is selected because this PC could not finish its speed check, so ArtDaddy treats it as slower than most. The picture is smaller (720p) and can look slightly softer. Choose Full quality to keep your settings.",
+      "Quick is selected because this PC could not finish its speed check, so ArtDaddy treats it as slower than most. The picture is smaller (720p). Choose Full quality to keep your settings.",
     );
   });
 
@@ -136,14 +136,14 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
         changedSize: false,
       }),
     ).toBe(
-      "Quick is selected because this PC is slower than most (a plain video takes about 9 times its length here). The picture can look slightly softer. Choose Full quality to keep your settings.",
+      "Quick is selected because this PC is slower than most (a plain video takes about 9 times its length here). Choose Full quality to keep your settings.",
     );
     // A pace that is not known is left out rather than guessed.
     for (const plainTimes of [null, Number.NaN, 0, -3, Number.POSITIVE_INFINITY])
       expect(
         describeQuickSelected({ pcClass: "weak", plainTimes, picture: "720p", changedSize: true }),
       ).toBe(
-        "Quick is selected because this PC is slower than most. The picture is smaller (720p) and can look slightly softer. Choose Full quality to keep your settings.",
+        "Quick is selected because this PC is slower than most. The picture is smaller (720p). Choose Full quality to keep your settings.",
       );
     for (const pcClass of PC_CLASSES.filter((c) => c !== "weak" && c !== "unfinished"))
       expect(
@@ -178,10 +178,10 @@ describe("the Export dialog's two choices: the owner's copy, with the facts' own
     );
     expect(describeTimesFrom("")).toBe("Times are from a quick check of this PC's speed.");
     expect(describeQuickCardLine({ picture: "720p", fps: 30, changedSize: true })).toBe(
-      "Quick export · 720p · 30 fps · the picture is smaller and may look slightly softer",
+      "Quick export · 720p · 30 fps · the picture is smaller",
     );
     expect(describeQuickCardLine({ picture: "720p", fps: 24, changedSize: false })).toBe(
-      "Quick export · 720p · 24 fps · the picture may look slightly softer",
+      "Quick export · 720p · 24 fps",
     );
   });
 
@@ -344,11 +344,9 @@ describe("the chat card's two questions: the owner's copy", () => {
       describeRouteQuestion({ ...question, full: { seconds: 900, bytes, route } }).ways.full;
     expect(wayOf("processor")).toBe("Full quality about 15 min, the smallest file");
     expect(wayOf("chip")).toBe("Full quality about 15 min, usually a larger file");
-    expect(wayOf("faster")).toBe("Full quality about 15 min, the picture may be slightly softer");
+    expect(wayOf("faster")).toBe("Full quality about 15 min");
     expect(wayOf("chip", 600e6)).toBe("Full quality about 15 min, a file of about 600 MB");
-    expect(wayOf("faster", 300e6)).toBe(
-      "Full quality about 15 min, the picture may be slightly softer, a file of about 300 MB",
-    );
+    expect(wayOf("faster", 300e6)).toBe("Full quality about 15 min, a file of about 300 MB");
   });
 
   it("falls back to the processor's file words for a route that is not one of the three, and for every name that objects inherit", () => {
@@ -374,7 +372,7 @@ describe("the chat card's two questions: the owner's copy", () => {
       expect(wayOf(odd), String(odd)).toBe(fallback);
     expect(wayOf("processor")).toBe(fallback);
     expect(wayOf("chip")).toBe("Full quality about 15 min, usually a larger file");
-    expect(wayOf("faster")).toBe("Full quality about 15 min, the picture may be slightly softer");
+    expect(wayOf("faster")).toBe("Full quality about 15 min");
   });
 
   it("says why it asks on a PC whose check did not finish, and what Quick changes where it changes only one thing", () => {

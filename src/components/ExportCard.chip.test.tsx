@@ -54,8 +54,7 @@ vi.mock("../platform/host", async (importOriginal) => ({
   })),
 }));
 
-const CHIP_LINE =
-  "Using your graphics chip · the file is larger and the picture can differ slightly";
+const CHIP_LINE = "Using your graphics chip · the file is larger";
 const OLD_END =
   "The graphics chip stopped this export. Try again uses the processor instead, which takes longer.";
 const GAP = "The graphics chip stopped this export. Starting again on the processor…";

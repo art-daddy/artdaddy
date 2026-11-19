@@ -61,7 +61,7 @@ const CHIP_PREF = "artdaddy.chipPref.v1";
 /** The chip row's note in each state. The passed one is this view's sentence (the chip is used whenever it passed); the others are 0.28.0's words. */
 const NOTES = {
   checking: "Checking this PC's graphics chip\u2026",
-  passed: "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
+  passed: "Auto: used on this PC. The file is usually larger.",
   notPassed:
     "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
   setAside:
