@@ -21,11 +21,13 @@ import { __resetJobSupervisor, __setJobSupervisor, supervisedRunner } from "../t
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { endProjectSession } from "../tools/coordinator";
 import { ensureTimeline } from "./engine";
+import { formatActivityMark } from "./exportActivity";
 import {
   __resetExportQueue,
   adoptExports,
   cancelExport,
   isDestinationReserved,
+  listExportOutcomes,
   listExportRecords,
   localDeliveryPort,
   manageExportsTool,
@@ -35,6 +37,7 @@ import {
   whenExportTelemetrySettles,
   whenExportsSettle,
 } from "./exportQueue";
+import { describeLiveStatus } from "./exportWords";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
 import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
@@ -1712,6 +1715,81 @@ describe("an export outlives a crash of the page", () => {
     await whenExportsSettle();
     expect(stages).toEqual(["checking", "saving"]);
     expect(useExportJob.getState().live).toBeNull();
+  });
+
+  it("one taken over mid-render, handed the 64 KiB the app process kept, joins where the render is: no false taking longer, a figure 20 s after the join, and time_left_s for the assistant", async () => {
+    // Only the clock is the test's: the queue's own waits stay real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = await setup();
+      const a = await t.exportNow();
+      await flush();
+      // A 5-minute render as far as the progress reader, the rule and the words are concerned (the plan the app process holds is the same object).
+      (t.jobs.submitted.at(-1)!.meta.plan as { duration: number }).duration = 300;
+      pageCrashes(t.jobs);
+      // The render went on with no page there: a block every half second, 150 s of it at normal speed, the app process's activity mark every five seconds,
+      // and the app process keeps the last 64 KiB of the output (about 200 bytes a block here, a few hundred blocks).
+      const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+      const block = (seconds: number) => {
+        const us = Math.round(seconds * 1_000_000);
+        const stamp = `${pad(Math.floor(us / 3_600_000_000))}:${pad(Math.floor(us / 60_000_000) % 60)}:${pad(Math.floor(us / 1_000_000) % 60)}.${pad(us % 1_000_000, 6)}`;
+        return `frame=${Math.round(seconds * 30)}\nfps=30.00\nstream_0_0_q=28.0\nbitrate=N/A\ntotal_size=N/A\nout_time_us=${us}\nout_time_ms=${us}\nout_time=${stamp}\ndup_frames=0\ndrop_frames=0\nspeed=1.00x\nprogress=continue\n`;
+      };
+      let printed = "";
+      for (let i = 1; i <= 300; i++)
+        printed +=
+          block(i / 2) +
+          (i % 10 === 0 ? formatActivityMark({ cpuMs: i * 400, readBytes: i * 90_000 }) : "");
+      t.jobs.stdout(a.job_id, printed.slice(-64 * 1024));
+      const kept = (await t.jobs.list()).find((job) => job.id === a.job_id)!.stdout_tail;
+      expect(kept.length).toBeLessThanOrEqual(64 * 1024);
+      expect(
+        kept.match(/progress=continue/g)!.length,
+        "a burst of minutes of blocks",
+      ).toBeGreaterThan(250);
+
+      const joinedAt = Date.now();
+      await adoptExports({ contextFor: t.nextPage });
+      await flush();
+      expect(useExportJob.getState().live).toMatchObject({ jobId: a.job_id, stage: "rendering" });
+      // Live from here: the next block every half second, 60 s of it.
+      const seen: Array<{ after: number; words: string; left: unknown }> = [];
+      for (let k = 1; k <= 120; k++) {
+        vi.setSystemTime(joinedAt + k * 500);
+        t.jobs.stdout(a.job_id, block(150 + k / 2));
+        seen.push({
+          after: k / 2,
+          words: describeLiveStatus(useExportJob.getState().live!, Date.now()),
+          left: listExportOutcomes().find((row) => row.job_id === a.job_id)?.time_left_s,
+        });
+      }
+      expect(seen.filter((s) => s.words.includes("taking longer")).map((s) => s.after)).toEqual([]);
+      // Nothing is said until the rule has seen 20 s of the render, counted from the join; then the truth (130 s left is about 2 min), on the grid.
+      expect(
+        seen.filter((s) => s.after < 20 && (s.left !== undefined || s.words.includes(" left"))),
+      ).toEqual([]);
+      expect(seen.find((s) => s.left !== undefined)?.after).toBe(20);
+      expect(seen.find((s) => s.after === 20)).toMatchObject({ left: 120 });
+      expect(seen.find((s) => s.after === 20)!.words).toContain("about 2 min left");
+      for (const s of seen.filter((r) => r.after >= 20)) {
+        expect(typeof s.left, `${s.after} s after the join`).toBe("number");
+        expect(
+          Math.abs((s.left as number) - (150 - s.after)),
+          `${s.after} s after the join`,
+        ).toBeLessThanOrEqual(60);
+      }
+      expect(listExportOutcomes().find((row) => row.job_id === a.job_id)).toMatchObject({
+        state: "running",
+        stage: "rendering",
+        progress_percent: 70,
+      });
+
+      t.jobs.exit(a.job_id, 0);
+      expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+      await whenExportsSettle();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("one that failed while no page was there reads failed, and its partial goes", async () => {
