@@ -683,7 +683,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     const quiet = running ? quietSeconds(running, now) : 0;
     const busy = running ? (stories.get(r.job_id)?.watch?.busy() ?? null) : null;
     const left = running ? shownTimeLeftSeconds(running, now) : null;
-    const failure = r.state === "failed" ? failureOf(r.error) : null;
+    const failure =
+      r.state === "failed" ? failureForAssistant(r.error, r.chipFailed === true) : null;
     const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
     // A running export that is slower than said: the two facts, and what the assistant is to do about them (not cancel and start again).
     const slow = r.state === "running" && !r.cancelling ? helpRowOf3c(r.job_id) : null;
@@ -751,20 +752,27 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       // A waiting export: its place in line (1 is next).
       ...(r.state === "queued" && !r.cancelling ? { queue_position: waiting.indexOf(r) + 1 } : {}),
       // A failed export: the reason as a code, and in plain words the person can act on.
-      ...(failure
-        ? {
-            failure_code: failure.code,
-            // 0.27.0's sentence, with what to lower after it where there is something true to say.
-            failure: withLowerAdvice3c(
-              r.chipFailed ? describeChipFailure("assistant") : failure.plain,
-              failure.code,
-              r.chipFailed === true,
-            ),
-            ...(r.chipFailed ? { chip_failed: true } : {}),
-          }
-        : {}),
+      ...(failure ? { ...failure, ...(r.chipFailed ? { chip_failed: true } : {}) } : {}),
     };
   });
+}
+
+/** What the assistant is told about a failed export, in `manage_exports` and in the wake alike: 0.27.0's sentence (the chip's, when the chip
+ *  stopped it) with what to lower after it where there is something true to say, and the failure code. The encoder's own words are not part
+ *  of it: they can name a path on the person's PC, and the assistant can read them, scrubbed, by asking `manage_exports`. */
+function failureForAssistant(
+  error: string | undefined,
+  chipFailed: boolean,
+): { failure_code: string; failure: string } {
+  const { code, plain } = failureOf(error);
+  return {
+    failure_code: code,
+    failure: withLowerAdvice3c(
+      chipFailed ? describeChipFailure("assistant") : plain,
+      code,
+      chipFailed,
+    ),
+  };
 }
 
 /** Where a tool-run export request came from, for its story: the in-app chat (the turn that asked is
@@ -2535,7 +2543,7 @@ async function settle(x: Settle): Promise<void> {
         status: error ? "failed" : "done",
         startedBy: x.startedBy,
         ...(error
-          ? { error }
+          ? { error, ...failureForAssistant(error, chipFailure !== null) }
           : {
               detail: restartedAs
                 ? `${note} (restarted once ${RESTARTED_PHRASE[restartedAs]})`

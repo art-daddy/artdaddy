@@ -38,6 +38,10 @@ export interface SettledJob {
   /** For work that produces no library media (an export): what to tell the model instead. */
   detail?: string;
   error?: string;
+  /** For a failed export: the app's own plain sentence about why it stopped, and the failure code (what `manage_exports` carries as
+   *  `failure` and `failure_code`). The wake says these and not `error`, which holds the encoder's own words and can name a path. */
+  failure?: string;
+  failure_code?: string;
 }
 
 export interface JobSink {

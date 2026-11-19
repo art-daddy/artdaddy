@@ -9,6 +9,7 @@ import { __setExportFlag, type ExportFlagName } from "../api/exportFlags";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import type { MutationOrigin } from "../project/MutationGate";
 import { useAuth } from "../store/auth";
+import { jobWakePrompt } from "../store/chat";
 import { useExportJob } from "../store/exportJob";
 import {
   __resetJobNotes,
@@ -49,6 +50,7 @@ import {
   dismissExport,
   listExportRecords,
   listExports,
+  manageExportsTool,
   restartDecisions,
   retryExport,
   whenExportEnds,
@@ -662,6 +664,77 @@ describe("an export the app starts again by itself, and who hears how it ended",
       expect(await queuedForChat()).toEqual([]);
       expect(await heard.heard(), "no wake for what the person did next").toHaveLength(1);
       expect(reported.map((r) => r.started_by)).toEqual(["chat", "chat", "elsewhere"]);
+    });
+  });
+
+  describe("what the chat is told of a failed export: the app's own words and the code, never the encoder's", () => {
+    /** The wake the chat was handed (as the model reads it) and the row `manage_exports` shows for the same export. */
+    async function wakeAndRow(heard: ReturnType<typeof chat>) {
+      const wakes = await heard.heard();
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toHaveLength(1);
+      const row = ((await manageExportsTool({ action: "list" })) as Any).exports[0] as Any;
+      return { text: jobWakePrompt(wakes[0]), job: wakes[0][0], row };
+    }
+
+    it.each([
+      [
+        "a Windows path",
+        "native render failed: C:\\Users\\someone\\Videos\\a.mp4: No such file or directory\n",
+      ],
+      ["a Linux path", "native render failed: /home/someone/a.mp4: No such file or directory\n"],
+    ])(
+      "says the sentence and the code that manage_exports carries, and no path, when the encoder's words hold %s",
+      async (_what, stderr) => {
+        const t = await setupExport();
+        const heard = chat();
+        const started = await exportFromChat(t);
+        await flush();
+        t.jobs.exit(started.job_id, -1, stderr);
+        const { text, job, row } = await wakeAndRow(heard);
+
+        expect(row).toMatchObject({ state: "failed", failure_code: "source_unavailable" });
+        expect(job).toMatchObject({ failure: row.failure, failure_code: "source_unavailable" });
+        expect(text).toContain(
+          `- the export proj.mp4 FAILED: ${row.failure} (failure_code: source_unavailable)\n`,
+        );
+        for (const word of ["someone", "No such file", "native render failed"])
+          expect(text, word).not.toContain(word);
+        // The assistant can still ask for the encoder's own words.
+        expect(row.error).toContain("No such file or directory");
+      },
+    );
+
+    it("tells the SECOND attempt's sentence and code when the restart fails too, and nothing of the chip", async () => {
+      const run = await failsFirst(KINDS[0], "chat");
+      const { t, firstId } = run;
+      const heard = chat();
+      const second = await secondOf(run);
+      t.jobs.exit(
+        second.id,
+        -1,
+        "native render failed: C:\\Users\\someone\\Videos\\a.mp4: Invalid data found when processing input\n",
+      );
+      expect(await whenExportEnds(firstId)).toMatchObject({ state: "failed" });
+      const { text, job, row } = await wakeAndRow(heard);
+
+      expect(row).toMatchObject({ failure_code: "render_failed" });
+      expect(job).toMatchObject({ failure: row.failure, failure_code: "render_failed" });
+      expect(text).toContain(`FAILED: ${row.failure} (failure_code: render_failed)\n`);
+      expect(text).not.toContain("graphics chip");
+      for (const word of ["someone", "Invalid data", "native render failed"])
+        expect(text, word).not.toContain(word);
+    });
+
+    it("tells the chip's sentence and the code of the FIRST attempt's failure when the restart is refused", async () => {
+      const { heard } = await editedThenFails("chat");
+      const { text, job, row } = await wakeAndRow(heard);
+
+      expect(row).toMatchObject({ state: "failed", chip_failed: true });
+      expect(job).toMatchObject({ failure: row.failure, failure_code: row.failure_code });
+      expect(text).toContain(`FAILED: ${row.failure} (failure_code: ${row.failure_code})\n`);
+      expect(text).toContain("graphics chip stopped this export");
+      expect(text).not.toContain("h264_amf");
     });
   });
 });

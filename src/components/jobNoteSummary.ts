@@ -5,6 +5,8 @@ import { isOutOfCredits } from "../lib/outOfCredits";
 
 const READY = /^- (.+?) (?:is|are) ready/;
 const FAILED = /^- (.+?) FAILED: (.+)$/;
+// A failed export's wake ends with its failure code, for the model: the person's line is the sentence before it.
+const CODE = / \(failure_code: [a-z_]+\)$/;
 
 export function jobNoteSummary(prompt: string): string {
   const ready: string[] = [];
@@ -12,7 +14,8 @@ export function jobNoteSummary(prompt: string): string {
   for (const line of prompt.split("\n")) {
     const f = FAILED.exec(line.trim());
     if (f) {
-      failed.push(`${f[1]} failed — ${isOutOfCredits(f[2]) ? "out of credits" : f[2]}`);
+      const why = f[2].replace(CODE, "");
+      failed.push(`${f[1]} failed — ${isOutOfCredits(why) ? "out of credits" : why}`);
       continue;
     }
     const r = READY.exec(line.trim());

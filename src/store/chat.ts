@@ -4,6 +4,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { scrubAbsolutePaths } from "../agent/scrubPaths";
 import { importNote } from "../agent/importNote";
 import { importingFor, mergeImporting } from "../tools/importing";
 import { canReadState, readStateBlock, stateBlockForm } from "../agent/stateBlock";
@@ -241,8 +242,17 @@ async function changedSinceLastTurn(
  *  not ready are the one kind that needs less: they cost nothing and nothing about them can go wrong, so
  *  a wake that holds only those says only that they are ready and to carry on. */
 export function jobWakePrompt(jobs: readonly SettledJob[]): string {
+  // Whatever a wake carries crosses the same path scrub as a tool's reply (agent/scrubPaths.ts): a label, a detail or a reason can name a file on the person's PC.
+  return scrubAbsolutePaths(wakeText(jobs));
+}
+
+function wakeText(jobs: readonly SettledJob[]): string {
   const lines = jobs.map((j) => {
-    if (j.status === "failed") return `- ${j.label} FAILED: ${j.error ?? "unknown error"}`;
+    // A failed export is told in the app's own plain words and its failure code: the encoder's own words (`error`) can name a path on the person's PC.
+    if (j.status === "failed")
+      return j.failure
+        ? `- ${j.label} FAILED: ${j.failure}${j.failure_code ? ` (failure_code: ${j.failure_code})` : ""}`
+        : `- ${j.label} FAILED: ${j.error ?? "unknown error"}`;
     const refs = (j.media_refs ?? []).join(", ");
     const suffix = refs ? ` (${refs})` : j.detail ? ` — ${j.detail}` : "";
     return `- ${j.label} ${j.kind === "words" ? "are" : "is"} ready${suffix}`;
