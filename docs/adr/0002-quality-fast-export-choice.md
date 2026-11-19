@@ -140,8 +140,9 @@ chip, the 60 fps project at 1.9 to 2.1 and the slideshow at 1.05; with a chip no
   runs (cause unproven); a render made in parts shows no time until its final encode, and none of the 88 recorded runs is made in
   parts, so that rule is proven on feeds relabelled from real runs; the 5- and 15-minute steps and the slow-run alarm have no
   real-data proof (the runs are at most 6.5 minutes); the three lists show no focus ring and "Show details" has 3.77:1 contrast, both
-  0.28.0's styles, not changed here; the assistant's `export` reply keeps the old guess note and `expected_s`, and its tool text
-  says `time_left_s` is there "while it renders" (it can now be absent).
+  0.28.0's styles, not changed here; the assistant's `export` reply and `manage_exports` list say how long an export is expected to
+  take only when that time comes from this PC's own earlier exports, and nothing for a guess (`expectationForAssistant`), while the
+  tool text still says the reply's note gives that time and that `time_left_s` is there "while it renders" (it can now be absent).
 
 ## Open questions
 
