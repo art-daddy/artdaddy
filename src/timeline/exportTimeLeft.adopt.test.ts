@@ -174,7 +174,7 @@ describe("an export the page takes over where it is, handed the app process's ke
   ];
 
   it.each(cases)(
-    "$name: it never says taking longer, the first figure comes 20 s after the join, and the figures are those of the same render watched from its start",
+    "$name: it never says taking longer, the first figure comes 5 s after the join, and the figures are those of the same render watched from its start",
     async ({ duration, speed, from }) => {
       const render = plainRender(duration, speed);
       expect(
@@ -185,11 +185,11 @@ describe("an export the page takes over where it is, handed the app process's ke
       const watched = await play(render, 0);
 
       expect(joined.filter((s) => s.words.includes("taking longer")).map((s) => s.at)).toEqual([]);
-      expect(joined.find((s) => s.seconds !== null)?.at).toBe(from + 20);
-      expect(joined.filter((s) => s.at < from + 20 && s.words.includes(" left"))).toEqual([]);
+      expect(joined.find((s) => s.seconds !== null)?.at).toBe(from + 5);
+      expect(joined.filter((s) => s.at < from + 5 && s.words.includes(" left"))).toEqual([]);
 
       const watchedAt = new Map(watched.map((s) => [s.at, s]));
-      for (const s of joined.filter((r) => r.at >= from + 20)) {
+      for (const s of joined.filter((r) => r.at >= from + 5)) {
         const same = watchedAt.get(s.at)!;
         expect(
           s.seconds === null,
@@ -214,12 +214,12 @@ describe("an export the page takes over where it is, handed the app process's ke
     },
   );
 
-  it("a render made in parts, joined in its last part: the newest block is read as that part, so the figure comes 20 s after the join and is the truth", async () => {
+  it("a render made in parts, joined in its last part: the newest block is read as that part, so the figure comes 5 s after the join and is the truth", async () => {
     const render = partsRender([60, 60, 240], 1);
     const from = 200;
     const joined = await play(render, from);
     expect(joined.filter((s) => s.words.includes("taking longer")).map((s) => s.at)).toEqual([]);
-    expect(joined.find((s) => s.seconds !== null)?.at).toBe(from + 20);
+    expect(joined.find((s) => s.seconds !== null)?.at).toBe(from + 5);
     for (const s of joined.filter((r) => r.seconds !== null))
       expect(
         stepsApart(s.seconds!, roundTimeLeft(render.ends - s.at)),

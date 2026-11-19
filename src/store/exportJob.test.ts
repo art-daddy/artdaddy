@@ -504,8 +504,8 @@ describe("the live feed of the running export", () => {
 
 // The time left of a running export is decided by the rule in timeline/exportTimeLeft.ts. The store gives each attempt its own run of it, and the
 // dialog's own job another, and feeds both every progress report with the clock of the moment the report lands. These tests play a steady render on a
-// fake clock (a render of `total` seconds that is `t` seconds in has `total - t` left): the rule says nothing until 20 s are rendered and either
-// 15 % is made or 60 s have passed, then a figure of its rounding grid (under 45 s one band, the nearest minute to 10 minutes, the nearest 5 minutes to
+// fake clock (a render of `total` seconds that is `t` seconds in has `total - t` left): the rule says nothing until 5 s of pictures are behind it (the first
+// picture is the report at 1 s), then a figure of its rounding grid (under 45 s one band, the nearest minute to 10 minutes, the nearest 5 minutes to
 // an hour, the nearest quarter hour after), and "finishing" from 90 %.
 describe("the time left of the running export, as the store keeps it", () => {
   const ORIGIN = 50_000_000;
@@ -539,21 +539,21 @@ describe("the time left of the running export, as the store keeps it", () => {
     state().setLiveStage(jobId, "rendering");
   };
 
-  // Each row is worked out by hand: the gate opens at the later of 20 s and the time 15 % takes, but never later than 60 s; left = total - t at that
+  // Each row is worked out by hand: the first figure is said at 6 s (the first picture at 1 s, then 5 s of pictures); left = total - 6 at that
   // second; the grid then says it.
-  //   total 60:   gate 20 s (a third is made), 40 s left, under 45 s is one band (30)           -> "under a minute left"
-  //   total 120:  gate 20 s, 100 s left, nearest minute is 120                                  -> "about 2 min left"
-  //   total 300:  gate 45 s (15 % of 300), 255 s left, nearest minute is 240 (4.25 minutes)      -> "about 4 min left"
-  //   total 3000: gate 60 s (15 % would take 450 s, the 60 s of rendering alone opens it), 2940 s left, nearest 5 minutes is 3000 -> "about 50 min left"
-  //   total 4560: gate 60 s, 4500 s left, nearest quarter hour is 4500                           -> "about 1 h 15 min left"
+  //   total 60:   54 s left, the nearest minute is 60                                           -> "about 1 min left"
+  //   total 120:  114 s left, nearest minute is 120                                             -> "about 2 min left"
+  //   total 300:  294 s left, nearest minute is 300                                             -> "about 5 min left"
+  //   total 3000: 2994 s left, nearest 5 minutes is 3000                                        -> "about 50 min left"
+  //   total 4560: 4554 s left, nearest quarter hour is 4500                                     -> "about 1 h 15 min left"
   it.each([
-    [60, 20, 30, "under a minute left"],
-    [120, 20, 120, "about 2 min left"],
-    [300, 45, 240, "about 4 min left"],
-    [3000, 60, 3000, "about 50 min left"],
-    [4560, 60, 4500, "about 1 h 15 min left"],
+    [60, 6, 60, "about 1 min left"],
+    [120, 6, 120, "about 2 min left"],
+    [300, 6, 300, "about 5 min left"],
+    [3000, 6, 3000, "about 50 min left"],
+    [4560, 6, 4500, "about 1 h 15 min left"],
   ])(
-    "says nothing until the gate, then the grid figure of the time left, to the card and the dialog (a %i s render)",
+    "says nothing until 5 s of pictures, then the grid figure of the time left, to the card and the dialog (a %i s render)",
     (total, gate, figure, words) => {
       begin("a");
       const { said, lines } = play({ total, from: 0, to: gate + 2, origin: ORIGIN });
@@ -583,7 +583,7 @@ describe("the time left of the running export, as the store keeps it", () => {
     },
   );
 
-  it("advances the rule with the clock of each report: the same shares with no time passing never open the gate", () => {
+  it("advances the rule with the clock of each report: the same shares with no time passing never give a pace", () => {
     begin("a");
     // 240 reports of a 300 s render landing at one instant: 80 % made, nothing rendered yet.
     for (const r of steadyReports({ total: 300, from: 0, to: 240 })) report(r);
@@ -619,10 +619,10 @@ describe("the time left of the running export, as the store keeps it", () => {
     expect(live().pace).toEqual(startPace());
     expect(live().pace).not.toBe(first.pace);
 
-    // A 500 s render from zero. Its own gate is the 60 s of rendering (15 % would take 75 s): 440 s left, nearest minute 420 s. 90 % is 450 s in.
+    // A 500 s render from zero. Its first figure is at 6 s (494 s left, nearest minute 480 s), and nothing before. 90 % is 450 s in.
     const { said } = play({ total: 500, from: 0, to: 450, origin: ORIGIN + 200_000 });
-    for (let t = 0; t < 60; t++) expect(said.get(t), `${t} s in`).toEqual(NO_TIME_LEFT);
-    expect(said.get(60)).toEqual({ kind: "left", seconds: 420 });
+    for (let t = 0; t < 6; t++) expect(said.get(t), `${t} s in`).toEqual(NO_TIME_LEFT);
+    expect(said.get(6)).toEqual({ kind: "left", seconds: 480 });
     for (let t = 0; t < 450; t++) expect(said.get(t)?.kind, `${t} s in`).not.toBe("finishing");
     expect(said.get(450)).toEqual(FINISHING);
 
@@ -636,9 +636,9 @@ describe("the time left of the running export, as the store keeps it", () => {
   // that the pace has dropped.
   it("counts a block that says nothing new: a render that stops making pictures is told to be taking longer than expected", () => {
     begin("a");
-    // A 300 s render: the gate opens at 45 s (15 %) with 255 s left, the figure 240 s, and an implied total of 45 / 0.15 = 300 s.
+    // A 300 s render: the alarm's reference is taken at 45 s (15 % made, 45 s rendered), an implied total of 45 / 0.15 = 300 s; a figure has been said since 6 s.
     playSteady(report, { total: 300, from: 0, to: 45, origin: ORIGIN });
-    expect(live().timeLeft).toEqual({ kind: "left", seconds: 240 });
+    expect(live().timeLeft.kind).toBe("left");
     const stuck = (t: number) => {
       vi.setSystemTime(ORIGIN + t * 1000);
       report({ fraction: 0.15, frame: 45 * 30 });
@@ -676,9 +676,9 @@ describe("the time left of the running export, as the store keeps it", () => {
       state().begin(null);
       begin("a");
       const { said, job } = play({ total: 100, from: 0, to: 95, origin: ORIGIN });
-      // 95 s in a 100 s render: gate at 20 s (a fifth is made), "finishing" from 90 s.
-      expect(said.get(19)).toEqual(NO_TIME_LEFT);
-      expect(said.get(20)?.kind).toBe("left");
+      // 95 s in a 100 s render: a figure from 6 s (5 s after the first picture), "finishing" from 90 s.
+      expect(said.get(5)).toEqual(NO_TIME_LEFT);
+      expect(said.get(6)?.kind).toBe("left");
       expect(said.get(95)).toEqual(FINISHING);
       for (const [t, answer] of said) expect(job.get(t), `${t} s in`).toEqual(answer);
       state().beginLive("b");
@@ -725,7 +725,7 @@ describe("the time left of the running export, as the store keeps it", () => {
       "is moved by a report only while it is preparing or rendering: a late one after it is %s changes nothing",
       (phase) => {
         state().begin(null);
-        // 60 s into a 300 s render: the gate opened at 45 s, 240 s left.
+        // 60 s into a 300 s render: 240 s left.
         playSteady(report, { total: 300, from: 0, to: 60, origin: ORIGIN });
         expect(state().timeLeft).toEqual({ kind: "left", seconds: 240 });
         state().finish({ phase });
@@ -772,7 +772,7 @@ describe("the time left of the running export, as the store keeps it", () => {
 
   it("says nothing at a part before the last of a render made in parts, and starts afresh at the final encode", () => {
     begin("a");
-    // Three steps: parts 1 and 2, then the final encode. 90 s in at one 300th of the render per second is long past the gate of a plain render.
+    // Three steps: parts 1 and 2, then the final encode. 90 s in at one 300th of the render per second is long past 5 s of pictures of a plain render.
     for (let t = 0; t <= 90; t++) {
       vi.setSystemTime(ORIGIN + t * 1000);
       state().update({ fraction: t / 300, frame: t * 30, speed: 1, etaSec: 12, step: 0, steps: 3 });
@@ -781,12 +781,13 @@ describe("the time left of the running export, as the store keeps it", () => {
     expect(describeLiveStatus(live(), Date.now())).toBe(
       "Still working · 1 min in · Rendering part 1 of 2 · 30%",
     );
-    // The final encode is a new segment with its own clock and gate: its first report is at 91 s, and 20 s of its own rendering (111 s) opens the
-    // gate, the whole render being past 15 % already. At 131 s, 44 % is made and 169 s are left: the nearest minute is 180 s.
+    // The final encode is a new segment with its own clock and span of pictures: its first report is at 91 s, and 5 s of them (96 s) give a pace: 204 s left, the
+    // nearest minute is 180 s. At 131 s, 44 % is made and 169 s are left: the nearest minute is 180 s still.
     for (let t = 91; t <= 131; t++) {
       vi.setSystemTime(ORIGIN + t * 1000);
       state().update({ fraction: t / 300, frame: t * 30, speed: 1, etaSec: 12, step: 2, steps: 3 });
-      if (t < 111) expect(live().timeLeft, `${t} s in the encode`).toEqual(NO_TIME_LEFT);
+      if (t < 96) expect(live().timeLeft, `${t} s in the encode`).toEqual(NO_TIME_LEFT);
+      if (t === 96) expect(live().timeLeft).toEqual({ kind: "left", seconds: 180 });
     }
     expect(live().timeLeft).toEqual({ kind: "left", seconds: 180 });
     expect(describeLiveStatus(live(), Date.now())).toBe(

@@ -13,7 +13,7 @@ import { REPLAY_RUNS, type ReplayRun } from "./__fixtures__/timeLeftRuns";
 import { replayRun, stalledFrom } from "./__fixtures__/replay";
 import { __resetFacts3c } from "./exportFacts3c";
 import { listExportOutcomes } from "./exportQueue";
-import type { TimeLeft } from "./exportTimeLeft";
+import { notePace, startPace, type TimeLeft } from "./exportTimeLeft";
 import {
   describeDialogProgress,
   describeLiveStatus,
@@ -171,10 +171,10 @@ describe("recorded real runs through the reader, the reporter, the store, the ca
     expect(figures).toBeGreaterThan(1_000);
   });
 
-  it("says no time on the card before the gate and 'Finishing' only from 90 %, on the real feeds, counted from the samples and not from the rule", () => {
+  it("says no time on the card before 5 s of pictures and 'Finishing' only from 90 %, on the real feeds, counted from the samples and not from the rule", () => {
     for (const run of spread()) {
       const seen = play(run, `gate-${run.id}`);
-      const t0 = run.samples[0][0];
+      const picture = run.samples.find((sample) => sample[1] > 0);
       let finishing = false;
       let timeSaid = 0;
       let highest = 0;
@@ -182,12 +182,12 @@ describe("recorded real runs through the reader, the reporter, the store, the ca
         const fraction = Math.max(0, run.samples[i][1]) / (run.videoSeconds * 1000);
         // a real feed can print a block with no position near its end (N/A, read as 0): what was made stays made
         highest = Math.max(highest, fraction);
-        const rendered = (s.at - t0) / 1000;
+        const pictured = picture && s.at >= picture[0] ? (s.at - picture[0]) / 1000 : -1;
         const time = / left$/.test(s.card);
         if (time) timeSaid++;
-        if (time && !(rendered >= 20 && (highest >= 0.15 || rendered >= 60)))
+        if (time && pictured < 5)
           throw new Error(
-            `${run.id}: a time on the card at ${rendered.toFixed(1)} s and ${(highest * 100).toFixed(0)} %`,
+            `${run.id}: a time on the card ${pictured.toFixed(1)} s after the first picture (${(highest * 100).toFixed(0)} % made)`,
           );
         if (/Finishing$/.test(s.card)) {
           finishing = true;
@@ -246,8 +246,18 @@ describe("recorded real runs through the reader, the reporter, the store, the ca
       );
     }
     const second = liveFeedOf(useExportJob.getState(), "attempt-2")!;
-    expect(describeLiveStatus(second, Date.now())).not.toMatch(/Finishing| left$|taking longer/);
-    expect(shownTimeLeftSeconds(second, Date.now())).toBeNull();
+    // Its own memory: the rule, given nothing but this attempt's reports, says what the card and the store say. After 20 s of a slow render
+    // (0.05 times real time) a pace can be read, so a figure is said, from this attempt's pace alone; nothing the first attempt ended on is.
+    let own = startPace();
+    for (let i = 1; i <= 40; i++)
+      own = notePace(own, { at: origin + i * 500, fraction: (i * 25) / (run.videoSeconds * 1000) });
+    expect(own.value.kind).toBe("left");
+    expect(second.timeLeft).toEqual(own.value);
+    expect(describeLiveStatus(second, Date.now())).not.toMatch(/Finishing|taking longer/);
+    expect(describeLiveStatus(second, Date.now()).endsWith(` · ${wordsOf(own.value)}`)).toBe(true);
+    expect(shownTimeLeftSeconds(second, Date.now())).toBe(
+      own.value.kind === "left" ? own.value.seconds : null,
+    );
   });
 
   it("says no time once the render is over (the file is being checked or saved), though the last answer was a figure, and says nothing of the time in the dialog either", () => {
