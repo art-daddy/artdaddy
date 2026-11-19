@@ -265,14 +265,24 @@ async function project(
   };
 }
 
+/** An export that settles in the same millisecond it was admitted has no time to measure, and the app keeps no measurement of it (`calibration()` in src/store/exportJob.ts drops an
+ *  `elapsedSeconds` of 0). The fake encode here finishes that fast, so an earlier export is held for this long in real time, which is many times a millisecond. */
+const EARLIER_EXPORT_TAKES_MS = 30;
+
 /** This PC has exported something like `args` once before. What it measured is made a time of one and a half times each export's own length: a time that
  *  asks no heads-up of any door (nothing is slow, nothing is long), and which every export of the same shape is then expected to take in proportion. */
 async function exportedBefore(p: Setup, args: Record<string, unknown>): Promise<void> {
   useExportJob.setState({ calibrations: [] });
+  const gate = p.hold.gate;
+  p.hold.gate = new Promise<void>((resolve) => setTimeout(resolve, EARLIER_EXPORT_TAKES_MS));
   const earlier = (await exportTool({ ...args, output_dir: "earlier" }, p.ctx)) as Any;
   expect(earlier.ok, earlier.error).toBe(true);
   await whenExportsSettle();
-  expect(useExportJob.getState().calibrations.length).toBeGreaterThan(0);
+  p.hold.gate = gate;
+  expect(
+    useExportJob.getState().calibrations.length,
+    "the earlier export left a measurement",
+  ).toBeGreaterThan(0);
   useExportJob.setState((state) => ({
     calibrations: state.calibrations.map((c) => ({
       ...c,
