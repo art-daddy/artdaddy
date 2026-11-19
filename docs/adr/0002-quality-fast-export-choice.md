@@ -68,15 +68,21 @@ above that row and records the time-left rule that runs beside it.
 ## Time left while an export runs
 
 One pure module (`src/timeline/exportTimeLeft.ts`) is the only place that decides what may be said; the chat card, the dialog's running
-view and the assistant's `time_left_s` read its answer. Nothing is said until 20 s have been rendered and either 15 % is made or 60 s have been rendered.
-Then a figure from the slope of the share made over the last 20 s, rounded to a grid ("under a minute left", "about 4 min left",
+view and the assistant's `time_left_s` read its answer. Nothing is said until a pace can be read: 5 s of pictures after the run's first picture
+(the first report that shows progress), with some progress in them, however little is made by then and however long the render has been
+running. Then a figure from the slope of the share made over the last 20 s, rounded to a grid ("under a minute left", "about 4 min left",
 "about 1 h 15 min left") and kept while the raw figure stays near its cell; from 90 % made "Finishing"; and "taking longer than
-expected" once the average pace implies more than 1.5 times the first total. A render made in parts says nothing until its final
+expected" once the average pace implies more than 1.5 times the total it implied at the alarm's reference point: the first moment the
+render has run 20 s and either made 15 % or run 60 s, with a pace that can be read (where the first figure used to be said). The reference
+is not the first figure: one said a few seconds in is on average a little too short, and taken from it the alarm said "taking longer" on a
+healthy recorded run and caught a 3 times slowdown in 41 of 53 runs instead of 48. A render made in parts says nothing until its final
 encode. The card no longer prints a guessed "Expected" line and the dialog's running line still shows the speed multiple as 0.28.0
 did; the slow-export banner and the assistant's `projected_total_s` keep the raw pace on purpose (the new figure is rounded and
 sometimes absent). Replayed on 88 recorded exports (16,109 reports at their half-second cadence, 20 s to 6.5 minutes, one laptop):
-the first figure comes after a median 20 s of rendering (latest 48 s); at each checkpoint from 15 to 85 % done a figure is within 0.5
-to 1.5 times the real time left for 82 to 100 % of the runs that show one (89 of about 940 figures were wrong, 88 of them too long);
+the first figure comes a median 5.2 s after the first picture (latest 5.3 s; the earlier gate: a median 20 s, latest 48 s), at a median 7 % made; it is rough (of the 83
+runs that get one, 78 are within 0.5 to 1.5 times the real time left, 81 within a factor of 2), and from 10 to 60 s after the first
+picture 85 to 96 % of the runs show a figure within 0.5 to 1.5 times the real time left; at each checkpoint from 15 to 85 % done 83 to 98 %
+(131 of 1,208 figures were wrong, 128 of them too long); the figure changes at most 3 times in a run's first minute after the first picture, 0.8 on average;
 no healthy run says "taking longer" (the closest reaches 1.48 of the 1.5 line).
 
 ## Why Fast is a modest gain

@@ -607,7 +607,11 @@ function buildReport(): string {
   L.push(
     `- Headroom to the "taking longer" alarm (highest total implied by the average pace after the alarm's reference point, as a multiple of the total at it; the alarm is at 1.5): median ${(median(rooms.map((x) => x.room)) ?? 0).toFixed(2)}, ${rooms.filter((x) => x.room >= 1.3).length} of ${rooms.length} runs reach 1.3 or more, ${rooms.filter((x) => x.room >= 1.4).length} reach 1.4 or more, the highest is ${top.room.toFixed(2)} (${top.id}).`,
   );
-  const minute = ALL.filter((f) => f.run.endMs - f.run.samples[f.run.samples.findIndex(([, o]) => o > 0)][0] >= 60_000 && firstOf(f, isFigure) >= 0).map(firstMinuteChanges);
+  const minute = ALL.filter(
+    (f) =>
+      f.run.endMs - f.run.samples[f.run.samples.findIndex(([, o]) => o > 0)][0] >= 60_000 &&
+      firstOf(f, isFigure) >= 0,
+  ).map(firstMinuteChanges);
   L.push(
     `- The figure's changes in the first minute after the first picture (${minute.length} runs of a minute or more): ${n1(minute.reduce((n, m) => n + m.changes, 0) / Math.max(1, minute.length))} on average, at most ${Math.max(...minute.map((m) => m.changes))}; largest step between two figures ${Math.max(...minute.map((m) => m.step)).toFixed(2)} times.`,
   );
@@ -618,7 +622,9 @@ function buildReport(): string {
     "Of the runs still going with 5 s or more really left: how many show a figure, and of those how many are within 50 % and within a factor of 2 of what was really left.",
   );
   L.push("");
-  L.push("| seconds after the first picture | runs in play | showing a figure | within 50 % | within a factor of 2 |");
+  L.push(
+    "| seconds after the first picture | runs in play | showing a figure | within 50 % | within a factor of 2 |",
+  );
   L.push("|---:|---:|---:|---:|---:|");
   for (const seconds of EARLY_SECONDS) {
     const points = ALL.map((f) => pointAfterPicture(f, seconds)).filter(
@@ -678,10 +684,12 @@ function buildReport(): string {
   L.push("### Figures that were not right");
   L.push("");
   const wrongs = ROWS.flatMap((r) => r.wrong);
+  const figuresChecked = ROWS.reduce((n, r) => n + r.shown.length, 0);
+  const tooLong = wrongs.filter((p) => isFigure(p.value) && p.value.seconds / p.real > 1).length;
   L.push(
     wrongs.length === 0
       ? "None."
-      : `${wrongs.length} wrong figures over all checkpoints (figure in seconds, real time left in seconds, ratio figure / real):`,
+      : `${wrongs.length} wrong figures of the ${figuresChecked} checked over all checkpoints, ${tooLong} of them too long (figure in seconds, real time left in seconds, ratio figure / real):`,
   );
   L.push("");
   if (wrongs.length > 0) {
@@ -1029,7 +1037,11 @@ describe("the recorded runs", () => {
       const picture = run.samples.findIndex(([, out]) => out > 0);
       const [t0, firstOut] = run.samples[picture];
       const cutSamples = run.samples.filter(([at]) => at - t0 < 4900);
-      const cut: ReplayRun = { ...run, samples: cutSamples, endMs: cutSamples[cutSamples.length - 1][0] };
+      const cut: ReplayRun = {
+        ...run,
+        samples: cutSamples,
+        endMs: cutSamples[cutSamples.length - 1][0],
+      };
       const still: ReplayRun = {
         ...run,
         samples: run.samples.map(([at, out], i) => [at, i >= picture ? firstOut : out] as const),

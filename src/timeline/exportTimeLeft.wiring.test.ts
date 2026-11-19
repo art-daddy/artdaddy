@@ -20,12 +20,7 @@ import { liveFeedOf, useExportJob, type ExportLive } from "../store/exportJob";
 import { coarser, replayRun, shifted, slowedFrom } from "./__fixtures__/replay";
 import { REPLAY_RUNS, fractionOf, type ReplayRun } from "./__fixtures__/timeLeftRuns";
 import { describeExportTime } from "./exportOptions";
-import {
-  notePace,
-  roundTimeLeft,
-  startPace,
-  type TimeLeft,
-} from "./exportTimeLeft";
+import { notePace, roundTimeLeft, startPace, type TimeLeft } from "./exportTimeLeft";
 import {
   QUIET_SECONDS,
   describeDialogProgress,

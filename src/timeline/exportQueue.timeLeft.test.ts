@@ -19,12 +19,7 @@ import {
 import { describeExportTime } from "./exportOptions";
 import { __resetFacts3c } from "./exportFacts3c";
 import { cancelExport, listExportOutcomes } from "./exportQueue";
-import {
-  cellOf,
-  FINISHING_FROM,
-  IMPLAUSIBLE_SECONDS,
-  roundTimeLeft,
-} from "./exportTimeLeft";
+import { cellOf, FINISHING_FROM, IMPLAUSIBLE_SECONDS, roundTimeLeft } from "./exportTimeLeft";
 import { describeLiveStatus, QUIET_SECONDS } from "./exportWords";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));

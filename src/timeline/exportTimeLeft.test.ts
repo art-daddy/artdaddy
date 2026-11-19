@@ -295,7 +295,13 @@ function modelRun(reps: readonly Rep[]): ModelRun {
       if (raw < cell.lo - margin || raw >= cell.hi + margin) shown = gridRef(raw);
     }
     // The reference of "taking longer": the first moment the render has run 20 s and made 15 % (or run 60 s) with a pace that can be read, which is where the figure used to be first said.
-    if (base === null && raw !== null && f > floor && rendered >= 20 && (f >= 0.15 || rendered >= 60))
+    if (
+      base === null &&
+      raw !== null &&
+      f > floor &&
+      rendered >= 20 &&
+      (f >= 0.15 || rendered >= 60)
+    )
       base = rendered / (f - floor);
     if (base !== null && f > floor) {
       const ratio = rendered / (f - floor) / base;
