@@ -107,6 +107,8 @@ describe("the export rules an MCP agent is handed", () => {
     ).not.toMatch(PROMISE);
     expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(PROMISE);
     // The old advice must not come back: the app gives no expected time, and nothing offers a lighter export.
-    expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(/lighter export|expected_s|how long it is expected|may be quicker/i);
+    expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(
+      /lighter export|expected_s|how long it is expected|may be quicker/i,
+    );
   });
 });

@@ -36,7 +36,8 @@ const BANS: ReadonlyArray<{ name: string; pattern: RegExp; bad: readonly string[
   },
   {
     name: "a gentler retry is promised",
-    pattern: /\bgentler retry\b|\bretry (?:with|at|using) (?:a )?(?:gentler|lower|smaller|lighter)\b/i,
+    pattern:
+      /\bgentler retry\b|\bretry (?:with|at|using) (?:a )?(?:gentler|lower|smaller|lighter)\b/i,
     bad: ["After a failure offer ONE gentler retry.", "Then retry with a lower resolution."],
   },
   {
@@ -51,7 +52,8 @@ const BANS: ReadonlyArray<{ name: string; pattern: RegExp; bad: readonly string[
   },
   {
     name: "the chip is offered off",
-    pattern: /\b(?:turn|switch)\s+(?:the\s+)?(?:graphics\s+)?chip\s+off\b|\bturn\s+off\s+the\s+(?:graphics\s+)?chip\b/i,
+    pattern:
+      /\b(?:turn|switch)\s+(?:the\s+)?(?:graphics\s+)?chip\s+off\b|\bturn\s+off\s+the\s+(?:graphics\s+)?chip\b/i,
     bad: ["Offer to turn the graphics chip off.", "You can turn off the chip if it is slow."],
   },
 ];
@@ -78,7 +80,8 @@ function descriptions(schema: ParamSchema | undefined, at: string): Array<[strin
   const out: Array<[string, string]> = [];
   const own = (schema as { description?: unknown }).description;
   if (typeof own === "string") out.push([at, own]);
-  for (const [name, sub] of Object.entries(schema.properties ?? {})) out.push(...descriptions(sub, `${at}.${name}`));
+  for (const [name, sub] of Object.entries(schema.properties ?? {}))
+    out.push(...descriptions(sub, `${at}.${name}`));
   if (schema.items) out.push(...descriptions(schema.items, `${at}[]`));
   return out;
 }
@@ -91,7 +94,11 @@ function exportTexts(): Array<[string, string]> {
     out.push([name, tool.description ?? ""], ...descriptions(tool.parameters, name));
     if (tool.text_variant) out.push([`${name} (text variant)`, tool.text_variant.description]);
   }
-  out.push(["ASYNC_JOBS", ASYNC_JOBS], ["COST_POLICY", COST_POLICY], ["PROJECT_NAVIGATION", PROJECT_NAVIGATION]);
+  out.push(
+    ["ASYNC_JOBS", ASYNC_JOBS],
+    ["COST_POLICY", COST_POLICY],
+    ["PROJECT_NAVIGATION", PROJECT_NAVIGATION],
+  );
   return out.map(([at, text]) => [at, flat(text)]);
 }
 
@@ -101,7 +108,15 @@ describe("the export words the assistant reads, from the client's side", () => {
     const at = texts.map(([where]) => where);
     // export has seven parameters and manage_exports three: ten parameter texts, two descriptions, three constants.
     expect(texts.length).toBeGreaterThanOrEqual(15);
-    for (const needed of ["export", "export.resolution", "export.quality", "export.fps", "manage_exports", "manage_exports.action", "ASYNC_JOBS"])
+    for (const needed of [
+      "export",
+      "export.resolution",
+      "export.quality",
+      "export.fps",
+      "manage_exports",
+      "manage_exports.action",
+      "ASYNC_JOBS",
+    ])
       expect(at, needed).toContain(needed);
     expect(texts.every(([, text]) => text.length > 0)).toBe(true);
   });
@@ -124,8 +139,12 @@ describe("the export words the assistant reads, from the client's side", () => {
   it("a planted old sentence in any one of the texts is reported by its place and its ban", () => {
     for (const [where] of exportTexts()) {
       for (const ban of BANS) {
-        const planted = exportTexts().map(([at, text]) => [at, at === where ? `${text} ${ban.bad[0]}` : text] as const);
-        const found = planted.filter(([, text]) => bannedIn(text).includes(ban.name)).map(([at]) => at);
+        const planted = exportTexts().map(
+          ([at, text]) => [at, at === where ? `${text} ${ban.bad[0]}` : text] as const,
+        );
+        const found = planted
+          .filter(([, text]) => bannedIn(text).includes(ban.name))
+          .map(([at]) => at);
         expect(found, `${ban.name} planted in ${where}`).toEqual([where]);
       }
     }
