@@ -8,6 +8,7 @@ import fc from "fast-check";
 import ts from "typescript";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 
+import type { ExportStarter } from "../api/exportVocabulary";
 import {
   ID_ENTRY_POINTS,
   MAX_ATTEMPTS,
@@ -26,16 +27,24 @@ const refusal = (why: LinkRefusal): LinkResult => ({ ok: false, why });
 
 beforeEach(() => attempts.reset());
 
-/** `registry` with the chain `ids` added, joined by `kinds` (switch links where none is given). */
-function extend(registry: AttemptRegistry, ids: string[], kinds: LinkKind[] = []): AttemptRegistry {
-  registry.begin(ids[0]);
+/** `registry` with the chain `ids` added, joined by `kinds` (switch links where none is given), started by `startedBy`. */
+function extend(
+  registry: AttemptRegistry,
+  ids: string[],
+  kinds: LinkKind[] = [],
+  startedBy: ExportStarter = "elsewhere",
+): AttemptRegistry {
+  registry.begin(ids[0], startedBy);
   ids.slice(1).forEach((id, index) => {
     expect(registry.link(ids[index], id, kinds[index] ?? "switch"), `linking ${id}`).toEqual(OK);
   });
   return registry;
 }
-const build = (ids: string[], kinds: LinkKind[] = []): AttemptRegistry =>
-  extend(createAttemptRegistry(), ids, kinds);
+const build = (
+  ids: string[],
+  kinds: LinkKind[] = [],
+  startedBy: ExportStarter = "elsewhere",
+): AttemptRegistry => extend(createAttemptRegistry(), ids, kinds, startedBy);
 
 describe("every id of a chain resolves to the live attempt", () => {
   it("answers alike for the public id, a middle attempt and the last one", () => {
@@ -93,16 +102,16 @@ describe("every id of a chain resolves to the live attempt", () => {
     attempts.reset();
     expect(attempts.snapshot()).toEqual({ chains: [] });
     expect(attempts.current("a")).toBe("a");
-    expect(attempts.begin("b")).toBe(true);
+    expect(attempts.begin("b", "elsewhere")).toBe(true);
   });
 });
 
 describe("begin", () => {
   it("registers a first attempt once, however often it is asked", () => {
     const registry = createAttemptRegistry();
-    expect(registry.begin("a")).toBe(true);
+    expect(registry.begin("a", "elsewhere")).toBe(true);
     const once = registry.snapshot();
-    expect(registry.begin("a")).toBe(false);
+    expect(registry.begin("a", "elsewhere")).toBe(false);
     expect(registry.snapshot()).toEqual(once);
   });
 
@@ -110,10 +119,71 @@ describe("begin", () => {
     const registry = build(["a", "b"]);
     expect(registry.registerPending("b", "switch")).toBe(true);
     const before = registry.snapshot();
-    expect(registry.begin("b")).toBe(false);
-    expect(registry.begin("a")).toBe(false);
+    expect(registry.begin("b", "elsewhere")).toBe(false);
+    expect(registry.begin("a", "elsewhere")).toBe(false);
     expect(registry.snapshot()).toEqual(before);
     expect(registry.publicId("b")).toBe("a");
+  });
+});
+
+describe("who started the export", () => {
+  it.each(["chat", "elsewhere"] as const)(
+    "is what the chain began with, and every attempt of it answers the same: started by %s",
+    (who) => {
+      const registry = build(["a", "b", "c", "d"], ["auto", "switch", "switch"], who);
+      for (const id of ["a", "b", "c", "d"]) expect(registry.startedBy(id), id).toBe(who);
+      expect(registry.snapshot().chains[0].startedBy).toBe(who);
+    },
+  );
+
+  it("keeps two chains apart", () => {
+    const registry = createAttemptRegistry();
+    extend(registry, ["a", "b"], ["auto"], "chat");
+    extend(registry, ["x", "y"], ["auto"], "elsewhere");
+    expect(["a", "b", "x", "y"].map((id) => registry.startedBy(id))).toEqual([
+      "chat",
+      "chat",
+      "elsewhere",
+      "elsewhere",
+    ]);
+  });
+
+  it("says elsewhere for an id in no chain, and for a chain that was forgotten: only a start on record is the chat's", () => {
+    const registry = build(["a", "b"], ["auto"], "chat");
+    expect(registry.startedBy("ghost")).toBe("elsewhere");
+    expect(registry.forget("b")).toBe(true);
+    expect(registry.startedBy("a")).toBe("elsewhere");
+    expect(registry.startedBy("b")).toBe("elsewhere");
+  });
+
+  it("takes the new answer when a forgotten id begins again, and never changes while the chain lives", () => {
+    const registry = build(["a", "b"], ["auto"], "chat");
+    registry.forget("a");
+    expect(registry.begin("a", "elsewhere")).toBe(true);
+    expect(registry.startedBy("a")).toBe("elsewhere");
+    // Beginning again what is already a chain is refused, and does not turn it into the chat's.
+    expect(registry.begin("a", "chat")).toBe(false);
+    expect(registry.link("a", "c", "auto")).toEqual(OK);
+    expect(registry.registerPending("c", "switch")).toBe(true);
+    expect(registry.cancelPending("c")).toBe(true);
+    expect(registry.link("c", "d", "switch")).toEqual(refusal("pending_cancelled"));
+    expect(registry.cancelAllPending()).toBe(1);
+    for (const id of ["a", "c"]) expect(registry.startedBy(id), id).toBe("elsewhere");
+  });
+
+  it("reads anything but the word chat as elsewhere", () => {
+    const registry = createAttemptRegistry();
+    const odd: unknown[] = [undefined, null, "", "CHAT", "chat ", 1, true, {}];
+    odd.forEach((value, index) => {
+      expect(registry.begin(`odd${index}`, value as ExportStarter)).toBe(true);
+      expect(registry.startedBy(`odd${index}`), String(value)).toBe("elsewhere");
+    });
+  });
+
+  it("hands out the answer in the snapshot as data, so a caller cannot change a chain through it", () => {
+    const registry = build(["a", "b"], ["auto"], "chat");
+    registry.snapshot().chains[0].startedBy = "elsewhere";
+    expect(registry.startedBy("b")).toBe("chat");
   });
 });
 
@@ -177,7 +247,7 @@ describe("the chain rules", () => {
     for (const kinds of kindSequences(8)) {
       walked++;
       const registry = createAttemptRegistry();
-      registry.begin("a0");
+      registry.begin("a0", "elsewhere");
       let taken = 0;
       let autos = 0;
       kinds.forEach((kind, step) => {
@@ -398,7 +468,7 @@ describe("forget", () => {
   it("lets a forgotten id begin again as a new chain, with a fresh count", () => {
     const registry = build(["a", "b"], ["auto"]);
     registry.forget("b");
-    expect(registry.begin("a")).toBe(true);
+    expect(registry.begin("a", "elsewhere")).toBe(true);
     expect(registry.autoRestartsUsed("a")).toBe(0);
     expect(registry.link("a", "c", "auto")).toEqual(OK);
   });
@@ -414,7 +484,7 @@ describe("what the registry says about an attempt", () => {
 
   it("describes each attempt from its own place in the chain", () => {
     const registry = createAttemptRegistry();
-    registry.begin("a");
+    registry.begin("a", "elsewhere");
     registry.link("a", "b", "auto", meta);
     registry.link("b", "c", "switch", { restarted: "quick" });
     expect(registry.describe("a")).toStrictEqual({
@@ -584,6 +654,11 @@ const META: Record<LinkKind, LinkMeta> = {
   switch: { restarted: "quick" },
 };
 
+/** Who starts the chain a run begins with this id, from the id alone, so that what any chain must answer is known without asking it. Both
+ *  answers turn up among the ids a run makes (j0, j1, ... and the ghosts). */
+const starterOf = (id: string): ExportStarter =>
+  id.charCodeAt(id.length - 1) % 2 === 0 ? "chat" : "elsewhere";
+
 interface Pending {
   kind: LinkKind;
   cancelled: boolean;
@@ -652,7 +727,7 @@ function resolveOp(op: Op, snapshot: AttemptSnapshot, used: string[]): Call {
 function perform(registry: AttemptRegistry, call: Call): unknown {
   switch (call.op) {
     case "begin":
-      return registry.begin(call.id);
+      return registry.begin(call.id, starterOf(call.id));
     case "link":
       return registry.link(call.prev, call.next, call.kind, META[call.kind]);
     case "register":
@@ -672,6 +747,7 @@ function perform(registry: AttemptRegistry, call: Call): unknown {
       registry.chainOf(call.id);
       registry.isSuperseded(call.id);
       registry.autoRestartsUsed(call.id);
+      registry.startedBy(call.id);
       registry.hasPending(call.id);
       registry.isPendingCancelled(call.id);
       registry.describe(call.id);
@@ -753,6 +829,12 @@ describe("random sequences of operations", () => {
               assert(registry.attemptNumber(id) === index + 1, `attemptNumber(${id})`);
               assert(registry.chainOf(id).join("|") === path, `chainOf(${id})`);
               assert(registry.isSuperseded(id) === (id !== live), `isSuperseded(${id})`);
+              // Who started the export is what its first attempt began with, for every attempt, whatever was done to the chain since.
+              assert(
+                chain.startedBy === starterOf(chain.ids[0]),
+                `the chain of ${path} was started by ${chain.startedBy}`,
+              );
+              assert(registry.startedBy(id) === chain.startedBy, `startedBy(${id})`);
             });
           }
           for (const id of ids) {
@@ -765,6 +847,10 @@ describe("random sequences of operations", () => {
               assert(registry.chainOf(id).join("|") === id, `chainOf(${id}) is not just itself`);
               assert(registry.attemptNumber(id) === 1, `attemptNumber(${id})`);
               assert(!registry.isSuperseded(id), `isSuperseded(${id})`);
+              assert(
+                registry.startedBy(id) === "elsewhere",
+                `startedBy(${id}) of an id in no chain`,
+              );
             }
           }
         });
@@ -895,7 +981,13 @@ describe("random sequences of operations", () => {
           switch (call.op) {
             case "begin":
               assert(result === (chain(call.id) === undefined), "begin is taken for a new id only");
-              if (result === true) next.chains.push({ ids: [call.id], links: [], pending: null });
+              if (result === true)
+                next.chains.push({
+                  ids: [call.id],
+                  startedBy: starterOf(call.id),
+                  links: [],
+                  pending: null,
+                });
               break;
             case "link": {
               const from = chain(call.prev);

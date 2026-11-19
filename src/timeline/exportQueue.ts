@@ -1119,7 +1119,9 @@ export interface ExportSpec {
   filename: string;
   /** The chat execution that asked for this export, when THIS CHAT asked. The Export menu and an
    *  external MCP agent run the SAME tool (deliberately — one renderer), so this is the only thing
-   *  that tells them apart, and it decides whether finishing resumes the conversation. */
+   *  that tells them apart: it decides who started the export, once, as the first attempt is
+   *  admitted, and with that whether finishing resumes the conversation. The export's chain keeps
+   *  the answer (exportAttempts.ts `startedBy`); an attempt the app starts again carries no origin. */
   origin?: MutationOrigin;
   submissionSignal?: AbortSignal;
   workload?: RenderWorkload;
@@ -2027,14 +2029,16 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     }
     throw error;
   }
-  // One export across attempts (exportAttempts.ts). A first attempt starts its chain. One the app started again is linked to
-  // the attempt it continues here, in the same synchronous run as its own admission and the failed row's retirement below:
-  // nothing is awaited between "the new attempt exists" and "the old row is gone", so nobody sees both, or neither.
+  // One export across attempts (exportAttempts.ts). A first attempt starts its chain, and the chain is told who started the
+  // export: this is the one place a chain's starter is decided, because an attempt the app starts again carries no turn (the
+  // export belongs to the queue) and answers its chain instead. One the app started again is linked to the attempt it
+  // continues here, in the same synchronous run as its own admission and the failed row's retirement below: nothing is
+  // awaited between "the new attempt exists" and "the old row is gone", so nobody sees both, or neither.
   let notLinked: string | null = null;
   if (spec.restart) {
     const linked = attempts.link(spec.restart.from, jobId, spec.restart.kind, spec.restart.meta);
     if (!linked.ok) notLinked = linked.why;
-  } else attempts.begin(jobId);
+  } else attempts.begin(jobId, spec.origin ? "chat" : "elsewhere");
   if (notLinked !== null) {
     // A Cancel reached the gap, or the chain has no room for this attempt: the new export's intent is retired through the
     // normal path and nothing is left behind.
@@ -2156,6 +2160,9 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   const staged = spec.stagePath !== spec.destPath;
   const signal = controllers.get(jobId)?.signal ?? new AbortController().signal;
   const story = spec.story;
+  // Who started the export, as its chain has had it since the first attempt was admitted: the same for every attempt of it,
+  // and not the asking turn's, which an attempt the app started again does not carry.
+  const startedBy = attempts.startedBy(jobId);
 
   const run: RunOutcome = { error: null, cancelled: false, warnings: [] };
   let finishActivity: (() => void) | null = null;
@@ -2299,7 +2306,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     filename: spec.filename,
     meta: spec.meta,
     owner: spec.owner,
-    startedBy: spec.origin ? "chat" : "elsewhere",
+    startedBy,
     startedAt,
     ledger,
     supervisor: spec.supervisor,
@@ -2321,6 +2328,8 @@ interface Settle {
   meta?: ExportSpec["meta"];
   /** The account that asked for the export (an adopted render carries it in `meta`). */
   owner?: string;
+  /** Who started the export: its chain's own fact, the same for every attempt of it (exportAttempts.ts). An adopted export, whose chain
+   *  did not survive the page, carries what its native record says. */
   startedBy: "chat" | "elsewhere";
   startedAt: number;
   ledger: Ledger;
@@ -2340,6 +2349,10 @@ interface Settle {
  *  one it adopted after a crash of the page, so both end exactly the same way. */
 async function settle(x: Settle): Promise<void> {
   const delivery = deliveryPorts.get(x.jobId);
+  // The first attempt's id and the restart this attempt was, for the wake: read before anything is awaited, because a row that is
+  // dismissed while this settle is in flight forgets its chain.
+  const publicId = attempts.publicId(x.jobId);
+  const restartedAs = attempts.describe(x.jobId).restarted;
   // What the card's feed said when the run ended, read before the feed is closed: the decision to start the export again
   // wants how much of the project had been produced.
   const live = x.story ? liveFeedOf(useExportJob.getState(), x.jobId) : null;
@@ -2513,8 +2526,6 @@ async function settle(x: Settle): Promise<void> {
     : `saved as ${x.filename}`;
   // The assistant knows the export by its first attempt's id and is told how it ended once: a restart in between is part of
   // the same export (exportAttempts.ts), and is said when it happened.
-  const publicId = attempts.publicId(x.jobId);
-  const restartedAs = attempts.describe(x.jobId).restarted;
   const settled: SettledJob | null = cancelled
     ? null
     : {
