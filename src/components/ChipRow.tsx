@@ -25,8 +25,8 @@ function storage(): Storage | null {
   }
 }
 
-/** The size class the picture will be delivered in, which is the one the chip is tested at; null for a picture outside both classes (8K, 4K at 50 or 60,
- *  1440p at 50 or 60, 1080p at 100 or more), which the processor makes and no chip is asked about. With no project the row speaks for 1080p. */
+/** The size class the picture will be delivered in, which is the one the chip is tested at; null for a picture outside every class (wider than 3840 or above
+ *  3840 by 2160 pixels, 8K for one, or above 60 frames a second), which the processor makes and no chip is asked about. With no project the row speaks for 1080p. */
 function sizeClassFor(
   workload: { width: number; height: number; fps: number } | null,
   resolution: ExportResolution,

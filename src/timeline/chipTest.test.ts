@@ -26,6 +26,7 @@ import {
 } from "./chipTest";
 import {
   CHIP_MAKERS,
+  SIZE_CLASSES,
   SIZE_CLASS_LIMITS,
   chipVideoArgs,
   type ChipMaker,
@@ -50,7 +51,7 @@ describe("what the test asks ffmpeg to do", () => {
   // export is bigger or faster than what was proved (review finding 1, second pass: a 60 fps export was served by a chip
   // that had only been tried at 30).
   it("tests each size class at the largest picture the class admits, at exactly the frame rate the class admits", () => {
-    for (const cls of ["hd", "uhd"] as const) {
+    for (const cls of SIZE_CLASSES) {
       const [w, h] = /size=(\d+)x(\d+)/.exec(chipTestSource(cls))!.slice(1).map(Number);
       expect(Math.max(w, h), cls).toBe(SIZE_CLASS_LIMITS[cls].longSide);
       expect(w * h, cls).toBe(SIZE_CLASS_LIMITS[cls].pixels);
@@ -115,6 +116,7 @@ describe("what the test asks ffmpeg to do", () => {
     for (const [cls, size] of [
       ["hd", "1080x1920"],
       ["uhd", "3840x2160"],
+      ["uhd60", "3840x2160"],
     ] as const) {
       expect(chipTestSource(cls)).toContain(`size=${size}`);
       expect(framesOf(chipTestSource(cls)), cls).toBe(TEST_FRAMES);
@@ -128,7 +130,7 @@ describe("what the test asks ffmpeg to do", () => {
   });
 
   it("compares against a source longer than the file and ends with the file, so the frame count it reports is the file's own", () => {
-    for (const cls of ["hd", "uhd"] as const) {
+    for (const cls of SIZE_CLASSES) {
       const args = ssimArgs("/t.mp4", cls);
       expect(args.join(" ")).toContain("ssim=shortest=1");
       const longer = chipTestSource(cls, TEST_FRAMES * 2);
@@ -285,17 +287,22 @@ describe("finding a graphics chip that can be trusted", () => {
       "chip-test-encode-ref",
       "chip-test-compare-ref",
     ]);
-    const uhd = harness([amd]);
-    await findChip("uhd", { allowRun: true }, uhd.deps);
-    // The 4K class needs the 1080p class's parity proof first, then runs its own encode and compare only.
-    expect(uhd.calls.map((call) => call.kind)).toEqual([
-      "chip-test-encode",
-      "chip-test-compare",
-      "chip-test-encode-ref",
-      "chip-test-compare-ref",
-      "chip-test-encode",
-      "chip-test-compare",
-    ]);
+    for (const sizeClass of ["uhd", "uhd60"] as const) {
+      const large = harness([amd]);
+      await findChip(sizeClass, { allowRun: true }, large.deps);
+      // A 4K class needs the 1080p class's parity proof first, then runs its own encode and compare only.
+      expect(
+        large.calls.map((call) => call.kind),
+        sizeClass,
+      ).toEqual([
+        "chip-test-encode",
+        "chip-test-compare",
+        "chip-test-encode-ref",
+        "chip-test-compare-ref",
+        "chip-test-encode",
+        "chip-test-compare",
+      ]);
+    }
   });
 
   it("removes the files it made, whether the chip passed or not", async () => {
@@ -493,17 +500,20 @@ describe("finding a graphics chip that can be trusted", () => {
     expect(h.calls.length).toBeGreaterThan(calls);
   });
 
-  it("gives the 4K class only to a chip that was good enough for the 1080p class", async () => {
-    const bad = harness([amd], { chipSsim: 0.6, referenceSsim: 0.85 }); // fails parity at 1080p
-    const found = await findChip("uhd", { allowRun: true }, bad.deps);
-    expect(found.chip).toBeNull();
-    expect(bad.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true); // 4K was never tried
-    const good = harness([amd]);
-    expect((await findChip("uhd", { allowRun: true }, good.deps)).chip).toMatchObject({
-      maker: "amd",
-      sizeClass: "uhd",
-    });
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "gives the %s class only to a chip that was good enough for the 1080p class",
+    async (sizeClass) => {
+      const bad = harness([amd], { chipSsim: 0.6, referenceSsim: 0.85 }); // fails parity at 1080p
+      const found = await findChip(sizeClass, { allowRun: true }, bad.deps);
+      expect(found.chip).toBeNull();
+      expect(bad.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true); // 4K was never tried
+      const good = harness([amd]);
+      expect((await findChip(sizeClass, { allowRun: true }, good.deps)).chip).toMatchObject({
+        maker: "amd",
+        sizeClass,
+      });
+    },
+  );
 
   it("runs one test however many callers ask at once", async () => {
     const h = harness([amd]);
@@ -537,11 +547,17 @@ describe("finding a graphics chip that can be trusted", () => {
     },
   );
 
-  it("does not need a reference at the 4K class: it passes the chip that has already passed at 1080p", async () => {
-    // The reference is only made at 1080p, so a broken one there must not be a way round it, and 4K needs none of its own.
-    const good = harness([amd]);
-    expect((await findChip("uhd", { allowRun: true }, good.deps)).chip?.sizeClass).toBe("uhd");
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "does not need a reference at the %s class: it passes the chip that has already passed at 1080p",
+    async (sizeClass) => {
+      // The reference is only made at 1080p, so a broken one there must not be a way round it, and 4K needs none of its own.
+      const good = harness([amd]);
+      expect((await findChip(sizeClass, { allowRun: true }, good.deps)).chip?.sizeClass).toBe(
+        sizeClass,
+      );
+      expect(good.calls.filter((call) => call.kind.endsWith("-ref"))).toHaveLength(2); // the 1080p class's, and no more
+    },
+  );
 
   // Found by review: a remembered answer that is the right shape but not true to the rules must be tested again, never believed.
   describe("a damaged memory", () => {
@@ -646,22 +662,25 @@ describe("finding a graphics chip that can be trusted", () => {
     ).toBeNull();
   });
 
-  it("keeps the result of every test one dialog can run, for the export that follows: two classes for each of eight chips", async () => {
-    const chips = Array.from({ length: 8 }, (_, i) => ({ ...amd, device: `15b${i}` }));
-    const h = harness(chips);
-    // Every chip passes at 1080p and fails at 4K: sixteen results, the most one look can make.
-    const deps: ChipDeps = {
-      ...h.deps,
-      probe: async (args, options) =>
-        options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
-          ? { kind: "ran", code: 1, stdout: "", stderr: "Error while opening encoder", ms: 3 }
-          : h.deps.probe(args, options),
-    };
-    expect((await findChip("uhd", { allowRun: true }, deps)).chip).toBeNull();
-    const told = takeChipTestEvents();
-    expect(told).toHaveLength(16);
-    expect(told.filter((event) => event.result === "passed")).toHaveLength(8);
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "keeps the result of every test one %s look can run, for the export that follows: two classes for each of eight chips",
+    async (sizeClass) => {
+      const chips = Array.from({ length: 8 }, (_, i) => ({ ...amd, device: `15b${i}` }));
+      const h = harness(chips);
+      // Every chip passes at 1080p and fails at 4K: sixteen results, the most one look can make.
+      const deps: ChipDeps = {
+        ...h.deps,
+        probe: async (args, options) =>
+          options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
+            ? { kind: "ran", code: 1, stdout: "", stderr: "Error while opening encoder", ms: 3 }
+            : h.deps.probe(args, options),
+      };
+      expect((await findChip(sizeClass, { allowRun: true }, deps)).chip).toBeNull();
+      const told = takeChipTestEvents();
+      expect(told).toHaveLength(16);
+      expect(told.filter((event) => event.result === "passed")).toHaveLength(8);
+    },
+  );
 
   it("lets a caller stop waiting without stopping the test: it finishes, is remembered, and the next caller has it", async () => {
     const h = harness([amd]);
@@ -773,7 +792,7 @@ describe("finding a graphics chip that can be trusted", () => {
     const found = await findChip("hd", { allowRun: true }, h.deps);
     for (const event of found.events) {
       expect(CHIP_MAKERS as readonly string[]).toContain(event.maker);
-      expect(["hd", "uhd"] as SizeClass[]).toContain(event.sizeClass);
+      expect(SIZE_CLASSES as readonly SizeClass[]).toContain(event.sizeClass);
       expect(Number.isFinite(event.ms) && event.ms >= 0).toBe(true);
     }
     vi.restoreAllMocks();
@@ -890,7 +909,7 @@ describe("the chip test takes its turn", () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom(...modes),
-        fc.constantFrom<SizeClass>("hd", "uhd"),
+        fc.constantFrom<SizeClass>(...SIZE_CLASSES),
         async (chip, sizeClass) => {
           __resetChipTests();
           const plain = harness([amd], { chip });
@@ -965,10 +984,10 @@ describe("the person's Off and the server's switch for Quick export", () => {
     }
   });
 
-  it("holds for every maker, both size classes and every scripted behaviour, with the switch on or off: a stored Off gives no chip and runs nothing (rule over the class)", async () => {
+  it("holds for every maker, every size class and every scripted behaviour, with the switch on or off: a stored Off gives no chip and runs nothing (rule over the class)", async () => {
     const behaviours: Behaviour[] = [{}, { chip: "fail" }, { chip: "no_device" }, { chip: "busy" }];
     for (const maker of [amd, nvidia, intel])
-      for (const sizeClass of ["hd", "uhd"] as const)
+      for (const sizeClass of SIZE_CLASSES)
         for (const behaviour of behaviours)
           for (const allowRun of [true, false])
             for (const quickExport of [true, false]) {
@@ -1108,7 +1127,7 @@ describe("why a chip's test failed: the maker's own refusal of the driver", () =
     return { h, found, results: found.events.map((event) => event.result) };
   }
 
-  it.each(["hd", "uhd"] as const)(
+  it.each(SIZE_CLASSES)(
     "files the driver's refusal under its own word when the %s look is made, and the event says the maker and nothing about the driver",
     async (sizeClass) => {
       const { h, found } = await lookAt("nvidia", DRIVER_STDERR, sizeClass);
@@ -1124,22 +1143,25 @@ describe("why a chip's test failed: the maker's own refusal of the driver", () =
     },
   );
 
-  it("files it under its own word at the 4K class too, when that is where the maker said it", async () => {
-    const h = harness([nvidia]);
-    const deps: ChipDeps = {
-      ...h.deps,
-      probe: async (args, options) =>
-        options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
-          ? { kind: "ran", code: 1, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
-          : h.deps.probe(args, options),
-    };
-    const found = await findChip("uhd", { allowRun: true }, deps);
-    expect(found.chip).toBeNull();
-    expect(found.events.map((event) => [event.sizeClass, event.result])).toEqual([
-      ["hd", "passed"],
-      ["uhd", "driver_too_old"],
-    ]);
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "files it under its own word at the %s class too, when that is where the maker said it",
+    async (sizeClass) => {
+      const h = harness([nvidia]);
+      const deps: ChipDeps = {
+        ...h.deps,
+        probe: async (args, options) =>
+          options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
+            ? { kind: "ran", code: 1, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
+            : h.deps.probe(args, options),
+      };
+      const found = await findChip(sizeClass, { allowRun: true }, deps);
+      expect(found.chip).toBeNull();
+      expect(found.events.map((event) => [event.sizeClass, event.result])).toEqual([
+        ["hd", "passed"],
+        [sizeClass, "driver_too_old"],
+      ]);
+    },
+  );
 
   it.each(DRIVER_SENTENCES)(
     "recognises the sentence %j on its own, in any letter case",

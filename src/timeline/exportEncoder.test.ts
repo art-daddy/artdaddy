@@ -122,19 +122,23 @@ describe("the encoder ids history is kept under", () => {
 });
 
 describe("which size class a picture is tested and used in", () => {
-  it("puts a phone-sized picture, either way up, in the 1080p class and a 4K one in the other", () => {
+  it("puts a phone-sized picture, either way up, in the 1080p class, a 4K one at 30 in the next and a 4K one at 60 in the last", () => {
     expect(sizeClassOf(1080, 1920, 30)).toBe("hd");
     expect(sizeClassOf(1920, 1080, 30)).toBe("hd");
     expect(sizeClassOf(1280, 720, 24)).toBe("hd");
     expect(sizeClassOf(2560, 1440, 30)).toBe("uhd");
     expect(sizeClassOf(2160, 3840, 30)).toBe("uhd");
     expect(sizeClassOf(3840, 2160, 30)).toBe("uhd");
+    expect(sizeClassOf(2160, 3840, 60)).toBe("uhd60");
+    expect(sizeClassOf(3840, 2160, 60)).toBe("uhd60");
     expect(sizeClassOf(2160, 1080, 30)).toBe("uhd"); // an ultra-wide: its long side is past the 1080p class's
   });
 
   it("is no class at all above what the chips were tested at, and for anything that is not a size", () => {
-    expect(sizeClassOf(4096, 2304, 30)).toBeNull(); // more than the 4K class: no maker's limits were checked here
+    expect(sizeClassOf(4096, 2304, 30)).toBeNull(); // more than the 4K classes: no maker's limits were checked here
+    expect(sizeClassOf(4096, 2304, 60)).toBeNull();
     expect(sizeClassOf(7680, 4320, 30)).toBeNull();
+    expect(sizeClassOf(7680, 4320, 60)).toBeNull();
     for (const [w, h] of [
       [0, 100],
       [100, 0],
@@ -146,23 +150,49 @@ describe("which size class a picture is tested and used in", () => {
   });
 
   // Found by review: a class by pixel count alone let a picture with a long side nobody tested (4000 by 500: two million
-  // pixels, a "1080p-class" picture) and a frame rate nobody tested (4K at 60 needs more than H.264 level 5.2 gives) use a
-  // chip that had proved itself at 1080 by 1920 and 30 frames a second.
+  // pixels, a "1080p-class" picture) and a frame rate nobody tested use a chip that had proved itself at 1080 by 1920 and
+  // 30 frames a second.
   it("is no class for a long side, or a frame rate, past what each class was tested at", () => {
     expect(sizeClassOf(4000, 500, 30)).toBeNull();
     expect(sizeClassOf(500, 4000, 30)).toBeNull();
     expect(sizeClassOf(3840, 1080, 30)).toBe("uhd"); // within the 4K class's long side
     expect(sizeClassOf(1920, 1080, 60)).toBe("hd");
-    expect(sizeClassOf(1920, 1080, 61)).toBeNull(); // 1080p120 and the like: not the 1080p class, and past the 4K class's rate
+    expect(sizeClassOf(1920, 1080, 61)).toBeNull(); // 1080p120 and the like: past every class's rate
     expect(sizeClassOf(1920, 1080, 120)).toBeNull();
-    expect(sizeClassOf(3840, 2160, 60)).toBeNull();
-    expect(sizeClassOf(2560, 1440, 31)).toBeNull();
     for (const fps of [0, -30, Number.NaN, Number.POSITIVE_INFINITY])
       expect(sizeClassOf(1920, 1080, fps), `${fps} fps`).toBeNull();
   });
 
+  // Each limit of each class, at it and one step beyond it, with the class the picture falls to written out by hand.
+  it.each([
+    [1920, 1080, 30, "hd"],
+    [1920, 1080, 60, "hd"],
+    [1920, 1080, 61, null],
+    [1921, 1080, 30, "uhd"], // one past the 1080p class's long side
+    [1921, 1080, 60, "uhd60"],
+    [1920, 1081, 30, "uhd"], // one past its pixel count
+    [1920, 1081, 60, "uhd60"],
+    [2560, 1440, 30, "uhd"],
+    [2560, 1440, 31, "uhd60"],
+    [2560, 1440, 60, "uhd60"],
+    [2560, 1440, 61, null],
+    [3840, 2160, 30, "uhd"],
+    [3840, 2160, 31, "uhd60"],
+    [3840, 2160, 60, "uhd60"],
+    [3840, 2160, 61, null],
+    [3841, 2160, 30, null], // one past the 4K classes' long side
+    [3841, 2160, 60, null],
+    [3840, 2161, 30, null], // one past their pixel count
+    [3840, 2161, 60, null],
+    [7680, 4320, 30, null],
+    [7680, 4320, 60, null],
+  ])("puts %i by %i at %i frames a second in %s", (width, height, fps, expected) => {
+    expect(sizeClassOf(width, height, fps)).toBe(expected);
+  });
+
   it("only ever gets larger as the picture, or its frame rate, does", () => {
-    const rank = (c: ReturnType<typeof sizeClassOf>) => (c === "hd" ? 1 : c === "uhd" ? 2 : 3);
+    const rank = (c: ReturnType<typeof sizeClassOf>) =>
+      c === "hd" ? 1 : c === "uhd" ? 2 : c === "uhd60" ? 3 : 4;
     fc.assert(
       fc.property(
         fc.integer({ min: 2, max: 8000 }),

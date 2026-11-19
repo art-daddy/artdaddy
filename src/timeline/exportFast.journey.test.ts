@@ -450,9 +450,13 @@ describe("4. what Fast leaves on the record, in the assistant's list and in the 
     for (const chip of [false, true]) {
       const fast = await observe({ canvas: UHD60, slot: FAST, chip });
       const quality = await observe({ canvas: UHD60, chip });
-      // `encoder` is what any row says of an export that runs on a chip or on the faster setting, whoever asked for it (0.28.0's field).
-      expect(Object.keys(fast.row).filter((key) => !(key in quality.row))).toEqual(["encoder"]);
+      // `encoder` is what any row says of an export that runs on a chip or on the faster setting, whoever asked for it (0.28.0's field): on a PC with a chip
+      // Quality's row has it too (4K at 60 has a size class), without one only Fast's row does.
+      expect(Object.keys(fast.row).filter((key) => !(key in quality.row))).toEqual(
+        chip ? [] : ["encoder"],
+      );
       expect(Object.keys(quality.row).filter((key) => !(key in fast.row))).toEqual([]);
+      if (chip) expect(quality.row.encoder).toBe("graphics_chip");
       expect(fast.row.encoder).toBe(chip ? "graphics_chip" : "faster_setting");
       for (const word of ["route", "quick", "quick_offer", "mode", "setting"])
         expect(fast.row, word).not.toHaveProperty(word);

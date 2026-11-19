@@ -250,9 +250,31 @@ describe("the chip row", () => {
   });
 
   it.each([
+    ["4K at 30 frames a second", { width: 3840, height: 2160, fps: 30 }, 30],
+    ["4K at 60 frames a second", { width: 3840, height: 2160, fps: 60 }, 60],
+    ["1440p at 60 frames a second", { width: 2560, height: 1440, fps: 60 }, 60],
+  ])(
+    "draws the row for %s and tests the chip at the 4K size, at the rate the picture is delivered in",
+    async (_what, workload, rate) => {
+      pc([amd]);
+      render(<ChipRow workload={workload} />);
+      await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
+      const tested = chipCalls().map(([args]) => args.join(" "));
+      expect(tested.some((line) => line.includes(`size=3840x2160:rate=${rate}`))).toBe(true);
+      // The 1080p test came first, as for every larger class, and no test was made at a rate the picture does not have.
+      expect(tested.some((line) => line.includes("size=1080x1920:rate=60"))).toBe(true);
+      expect(
+        tested.some((line) => line.includes(`size=3840x2160:rate=${rate === 30 ? 60 : 30}`)),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
     ["8K", { width: 7680, height: 4320, fps: 30 }],
-    ["4K at 60 frames a second", { width: 3840, height: 2160, fps: 60 }],
-    ["1440p at 60 frames a second", { width: 2560, height: 1440, fps: 60 }],
+    ["8K at 60 frames a second", { width: 7680, height: 4320, fps: 60 }],
+    ["a picture wider than 3840 pixels", { width: 4096, height: 2304, fps: 30 }],
+    ["a picture with more than 3840 by 2160 pixels", { width: 3840, height: 2161, fps: 30 }],
+    ["4K at 61 frames a second", { width: 3840, height: 2160, fps: 61 }],
     ["1080p at 120 frames a second", { width: 1920, height: 1080, fps: 120 }],
   ])(
     "draws no row for %s, a picture the chip never serves, and tests nothing; the person's own Off is still drawn",
@@ -278,10 +300,11 @@ describe("the chip row", () => {
       [1920, 1080],
       [2560, 1440],
       [3840, 2160],
+      [4096, 2304],
       [7680, 4320],
     ];
     for (const [width, height] of sizes)
-      for (const fps of [30, 60, 120]) {
+      for (const fps of [30, 60, 61, 120]) {
         const { container, unmount } = render(<ChipRow workload={{ width, height, fps }} />);
         const label = `${width}x${height} at ${fps}`;
         if (sizeClassOf(width, height, fps) !== null) {
@@ -342,7 +365,7 @@ describe("the chip row", () => {
     const uhd = { width: 3840, height: 2160, fps: 30 };
     const view = render(<ChipRow workload={uhd} onDrawn={drawn} />);
     await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(true));
-    view.rerender(<ChipRow workload={{ ...uhd, fps: 60 }} onDrawn={drawn} />);
+    view.rerender(<ChipRow workload={{ ...uhd, fps: 61 }} onDrawn={drawn} />);
     await waitFor(() => expect(drawn).toHaveBeenLastCalledWith(false));
     expect(view.container).toBeEmptyDOMElement();
     view.rerender(<ChipRow workload={uhd} onDrawn={drawn} />);

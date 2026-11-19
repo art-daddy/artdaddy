@@ -8,6 +8,7 @@ import { amd, harness, nvidia, type Behaviour } from "../test/chipHarness";
 import { CHIP_PREF_KEY } from "./chipPref";
 import { __resetChipTests, findChip } from "./chipTest";
 import { decideExportEncoder } from "./exportChoice";
+import { SIZE_CLASSES } from "./exportEncoder";
 import type { RenderWorkload } from "./renderPlan";
 
 // The host's two calls the chip lookup makes on the real PC. Everything else of the module stays real.
@@ -106,10 +107,10 @@ describe("Off means off", () => {
     expect(h.calls.length).toBe(tested); // remembered: the pass was kept while it was Off
   });
 
-  it("holds for every maker and for the 4K class, which tests the chip at 1080p first", async () => {
+  it("holds for every maker and for every larger class, which tests the chip at 1080p first", async () => {
     const lots: Behaviour[] = [{}, { chip: "fail" }, { chip: "no_device" }, { chip: "busy" }];
     for (const behaviour of lots)
-      for (const sizeClass of ["hd", "uhd"] as const) {
+      for (const sizeClass of SIZE_CLASSES) {
         __resetChipTests();
         const h = harness([nvidia, amd], behaviour);
         h.storage.set(CHIP_PREF_KEY, "off");
@@ -206,6 +207,7 @@ describe("on the real wiring", () => {
     store.set(CHIP_PREF_KEY, "off");
     expect(await findChip("hd", { allowRun: true })).toEqual({ chip: null, events: [] });
     expect(await findChip("uhd", { allowRun: true })).toEqual({ chip: null, events: [] });
+    expect(await findChip("uhd60", { allowRun: true })).toEqual({ chip: null, events: [] });
     expect(probe).not.toHaveBeenCalled();
   });
 

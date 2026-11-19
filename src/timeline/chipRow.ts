@@ -24,7 +24,7 @@ export interface ChipRowInput {
   flagsOn: boolean;
   /** `quick_export` is on. Off, the old Mode row comes back and this row is not drawn, unless the person's own Off is stored: that is drawn, so it can be undone. */
   quickFlagOn: boolean;
-  /** The delivered picture is in a size class the chip is tested and used at. 8K, 4K at 50 or 60, 1440p at 50 or 60 and 1080p at 100 or more are not: the
+  /** The delivered picture is in a size class the chip is tested and used at. A picture wider than 3840 pixels or above 3840 by 2160 pixels (8K, for one) or above 60 frames a second is not: the
    *  processor makes those, and Auto has nothing true to say of the chip there. */
   sizeServed: boolean;
 }

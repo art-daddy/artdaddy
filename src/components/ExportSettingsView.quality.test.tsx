@@ -118,6 +118,8 @@ const sized = (width: number, height: number, fps: number): RenderWorkload => ({
   fps,
 });
 const UHD_60 = sized(3840, 2160, 60);
+/** A picture no size class holds (above 60 frames a second): the Graphics chip row is not drawn for it. */
+const UHD_120 = sized(3840, 2160, 120);
 const SD_30 = sized(854, 480, 30);
 
 /** One run this PC has measured for the project above: what the history of exports holds after a background export (the shape the 0.28.0 dialog's own tests use). */
@@ -260,8 +262,15 @@ const SCENARIOS: Scenario[] = [
     presses: [{ sent: sent(), legacyDrawsModeRow: false }],
   },
   {
-    name: "3840 x 2160 at 60 where the look wants a row and the chip is not served at that size: 0.28.0 draws its Mode row",
+    name: "3840 x 2160 at 60 where the look wants a row and the chip is served at that size (class uhd60): 0.28.0 draws the chip row and not its Mode row",
     workload: UHD_60,
+    adapters: [amd],
+    look: answers(wantsRow),
+    presses: [{ sent: sent(), legacyDrawsModeRow: false }],
+  },
+  {
+    name: "3840 x 2160 at 120 where the look wants a row and no class holds that picture: 0.28.0 draws its Mode row",
+    workload: UHD_120,
     adapters: [amd],
     look: answers(wantsRow),
     presses: [{ sent: sent(), legacyDrawsModeRow: true }],
@@ -340,12 +349,20 @@ const SCENARIOS: Scenario[] = [
     presses: [{ sent: sent({ resolution: "720p", mode: "quality" }), legacyDrawsModeRow: false }],
   },
   {
-    name: "a size pick that brings the chip row back (1080p at 60 is served, 4K at 60 is not) and the look wants a row",
+    name: "a size pick that moves the chip row from 4K at 60 (class uhd60) to 1080p at 60 (class hd) and the look wants a row",
     workload: UHD_60,
     adapters: [amd],
     look: answers(wantsRow),
     picks: { size: "1080p" },
     presses: [{ sent: sent({ resolution: "1080p" }), legacyDrawsModeRow: false }],
+  },
+  {
+    name: "a size and a rate pick that bring the chip row back (1080p at 60 is served, 4K at 120 is not) and the look wants a row",
+    workload: UHD_120,
+    adapters: [amd],
+    look: answers(wantsRow),
+    picks: { size: "1080p", rate: 60 },
+    presses: [{ sent: sent({ resolution: "1080p", fps: 60 }), legacyDrawsModeRow: false }],
   },
   {
     name: "the history of this PC's exports changes after the app has answered, and Export is pressed before it answers again",

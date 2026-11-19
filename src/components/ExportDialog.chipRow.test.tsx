@@ -374,13 +374,16 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     vi.mocked(decideExportEncoder)
       .mockImplementationOnce(async () => wantsRow())
       .mockReturnValue(new Promise(() => undefined)); // the answer for the new picture has not come
-    show(vi.fn(), { ...PROJECT, width: 3840, height: 2160 });
+    const dialog = (workload: typeof PROJECT) => (
+      <ExportDialog open onCancel={() => undefined} onStart={() => undefined} workload={workload} />
+    );
+    const view = render(dialog({ ...PROJECT, width: 3840, height: 2160 }));
     expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
     await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(1));
     await settleAll();
     noModeRow();
-    // 4K at 60 frames a second: no chip row, and no chip
-    fireEvent.change(screen.getByLabelText("frame rate"), { target: { value: "60" } });
+    // 8K: no chip row, and no chip
+    view.rerender(dialog({ ...PROJECT, width: 7680, height: 4320 }));
     await waitFor(() => expect(screen.queryByTestId("chip-row")).toBeNull());
     await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(2));
     await settleAll();
@@ -392,9 +395,12 @@ describe("the Export dialog draws the Graphics chip row or the old Mode row, nev
     vi.mocked(decideExportEncoder)
       .mockImplementationOnce(async () => decision())
       .mockImplementation(async () => wantsRow());
-    show(vi.fn(), { ...PROJECT, width: 3840, height: 2160 });
+    const dialog = (workload: typeof PROJECT) => (
+      <ExportDialog open onCancel={() => undefined} onStart={() => undefined} workload={workload} />
+    );
+    const view = render(dialog({ ...PROJECT, width: 3840, height: 2160 }));
     await screen.findByRole("radiogroup", { name: "Graphics chip" });
-    fireEvent.change(screen.getByLabelText("frame rate"), { target: { value: "60" } });
+    view.rerender(dialog({ ...PROJECT, width: 7680, height: 4320 }));
     expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
     expect(screen.queryByTestId("chip-row")).toBeNull();
   });

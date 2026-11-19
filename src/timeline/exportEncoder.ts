@@ -103,21 +103,26 @@ export function chipVideoArgs(
   return { codec: spec.codec, pixFmt: spec.pixFmt, rate: spec.rate(tier) };
 }
 
-export type SizeClass = "hd" | "uhd";
+/** The size classes, smallest first: a picture is tested and served in the first one that holds it. */
+export const SIZE_CLASSES = ["hd", "uhd", "uhd60"] as const;
+export type SizeClass = (typeof SIZE_CLASSES)[number];
 
 /** What each size class stands for: the picture and the frame rate the chip's test is run at, and the most a picture may
  *  have to be served by a chip that proved itself there. Every maker's encoder has limits (a longest side, a macroblock
- *  rate, a level) that only a real encode proves; the test runs a 1080 by 1920 picture (class "hd") at 60 frames a second
- *  and a 3840 by 2160 one (class "uhd") at 30 (`chipTest.ts` reads the rate from here, and a test pins them equal), so a
- *  picture beyond those bounds is served by the processor, not by a chip nobody asked about it. 1080p at 60 is within what
- *  every H.264 hardware encoder does (level 4.2); 4K at 60 is not (it needs more than level 5.2), and neither is 1080p at
- *  120. */
+ *  rate, a level) that only a real encode proves; the test runs a 1080 by 1920 picture (class "hd") at 60 frames a second,
+ *  a 3840 by 2160 one (class "uhd") at 30 and the same 3840 by 2160 one at 60 (class "uhd60") (`chipTest.ts` reads the rate
+ *  from here, and a test pins them equal), so a picture beyond those bounds is served by the processor, not by a chip nobody
+ *  asked about it. 1080p at 60 is within what every H.264 hardware encoder does (level 4.2); 4K at 60 fits level 5.2 (32,400
+ *  macroblocks a frame times 60 is 1,944,000 a second, and the level allows 2,073,600), and 8K needs level 6, which no
+ *  class stands for. What a class proves is not a level but the test: a chip is used at a class only after it encoded that
+ *  class's picture, at its rate, on this PC. */
 export const SIZE_CLASS_LIMITS: Record<
   SizeClass,
   { readonly longSide: number; readonly pixels: number; readonly fps: number }
 > = {
   hd: { longSide: 1920, pixels: 1920 * 1080, fps: 60 },
   uhd: { longSide: 3840, pixels: 3840 * 2160, fps: 30 },
+  uhd60: { longSide: 3840, pixels: 3840 * 2160, fps: 60 },
 };
 
 /** The class a delivered picture is tested, and used, in: the smallest whose bounds hold it, or null (the processor). */
@@ -125,7 +130,7 @@ export function sizeClassOf(width: number, height: number, fps: number): SizeCla
   if (![width, height, fps].every((value) => Number.isFinite(value) && value > 0)) return null;
   const longSide = Math.max(width, height);
   const pixels = width * height;
-  for (const cls of ["hd", "uhd"] as const) {
+  for (const cls of SIZE_CLASSES) {
     const limit = SIZE_CLASS_LIMITS[cls];
     if (longSide <= limit.longSide && pixels <= limit.pixels && fps <= limit.fps) return cls;
   }

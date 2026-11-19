@@ -202,13 +202,32 @@ describe("the encoder an export gets", () => {
       uhd.lookup,
     );
     expect(uhd.asked).toEqual([{ sizeClass: "uhd", allowRun: true }]);
+    const uhd60 = lookupWith(verdict("amd", "uhd60"));
+    const sixty = await decideExportEncoder(
+      input({ workload: workload({ width: 3840, height: 2160, fps: 60 }) }),
+      uhd60.lookup,
+    );
+    expect(uhd60.asked).toEqual([{ sizeClass: "uhd60", allowRun: true }]);
+    expect(sixty.chip).toBe("amd"); // 4K at 60 is served now, by the chip that passed that class
+    // A rate that the project is delivered at, not the one it was made at, decides: 4K at 60 brought down to 30 is the 30 class.
+    const down = lookupWith(verdict("amd", "uhd"));
+    await decideExportEncoder(
+      input({
+        workload: workload({ width: 3840, height: 2160, fps: 60 }),
+        settings: { fps: 30 },
+      }),
+      down.lookup,
+    );
+    expect(down.asked).toEqual([{ sizeClass: "uhd", allowRun: true }]);
   });
 
-  it("uses no chip, and tests none, for a picture or frame rate no chip is tested at (8K, 4K at 60)", async () => {
+  it("uses no chip, and tests none, for a picture or frame rate no chip is tested at (8K, 4K above 60)", async () => {
     const { lookup, asked } = lookupWith(verdict("amd"));
     for (const shape of [
       { width: 7680, height: 4320 },
-      { width: 3840, height: 2160, fps: 60 },
+      { width: 7680, height: 4320, fps: 60 },
+      { width: 3840, height: 2160, fps: 61 },
+      { width: 4096, height: 2304 },
       { width: 4000, height: 500 },
       { width: 1920, height: 1080, fps: 120 },
     ]) {

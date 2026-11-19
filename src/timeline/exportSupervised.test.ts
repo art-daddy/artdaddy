@@ -44,7 +44,9 @@ import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
 import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
 import oldTable from "./__fixtures__/chooseEncoder.golden.json";
 import { combinations, readTable, type Table } from "./__fixtures__/chooseEncoderTable";
-import { harness, nvidia } from "../test/chipHarness";
+import { amd, harness, nvidia, type Behaviour } from "../test/chipHarness";
+import { CHIP_MAKERS, SIZE_CLASSES } from "./exportEncoder";
+import { setCanvasTool } from "./ops";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -884,8 +886,90 @@ describe("the graphics chip, from the export tool to the card", () => {
     expect(differences(withoutClocks(plain), withoutClocks(refused))).toEqual([
       `report.trace[${step(plain)}].v`,
     ]);
-    // The number of the step is the maker, plus ten for the 4K class.
-    expect([makerCode("nvidia", "hd"), makerCode("nvidia", "uhd")]).toEqual([2, 12]);
+    // The number of the step is the maker, plus ten for the 4K class at 30 frames a second and twenty for the one at 60.
+    expect([
+      makerCode("nvidia", "hd"),
+      makerCode("nvidia", "uhd"),
+      makerCode("nvidia", "uhd60"),
+    ]).toEqual([2, 12, 22]);
+  });
+
+  // The number is what the server is told of a chip test: the maker and the class in one whole number. Written out, so that a class
+  // added later without a number of its own, or a number two classes share, is a failure here and not a report nobody can read.
+  it("numbers every test by maker and class: 1 to 3 at 1080p, 11 to 13 at 4K, 21 to 23 at 4K 60, and no two the same", () => {
+    const numbers = Object.fromEntries(
+      CHIP_MAKERS.flatMap((maker) =>
+        SIZE_CLASSES.map((sizeClass) => [`${maker}/${sizeClass}`, makerCode(maker, sizeClass)]),
+      ),
+    );
+    expect(numbers).toEqual({
+      "amd/hd": 1,
+      "amd/uhd": 11,
+      "amd/uhd60": 21,
+      "nvidia/hd": 2,
+      "nvidia/uhd": 12,
+      "nvidia/uhd60": 22,
+      "intel/hd": 3,
+      "intel/uhd": 13,
+      "intel/uhd60": 23,
+    });
+    expect(new Set(Object.values(numbers)).size).toBe(Object.values(numbers).length);
+  });
+
+  // A 3840 by 2160 project at 60 frames a second, through the real lookup, the real choice and the real command: the chip is used
+  // where it passed the test of that class, and the processor where it did not. The PC's only chip is scripted by `behaviour`.
+  async function exportUhd60(behaviour: Behaviour) {
+    const actual = await vi.importActual<typeof import("./chipTest")>("./chipTest");
+    actual.__resetChipTests();
+    useExportJob.setState({ calibrations: [] });
+    const pc = harness([amd], behaviour);
+    vi.mocked(findChip).mockImplementation((size, options) =>
+      actual.findChip(size, options, pc.deps),
+    );
+    const t = await setup();
+    const set = await setCanvasTool(
+      { width: 3840, height: 2160, fps: 60 },
+      { store: t.store, runner: t.nextPage().runner },
+    );
+    if (set.ok === false) throw new Error(`the canvas was not set: ${JSON.stringify(set)}`);
+    const started = await t.exportNow("uhd60");
+    await flush();
+    const spec = t.jobs.submitted.at(-1)!;
+    t.jobs.exit(started.job_id, 0);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const tested = (report: Any) =>
+      (report.trace as Any[]).filter((e) => e.e === "chip_test").map((e) => [e.v, e.n]);
+    return { spec, pc, report: structuredClone(reported.at(-1)!) as Any, tested };
+  }
+
+  it("exports a 3840 by 2160 project at 60 frames a second on the chip that passed the test of that class, and the report says which tests were made", async () => {
+    const { spec, pc, report, tested } = await exportUhd60({});
+    // The project really was 4K at 60: the plan the app process was handed says so.
+    expect((spec.meta.plan as Any).output).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+    expect(codec(spec)).toBe("h264_amf");
+    expect(report).toMatchObject({ status: "done", encoder: "amd", chip: "amd" });
+    // The 1080p test and the 4K 60 test, in that order, each with its own number; the 4K 30 test was not made.
+    expect(tested(report)).toEqual([
+      ["passed", 1],
+      ["passed", 21],
+    ]);
+    const sources = pc.calls.map((call) => call.args.join(" "));
+    expect(sources.some((line) => line.includes("size=3840x2160:rate=60"))).toBe(true);
+    expect(sources.some((line) => line.includes("size=3840x2160:rate=30"))).toBe(false);
+  });
+
+  it("exports the same project on the processor when the chip passed 1080p and 4K at 30 but not 4K at 60, and says the 4K 60 test failed", async () => {
+    // 4K at 30 is 249 million pixels a second and 4K at 60 is 498 million: this chip stops between them.
+    const { spec, report, tested } = await exportUhd60({ failsAbovePixelRate: 300_000_000 });
+    expect((spec.meta.plan as Any).output).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+    expect(codec(spec)).toBe("libx264");
+    expect(report).toMatchObject({ status: "done", encoder: "x264" });
+    expect(report.chip).toBeUndefined();
+    expect(tested(report)).toEqual([
+      ["passed", 1],
+      ["encode_failed", 21],
+    ]);
   });
 
   it("replays the journey: the chip fails in the middle, the card says so, one click runs the same export on the processor, and the chip is set aside", async () => {

@@ -270,6 +270,7 @@ const MORE_OWN: Shape[] = [
 ];
 const byName = (name: string): Shape => SHAPES.find((shape) => shape.name.startsWith(name))!;
 const UHD60 = byName("3840 x 2160");
+const EIGHT_K = MORE_OWN.find((shape) => shape.name.startsWith("7680 x 4320"))!;
 const VERTICAL = byName("1080 x 1920");
 const HD72 = byName("1920 x 1080 at 72");
 
@@ -1004,48 +1005,78 @@ describe("(h) the Graphics chip row stays mounted behind the closed door, in bot
     },
   );
 
-  it("is told the SHOWN values: Fast on 4K at 60 is tested as 1080p at 30 (a picture the chip serves), Quality on it as 4K at 60 (one it does not)", async () => {
+  it("is told the SHOWN values: Fast on 4K at 60 is tested as 1080p at 30 (class hd), Quality on it as 4K at 60 (class uhd60), and each pick moves the class", async () => {
     pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const classesAsked = () => [...new Set(asked.mock.calls.map((call) => call[0]))].sort();
     const quality = mount(UHD60);
     await openDoor(quality);
-    await settle();
-    expect(chipGroup()).toBeNull();
+    await waitFor(() => expect(chipGroup()).not.toBeNull());
+    expect(classesAsked()).toEqual(["uhd60"]);
     quality.unmount();
     const fast = mount(UHD60);
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    asked.mockClear();
     await fast.user.click(radio("Fast"));
     await openDoor(fast);
+    await waitFor(() => expect(asked).toHaveBeenCalled());
     await waitFor(() => expect(chipGroup()).not.toBeNull());
     expect(screen.getByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
-    // the person changes what is shown, and the row follows what is shown and not the choice's own values: back to the project's size and rate is 4K at 60 again
+    expect(classesAsked()).toEqual(["hd"]);
+    // the person changes what is shown, and the row follows what is shown and not the choice's own values: the project's size is 4K at 30, then its rate too is 4K at 60
+    asked.mockClear();
     await pickWords(fast, "resolution", "Same as project (3840 x 2160)");
-    await settle();
-    expect(chipGroup()).not.toBeNull(); // 4K at 30
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd"]);
+    asked.mockClear();
     await pickWords(fast, "frame rate", "Same as project (60 fps)");
-    await settle();
-    expect(chipGroup()).toBeNull(); // 4K at 60
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd60"]);
+    await waitFor(() => expect(chipGroup()).not.toBeNull());
   });
 
-  it("goes back to the choice's own values with the choice: Fast, then Quality, is 4K at 60 again", async () => {
+  it("goes back to the choice's own values with the choice: Fast, then Quality, is 4K at 60 again (class uhd60)", async () => {
     pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const classesAsked = () => [...new Set(asked.mock.calls.map((call) => call[0]))].sort();
     const view = mount(UHD60);
     await view.user.click(radio("Fast"));
     await openDoor(view);
+    await waitFor(() => expect(classesAsked()).toContain("hd"));
     await waitFor(() => expect(chipGroup()).not.toBeNull());
+    asked.mockClear();
     await view.user.click(radio("Quality"));
-    await settle();
-    expect(chipGroup()).toBeNull();
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd60"]);
+    await waitFor(() => expect(chipGroup()).not.toBeNull());
   });
 
-  it("is told the SHOWN size, not the project's: Quality on 4K at 60 has no row (no class holds that picture), picking 1080p brings it back (1080p at 60 is class hd), and the project's own size takes it away again", async () => {
+  it("is told the SHOWN size, not the project's: Quality on 8K at 30 has no row (no class holds that picture), picking 2160p (3840 x 2160 at 30 is class uhd) brings it back, and the project's own size takes it away again", async () => {
     pcWith([amd]);
-    const view = mount(UHD60);
+    const view = mount(EIGHT_K);
     await openDoor(view);
     await settle();
     expect(chipGroup()).toBeNull();
-    await pickWords(view, "resolution", "1080p");
+    await pickWords(view, "resolution", "2160p (4K)");
     await waitFor(() => expect(chipGroup()).not.toBeNull());
-    await pickWords(view, "resolution", "Same as project (3840 x 2160)");
+    await pickWords(view, "resolution", "Same as project (7680 x 4320)");
     await waitFor(() => expect(chipGroup()).toBeNull());
+  });
+
+  it("4K above 60 frames a second asks no lookup and draws no row (no class holds it), and 1440p at 60 asks class uhd60", async () => {
+    pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const classesAsked = () => [...new Set(asked.mock.calls.map((call) => call[0]))].sort();
+    const above = mount({ ...UHD60, name: "3840 x 2160 at 120", fps: 120 });
+    await openDoor(above);
+    await settle();
+    expect(chipGroup()).toBeNull();
+    expect(asked).not.toHaveBeenCalled();
+    above.unmount();
+    const qhd = mount({ ...UHD60, name: "2560 x 1440 at 60", width: 2560, height: 1440 });
+    await openDoor(qhd);
+    await waitFor(() => expect(chipGroup()).not.toBeNull());
+    expect(classesAsked()).toEqual(["uhd60"]);
   });
 
   it("asks the chip's test about the class of the SHOWN picture: 4K at 30 under Quality is uhd, Fast on it (1080p at 30) is hd, and Fast with the project's own size picked is uhd again", async () => {

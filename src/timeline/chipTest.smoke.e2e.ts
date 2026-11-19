@@ -24,7 +24,7 @@ import {
   ssimArgs,
   type ChipDeps,
 } from "./chipTest";
-import { CHIP_MAKERS, type ChipMaker, type SizeClass } from "./exportEncoder";
+import { CHIP_MAKERS, SIZE_CLASSES, type ChipMaker } from "./exportEncoder";
 
 const ROOT = joinPath(os.tmpdir(), `artdaddy-chip-${Date.now()}`);
 const EXPECTED = process.env.ARTDADDY_SMOKE_EXPECT_CHIP;
@@ -136,9 +136,10 @@ describe("reading the real compare report", () => {
 
 describe("each maker's chip, on this PC", () => {
   for (const maker of CHIP_MAKERS) {
-    for (const sizeClass of ["hd", "uhd"] as SizeClass[]) {
+    for (const sizeClass of SIZE_CLASSES) {
       it(`${maker} at ${sizeClass}: the verdict follows what the chip really does, quickly, and leaves no file`, async () => {
         // Ground truth: the encoder's own command, run directly.
+        const directStarted = Date.now();
         const direct = await nodeRunner.run(
           "ffmpeg",
           chipEncodeArgs(maker, sizeClass, joinPath(ROOT, `${maker}-${sizeClass}-direct.mp4`)),
@@ -150,17 +151,29 @@ describe("each maker's chip, on this PC", () => {
         const found = await findChip(sizeClass, { allowRun: true }, deps);
         const seconds = (Date.now() - started) / 1000;
         const results = found.events.map((event) => event.result);
+        // One line per maker and class: the verdict, the similarity score and the milliseconds are the record of this run. The
+        // class's own answer is the lookup's last event (an earlier one is the 1080p answer a larger class waited for; when
+        // 1080p refused, that refusal is the only event and its class is printed).
+        const own = found.events[found.events.length - 1];
+        console.info(
+          `chip-test ${maker} ${sizeClass}: direct=${works ? "encodes" : "refuses"} (${Date.now() - directStarted - Math.round(seconds * 1000)} ms), result=${own?.result ?? "none"} at ${own?.sizeClass ?? "none"}, ssimMilli=${own?.ssimMilli ?? 0}, ms=${own?.ms ?? 0}, lookup=${Math.round(seconds * 1000)} ms, offered=${found.chip !== null}`,
+        );
 
         if (!works) {
           // A chip this PC does not have says so in seconds, is never offered, and nothing is left behind.
           expect(found.chip, JSON.stringify(found.events)).toBeNull();
           expect(seconds).toBeLessThan(30);
+          // The refusal is the lookup's LAST event: a chip that passes 1080p and cannot encode a larger class has its 1080p pass first.
           expect(results.length).toBeGreaterThan(0);
           expect(
-            results.every(
-              (result) =>
-                result === "no_device" || result === "encode_failed" || result === "driver_too_old",
-            ),
+            results
+              .slice(-1)
+              .every(
+                (result) =>
+                  result === "no_device" ||
+                  result === "encode_failed" ||
+                  result === "driver_too_old",
+              ),
           ).toBe(true);
         } else {
           // A chip that encodes is judged on its picture: never refused as missing, broken, too old a driver or too slow.

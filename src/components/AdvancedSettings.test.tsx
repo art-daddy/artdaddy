@@ -664,20 +664,43 @@ describe("the Graphics chip row", () => {
       expect(sizesTested().every((size) => size.includes("3840x2160"))).toBe(true);
     });
 
-    it("follows the shown rate: 4K at 60 is a picture no chip serves, and shown at 30 it is one", async () => {
+    it("follows the shown rate: 4K at 60 is tested at 60 frames a second, and shown at 30 it is tested at 30", async () => {
       pc([amd]);
       const uhd60 = { width: 3840, height: 2160, fps: 60 };
       const own = chipProps({ workload: uhd60, fps: null });
+      const first = render(<AdvancedSettings {...props({ chip: own })} />);
+      await waitFor(() => expect(own.onDrawn).toHaveBeenCalledWith(true));
+      expect(own.onDrawn).not.toHaveBeenCalledWith(false);
+      await waitFor(() => expect(note().textContent).not.toBe(NOTES.checking));
+      expect(sizesTested().some((size) => size.includes("size=3840x2160:rate=60"))).toBe(true);
+      expect(sizesTested().some((size) => size.includes("size=3840x2160:rate=30"))).toBe(false);
+      first.unmount();
+
+      __resetChipTests();
+      pc([amd]);
+      const slower = chipProps({ workload: uhd60, fps: 30 });
+      render(<AdvancedSettings {...props({ chip: slower })} />);
+      await waitFor(() => expect(slower.onDrawn).toHaveBeenCalledWith(true));
+      expect(slower.onDrawn).not.toHaveBeenCalledWith(false);
+      await waitFor(() => expect(note().textContent).not.toBe(NOTES.checking));
+      expect(sizesTested().some((size) => size.includes("size=3840x2160:rate=30"))).toBe(true);
+      expect(sizesTested().some((size) => size.includes("size=3840x2160:rate=60"))).toBe(false);
+    });
+
+    it("follows the shown size for a picture no chip serves: an 8K project is not tested, and shown at 1080p it is", async () => {
+      pc([amd]);
+      const uhd8 = { width: 7680, height: 4320, fps: 30 };
+      const own = chipProps({ workload: uhd8 });
       const first = render(<AdvancedSettings {...props({ chip: own })} />);
       await waitFor(() => expect(own.onDrawn).toHaveBeenCalledWith(false));
       expect(own.onDrawn).not.toHaveBeenCalledWith(true);
       expect(runCapabilityProbe).not.toHaveBeenCalled();
       first.unmount();
 
-      const slower = chipProps({ workload: uhd60, fps: 30 });
-      render(<AdvancedSettings {...props({ chip: slower })} />);
-      await waitFor(() => expect(slower.onDrawn).toHaveBeenCalledWith(true));
-      expect(slower.onDrawn).not.toHaveBeenCalledWith(false);
+      const smaller = chipProps({ workload: uhd8, resolution: "1080p" });
+      render(<AdvancedSettings {...props({ chip: smaller })} />);
+      await waitFor(() => expect(smaller.onDrawn).toHaveBeenCalledWith(true));
+      expect(smaller.onDrawn).not.toHaveBeenCalledWith(false);
       await waitFor(() => expect(sizesTested().length).toBeGreaterThan(0));
     });
   });

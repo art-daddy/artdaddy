@@ -24,7 +24,7 @@ import {
 import { joinPath } from "../tools/store";
 import { ensureTimeline } from "./engine";
 import { chipEncodeArgs } from "./chipTest";
-import { CHIP_PREFERENCE, type ChipMaker } from "./exportEncoder";
+import { CHIP_PREFERENCE, type ChipMaker, type SizeClass } from "./exportEncoder";
 import { listExportRecords, whenExportEnds, whenExportsSettle } from "./exportQueue";
 import { setCanvasTool } from "./ops";
 import { addClipsTool } from "./placement";
@@ -38,7 +38,7 @@ vi.mock("./chipTest", async (importOriginal) => {
   const real = await importOriginal<typeof import("./chipTest")>();
   return {
     ...real,
-    findChip: vi.fn(async (sizeClass: "hd" | "uhd") => ({
+    findChip: vi.fn(async (sizeClass: SizeClass) => ({
       chip: state.maker
         ? {
             maker: state.maker,
