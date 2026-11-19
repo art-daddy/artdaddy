@@ -425,7 +425,7 @@ describe("with the verdict of the stall rule (B6)", () => {
 });
 
 describe("the switch for the help (S2)", () => {
-  it("draws nothing of its own with the switch off: 0.27.0's card, line for line, while the render is slow and while it stands still", async () => {
+  it("draws nothing of its own with the switch off: 0.27.0's card, line for line apart from the time left, while the render is slow and while it stands still", async () => {
     __setExportFlag("export_help", false);
     const g = gated();
     await start("one.mp4", g.wait);

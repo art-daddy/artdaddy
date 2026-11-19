@@ -218,7 +218,7 @@ describe("how long is left, as a number", () => {
       expect(timeLeftSeconds(live({ etaSec }), T0 + 20_000)).toBeNull();
   });
 
-  it("is the same answer the status line gives: it says a time left exactly when there is one", () => {
+  it("says no time left for a feed that carries no answer of the rule, whatever the render's own raw guess, the stage or the silence", () => {
     fc.assert(
       fc.property(
         fc.constantFrom("queued", "preparing", "rendering", "checking", "saving" as const),
@@ -231,11 +231,8 @@ describe("how long is left, as a number", () => {
         (stage, etaSec, quiet) => {
           const now = T0 + 500_000;
           const facts = live({ stage, etaSec, lastMoveAt: now - quiet * 1000 });
-          const said = describeLiveStatus(facts, now).includes(" left");
-          const left = timeLeftSeconds(facts, now);
-          // A time can round to nothing worth saying (under a second), but a said time is always a number.
-          if (said) expect(left).not.toBeNull();
-          if (left === null) expect(said).toBe(false);
+          // The raw guess is the banner's and the assistant's projection, not the line's: the line says a time left only for an answer of the rule, and these feeds carry none.
+          expect(describeLiveStatus(facts, now)).not.toContain(" left");
         },
       ),
       { numRuns: 400 },

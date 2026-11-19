@@ -6,9 +6,11 @@
 //   - a question that needs the person, once they have put the dialog away ("Answer in chat"): the same
 //     record the dialog shows, so answering in either closes both. While the dialog is on screen it is
 //     modal and covers this card, so the card says nothing about the question then.
-//   - every running export: its name, a bar, one line saying where it is (refreshed by a clock, so it
-//     never goes stale), what it was expected to take (in the words the Export dialog used before the
-//     click), and Cancel. More than one can be running when the next export's turn has begun
+//   - every running export: its name, a bar, one line saying where it is and how long is left (refreshed by a clock, so it
+//     never goes stale; the time left is the answer of the rule that reads the render's pace: a figure, "Finishing" or
+//     "taking longer than expected", the same one the Export dialog and the assistant's list give), what it was expected to take
+//     when earlier exports on this PC say so (in the words the Export dialog used before the click; a guess is not shown here),
+//     and Cancel. More than one can be running when the next export's turn has begun
 //     while the last one's file is still being checked or saved; each has its own feed.
 //   - the exports waiting behind it, with their place in line
 //   - how the last ones ended, in plain words
