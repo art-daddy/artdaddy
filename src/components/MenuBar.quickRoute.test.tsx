@@ -7,6 +7,12 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// These tests are about the Quality | Fast row, so they hold the choice offered whatever the constant says (the real dialog without it is held by ExportDialog.noChoiceConstant.test.tsx).
+vi.mock("../timeline/exportChoiceView", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../timeline/exportChoiceView")>()),
+  FAST_CHOICE_OFFERED: true,
+}));
+
 const ed = {
   selection: null as string | null,
   clipboard: null as unknown,
