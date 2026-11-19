@@ -6,7 +6,9 @@
 //   Fast = the picture one rung below the project's by its SHORT side (2160, 1080, 720, 480; none at 480 or less), at most 30 frames a second
 //   (60 gives 30, 50 gives 25, 48 gives 24; never raised), Medium quality, and the encoder is the graphics chip if it passed the app's own test and
 //   the person's switch is not Off, else the processor's lighter setting (x264 `-preset veryfast`). A lever the person set (`explicit`) is never
-//   overridden. A call without a slot (the chat and MCP doors) is Quality in every byte.
+//   overridden. A call without a slot (the chat and MCP doors) is Quality's picture (the project's own size, rate and frames), and its encoder is the app's own rule, the
+//   one the Export dialog as it ships also gets (it sends no Mode pick): the graphics chip if it passed the app's own test, else x264 at its default speed. Only an explicit
+//   Quality pick (the 0.28.0 Mode row, `exportMode: "quality"`) is x264 whatever the chip.
 // No expected number is computed with the code under test: every size, rate, frame count and x264 option below is written out. Each case says which
 // two artifacts it compares. FAST_SMOKE_COMMANDS=1 also prints every command and the whole x264 text of every file.
 //   npx vitest run --config vitest.smoke.config.ts src/timeline/exportFast.smoke.e2e.ts
@@ -436,6 +438,28 @@ async function expectEncoder(made: Delivered, how: { fast: boolean; chipOff?: bo
   );
 }
 
+/** The encoder a file's command must name, and what the file itself shows, for an export that asked for neither a Mode nor Fast (the chat and MCP doors, a Fast slot the server's
+ *  switch took away, and the Export dialog as it ships): the app's own rule, the chip if this PC's chip passed the app's own test, else x264 at its default speed (never Fast's
+ *  lighter setting). The oracle for this PC is the app's chip lookup, run once; `exportOf` has already read the file's bytes against the command (x264's text only for x264). */
+async function expectAppsOwnEncoder(made: Delivered) {
+  const found = await pcChip();
+  const [codec, preset] = [flag(made.command, "-c:v"), flag(made.command, "-preset")];
+  if (found.chip) {
+    expect(codec, `${made.name}: the chip that passed the app's test`).toBe(
+      CHIP_CODEC[found.chip.maker],
+    );
+    expect(preset, `${made.name}: a chip is not given the processor's setting`).not.toBe(
+      "veryfast",
+    );
+    expect(made.x264, `${made.name}: a chip's file carries no x264 text`).toBeNull();
+    return;
+  }
+  expect(codec, `${made.name}: no chip passed, so the processor`).toBe("libx264");
+  expect(preset, `${made.name}: x264's own default speed, not Fast's`).toBeUndefined();
+  expect(made.x264, `${made.name}: the file carries x264's own text`).not.toBeNull();
+  expect(speedOf(made.x264!), `${made.name}: the speed x264 says it ran at`).toBe("medium");
+}
+
 const picture = (made: Delivered) => ({
   width: made.facts.width,
   height: made.facts.height,
@@ -627,9 +651,12 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
     for (const made of [high, untouched]) await expectEncoder(made, { fast: true, chipOff: true });
   });
 
-  it("E. the chat and MCP doors never take Fast: no slot is Quality in every byte, with the switch on, and a Fast slot with the switch off is too", async () => {
-    // The two artifacts: Quality's delivered file and the file the same call gets with no slot (the MCP door) and with a Fast slot while the server's switch is off:
-    // the sizes, the rates and the frames decoded from each, and the commands the tool handed the process (the same, but for the staging file's name).
+  it("E. the chat and MCP doors never take Fast: with no slot, and with a Fast slot while the server's switch is off, the file is Quality's picture, made by the app's own encoder rule", async () => {
+    // The artifacts: Quality's delivered file (the explicit Quality pick, x264 at its default speed: the baseline for the picture), the files the same call gets with no slot (the MCP door)
+    // and with a Fast slot while the server's switch is off, and Fast's file for the same call; the sizes, the rates and the frames decoded from each, the commands the tool handed the
+    // process, and the encoder each file says it was made by. A call that sends no Mode pick (these two, and the Export dialog as it ships) is the app's own request: the encoder is the
+    // graphics chip if this PC's chip passed the app's test, else x264 at its default speed (Fast's own rule is held by the cases above). So the two files are Quality's picture on every PC,
+    // and Quality's bytes only where no chip passed.
     const p = await p720at60();
     const quality = await quality60();
     const mcp = await exportOf(p, "mcp", QUALITY, { surface: "mcp" });
@@ -642,19 +669,28 @@ describe.skipIf(!FF || !FP)("Fast and Quality, on the files the real export tool
     }
 
     near(quality.facts.frames, 120, 2, "Quality's frames at 60 fps");
+    await expectEncoder(quality, { fast: false });
     for (const made of [mcp, off]) {
+      // The project's own picture, as Quality's is: never Fast's size, rate or frame count.
       expect(picture(made), made.name).toEqual({ width: 1280, height: 720, rate: 60 });
       expect(made.facts.frames, `${made.name}: frames`).toBe(quality.facts.frames);
       expectSameVideo(quality, made, 1 / 60);
-      expect(scrubbed(made.command), `${made.name}: the command, Quality's`).toEqual(
-        scrubbed(quality.command),
-      );
-      await expectEncoder(made, { fast: false });
+      await expectAppsOwnEncoder(made);
     }
-    // Equal is no proof if both are empty: the same call with a Fast slot and the switch on is another file.
+    // Both are the app's own rule, so one command (but for the staging file's name): a Fast slot the switch took away is the door with no slot.
+    expect(
+      scrubbed(off.command),
+      "a Fast slot with the switch off is the MCP door's command",
+    ).toEqual(scrubbed(mcp.command));
+    // Equal is no proof if both are empty, or both are Fast's: the same call with a Fast slot and the switch on is another file and another command.
     const fast = (await slotOnly60()).auto;
     expect(picture(fast)).toEqual({ width: 854, height: 480, rate: 30 });
-    expect(scrubbed(fast.command)).not.toEqual(scrubbed(quality.command));
+    expect(scrubbed(fast.command), "Fast's command is not the MCP door's").not.toEqual(
+      scrubbed(mcp.command),
+    );
+    expect(scrubbed(fast.command), "Fast's command is not Quality's").not.toEqual(
+      scrubbed(quality.command),
+    );
   });
 
   it("F. the encoder, from the file itself: the chip if this PC's chip passed the app's test, else x264 veryfast; Quality is x264 at its default speed", async () => {
