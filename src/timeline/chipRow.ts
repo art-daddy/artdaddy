@@ -61,6 +61,21 @@ const ACTIONS: Readonly<Record<Exclude<ChipRowState, "none">, ChipRowAction | nu
 
 const hidden = (): ChipRowModel => ({ state: "none", visible: false, note: null, action: null });
 
+/** What Off costs, said after the Off note where the chip would have been used: the one thing a person is not otherwise told when they switch off a chip that was doing them good. "Usually", because
+ *  on some PCs the chip is not faster. */
+export const CHIP_OFF_COST = "Without the graphics chip, exports are usually slower.";
+
+/** Whether the chip, left on Auto, would be used for this picture on this PC: it passed its test, nothing has set it aside, the server allows it and the picture is in a size class it serves. Switching
+ *  Off costs speed exactly there; where the chip would not have been used anyway, the Off note says nothing of speed. */
+function wouldBeUsed(input: Partial<Record<keyof ChipRowInput, unknown>>): boolean {
+  return (
+    input.verdict === "passed" &&
+    input.setAside !== true &&
+    input.flagsOn === true &&
+    input.sizeServed === true
+  );
+}
+
 /** The state the row is in when it is drawn. Off wins over everything (never tested, offered or used); a chip set aside is not
  *  tested again either; a test that is running beats an older answer (it may be for another picture size); an answer that has
  *  not come yet is shown as checking. */
@@ -89,7 +104,11 @@ export function chipRowModel(input: ChipRowInput): ChipRowModel {
     )
       return hidden();
     const state = stateOf(fields);
-    return { state, visible: true, note: CHIP_ROW_NOTES[state], action: ACTIONS[state] };
+    const note =
+      state === "off" && wouldBeUsed(fields)
+        ? `${CHIP_ROW_NOTES.off} ${CHIP_OFF_COST}`
+        : CHIP_ROW_NOTES[state];
+    return { state, visible: true, note, action: ACTIONS[state] };
   } catch {
     return hidden();
   }

@@ -204,6 +204,46 @@ describe("the Export dialog and the Graphics chip row", () => {
       "Off: the graphics chip is not tested, offered or used on this PC.",
     );
   });
+  it("tells the person, in the Off note, that exports are usually slower without the chip once it passed, and takes the sentence away with Auto", async () => {
+    pcWith([amd]);
+    open();
+    await screen.findByRole("radiogroup", { name: "Graphics chip" });
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note")).toHaveTextContent(/^Auto: used on this PC\./),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(
+        "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor. Without the graphics chip, exports are usually slower.",
+      ),
+    );
+    expect(screen.getAllByText(/exports are usually slower/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note")).toHaveTextContent(/^Auto: used on this PC\./),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
+
+  it("says nothing of speed on a PC with no chip, and where Off was stored before the chip was ever tested", async () => {
+    pcWith([]);
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    const bare = open();
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+    expect(screen.queryByTestId("chip-row")).toBeNull();
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+    bare.unmount();
+
+    pcWith([amd]);
+    open();
+    await waitFor(() =>
+      expect(screen.getByTestId("chip-row-note").textContent).toBe(
+        "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
+      ),
+    );
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
 });
 
 // The Graphics chip row and the old Mode row (Full quality / Fast) speak for the same chip: where the chip row is drawn the dialog leaves the Mode row out, with what it says under it; where the chip row is not

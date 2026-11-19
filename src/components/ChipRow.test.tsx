@@ -449,3 +449,127 @@ describe("the hint about Intel graphics that may be switched off in the BIOS", (
     expect(processorName).not.toHaveBeenCalled();
   });
 });
+
+// What Off costs. A person who switches off a chip that was doing them good is told so in the row's own note: exports are usually slower without it. The sentence is for the Off of a chip that passed and would have
+// been used here; where the chip would not have been used anyway (no answer yet, did not pass, set aside, the server's switches, a picture size it does not serve) the row says nothing of speed.
+describe("what Off costs, said in the Off note", () => {
+  const OFF_COST = "Without the graphics chip, exports are usually slower.";
+  const OFF_WITH_COST = `${CHIP_ROW_NOTES.off} ${OFF_COST}`;
+  /** A chip that passed and is remembered: a row that has come and gone, the PC unchanged. */
+  const rememberAPass = async () => {
+    pc([amd]);
+    const first = render(<ChipRow />);
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
+    first.unmount();
+  };
+
+  it("is said in the same note once a chip passed and the person switches it Off, and Auto takes it away again", async () => {
+    pc([amd]);
+    render(<ChipRow />);
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
+    expect(note().textContent).not.toContain(OFF_COST);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(note().textContent).toBe(OFF_WITH_COST));
+    // one voice: the warning is a sentence of the row's own note, not a second line
+    expect(screen.getAllByTestId("chip-row-note")).toHaveLength(1);
+    expect(screen.getAllByText(/exports are usually slower/)).toHaveLength(1);
+    await settled();
+    expect(note().textContent).toBe(OFF_WITH_COST);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_passed));
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
+
+  it("is there at once when the dialog opens on a person's Off for a chip that passed earlier, and nothing is tested", async () => {
+    await rememberAPass();
+    const tested = chipCalls().length;
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    render(<ChipRow />);
+    await waitFor(() => expect(note().textContent).toBe(OFF_WITH_COST));
+    await settled();
+    expect(chipCalls().length).toBe(tested);
+  });
+
+  it("says nothing of speed where nothing is known: Off before the chip was ever tested", async () => {
+    pc([amd]);
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    render(<ChipRow />);
+    await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+    await settled();
+    expect(note().textContent).toBe(CHIP_ROW_NOTES.off);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("says nothing of speed where the chip did not pass: Off changes nothing there", async () => {
+    pc([amd], { chip: "fail" });
+    render(<ChipRow />);
+    await waitFor(() => expect(note()).toHaveTextContent(CHIP_ROW_NOTES.auto_not_passed));
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+    await settled();
+    expect(note().textContent).toBe(CHIP_ROW_NOTES.off);
+  });
+
+  it("says nothing of speed where the chip is set aside for a day: it would not be used anyway", async () => {
+    await rememberAPass();
+    markChipSuspect(amd);
+    render(<ChipRow />);
+    await waitFor(() => expect(note().textContent).toContain("set aside for a day"));
+    fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+    await settled();
+    expect(note().textContent).toBe(CHIP_ROW_NOTES.off);
+  });
+
+  it.each([
+    ["the server's switch for choosing the chip", "chip_default"],
+    ["the server's switch for this maker", "chip_amd"],
+  ] as const)(
+    "says nothing of speed with %s off: the chip would not be chosen anyway",
+    async (_why, flag) => {
+      await rememberAPass();
+      __setExportFlag(flag, false);
+      localStorage.setItem(CHIP_PREF_KEY, "off");
+      render(<ChipRow />);
+      await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+      await settled();
+      expect(note().textContent).toBe(CHIP_ROW_NOTES.off);
+    },
+  );
+
+  it("says it with the server's switch for Quick export off too: that switch decides the row, not whether the chip is used", async () => {
+    await rememberAPass();
+    __setExportFlag("quick_export", false);
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    render(<ChipRow />);
+    await waitFor(() => expect(note().textContent).toBe(OFF_WITH_COST));
+  });
+
+  it("follows the picture's size while Off: said where the chip would serve the picture, not where it never does, and again when the size comes back", async () => {
+    await rememberAPass();
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    const huge = { width: 7680, height: 4320, fps: 30 };
+    const view = render(<ChipRow workload={huge} resolution="source" />);
+    await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+    await settled();
+    expect(note().textContent).toBe(CHIP_ROW_NOTES.off); // 8K: the processor makes it, so Off costs nothing
+
+    view.rerender(<ChipRow workload={huge} resolution="1080p" />);
+    await waitFor(() => expect(note().textContent).toBe(OFF_WITH_COST));
+
+    view.rerender(<ChipRow workload={huge} resolution="source" />);
+    await waitFor(() => expect(note().textContent).toBe(CHIP_ROW_NOTES.off));
+  });
+
+  it("is not drawn, and nothing is said, on a PC with no chip", async () => {
+    pc([]);
+    localStorage.setItem(CHIP_PREF_KEY, "off");
+    const { container } = render(<ChipRow />);
+    await settled();
+    await settled();
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
+});

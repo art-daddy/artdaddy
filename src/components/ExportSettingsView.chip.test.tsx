@@ -1,7 +1,7 @@
 // T11 and K1 of the D2 UI spec (section 5 and risk K1 / finding F3): the Graphics chip row inside the closed door.
 // The chip row's FIRST look decides what Quality sends (`mode` is null once the row has answered, "quality" while it has not), so the row must be MOUNTED while the door is closed and only hidden. This file holds:
 //  - the row is inside the region `export-advanced`, drawn and asked (the capability probe ran) before anybody opened the door, and not visible until the door opens; no chip found: no row; no project: no row, no test;
-//  - the row's note: the owner's sentence for "passed", the 0.28.0 words for the other four states (written out here, not read from chipRow.ts);
+//  - the row's note: the owner's sentence for "passed", the 0.28.0 words for the other four states (written out here, not read from chipRow.ts), and after a pass the Off note with the sentence about what Off costs;
 //  - Off is written to the per-PC switch (artdaddy.chipPref.v1), the row is still there in a view mounted again so that Off can be undone, and what Export sends is identical for Auto and Off;
 //  - the orderings of the chip row's first look and the app's look (either first, either never, no chip at all): what Export sends equals what the 0.28.0 dialog sends at every press.
 // Mutants this file must kill: the chip row rendered only while the door is open; the chip row unmounted and mounted again by the door; `mode` read from a chip row that is not mounted; Off changing the object; the 0.28.0
@@ -67,6 +67,9 @@ const NOTES = {
   setAside:
     "The graphics chip stopped an export on this PC, so it is set aside for a day. Try it again now",
   off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
+  /** Off where a chip passed its test: the same note and the owner's sentence about what Off costs. */
+  offSlower:
+    "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor. Without the graphics chip, exports are usually slower.",
 } as const;
 
 type Resources = Awaited<ReturnType<typeof resolveExportResources>>;
@@ -311,7 +314,7 @@ describe("T11: Off is the person's per-PC switch and changes nothing that is sen
     const asked = vi.mocked(decideExportEncoder).mock.calls.length;
     await first.user.click(screen.getByRole("radio", { name: "Off" }));
     expect(localStorage.getItem(CHIP_PREF)).toBe("off");
-    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await waitFor(() => expect(note().textContent).toBe(NOTES.offSlower));
     // the app is asked about the encoder again when the switch changes, and its answer is in before Export is pressed
     await waitFor(() =>
       expect(vi.mocked(decideExportEncoder).mock.calls.length).toBeGreaterThan(asked),
@@ -326,7 +329,7 @@ describe("T11: Off is the person's per-PC switch and changes nothing that is sen
 
     // a view mounted again: the person's Off is still there to be undone
     const second = mount();
-    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await waitFor(() => expect(note().textContent).toBe(NOTES.offSlower));
     await second.user.click(door());
     expect(screen.getByRole("radio", { name: "Off" })).toBeChecked();
     await second.user.click(screen.getByRole("radio", { name: "Auto" }));
@@ -343,6 +346,86 @@ describe("T11: Off is the person's per-PC switch and changes nothing that is sen
     mount({ ...PROJECT, width: 3840, height: 2160, fps: 60 });
     await waitFor(() => expect(note().textContent).toBe(NOTES.off));
     expect(screen.getByRole("radio", { name: "Auto", hidden: true })).not.toBeChecked();
+  });
+});
+
+// What Off costs is said in the row's own note, behind the door like the row: the person who switches off a chip that was doing them good is told that exports are usually slower without it.
+describe("T11: Off says what it costs where the chip passed, and nowhere else", () => {
+  it("adds the sentence to the Off note once the chip passed, in the one note behind the door, and Auto takes it away", async () => {
+    pcWith([amd]);
+    const { user } = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
+    await user.click(door());
+    await user.click(screen.getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(note().textContent).toBe(NOTES.offSlower));
+    expect(within(region()).getAllByText(/usually slower/)).toHaveLength(1);
+    expect(screen.getAllByTestId("chip-row-note")).toHaveLength(1);
+    expect(note()).toBeVisible();
+
+    await user.click(screen.getByRole("radio", { name: "Auto" }));
+    await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
+    expect(screen.queryByText(/usually slower/)).toBeNull();
+  });
+
+  it("says it in a view opened on a stored Off after a pass", async () => {
+    pcWith([amd]);
+    const first = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
+    first.unmount();
+
+    localStorage.setItem(CHIP_PREF, "off");
+    mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.offSlower));
+  });
+
+  it("says nothing of speed where Off changes nothing: the chip is set aside, did not pass, or was never tested", async () => {
+    // set aside after a pass
+    pcWith([amd]);
+    const first = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.passed));
+    first.unmount();
+    markChipSuspect(amd);
+    localStorage.setItem(CHIP_PREF, "off");
+    const aside = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await settleAll();
+    expect(note().textContent).toBe(NOTES.off);
+    aside.unmount();
+
+    // a chip that failed its test
+    localStorage.clear();
+    __resetChipTests();
+    pcWith([amd], { behaviour: { chip: "fail" } });
+    const failed = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.notPassed));
+    failed.unmount();
+    localStorage.setItem(CHIP_PREF, "off");
+    const failedOff = mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await settleAll();
+    expect(note().textContent).toBe(NOTES.off);
+    failedOff.unmount();
+
+    // Off picked before anything was tested
+    localStorage.clear();
+    __resetChipTests();
+    pcWith([amd]);
+    localStorage.setItem(CHIP_PREF, "off");
+    mount();
+    await waitFor(() => expect(note().textContent).toBe(NOTES.off));
+    await settleAll();
+    expect(note().textContent).toBe(NOTES.off);
+  });
+
+  it("says nothing of speed on a PC with no chip: there is no row to say it in", async () => {
+    pcWith([]);
+    localStorage.setItem(CHIP_PREF, "off");
+    const { user } = mount();
+    await settleAll();
+    await user.click(door());
+    await settleAll();
+    expect(screen.queryByTestId("chip-row")).toBeNull();
+    expect(screen.queryByText(/usually slower/)).toBeNull();
   });
 });
 
