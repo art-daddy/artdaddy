@@ -1,7 +1,7 @@
 // The full-quality guard: proof that a change to Quick export moved not one byte of an export that does not name Quick.
 //
 // It makes a SHA-256 of the stable JSON text of what four doors of the exporter produce for a large, fixed table of projects and
-// options, and compares every hash with the fixture the constant `FIXTURE` names (see THREE FIXTURES):
+// options, and compares every hash with the fixture the constant `FIXTURE` names (see FOUR FIXTURES):
 //   A  the command builder, `buildRenderCommand`: the WHOLE plan (arguments, graph, steps, files, facts), not only the arguments, for
 //      ten project shapes on twelve canvases under every option, singly and in pairs and in a seeded sample of everything at once
 //   B  the encoder choice as the export tool makes it, `encoderOptions`, for the requests auto, full and fast: its answer AND the
@@ -15,14 +15,17 @@
 // key; a key that moved is a change in what an export does, to be explained, not blessed. The combined hash is pinned in this file, so
 // the data cannot be replaced without this file saying so in the same diff.
 //
-// THREE FIXTURES. `exportFullGuard.sha256.json` was made once, on 0.28.0 (the client at commit 32df78e3, before any Quick change), and is the
+// FOUR FIXTURES. `exportFullGuard.sha256.json` was made once, on 0.28.0 (the client at commit 32df78e3, before any Quick change), and is the
 // record of what that export did: it is kept untouched and its combined hash is pinned below (OLD_COMBINED). The rule for an export nobody
 // pinned then changed on purpose (the graphics chip is used whenever it passed its test for the picture's size and is not Off), and
 // `exportFullGuard.always.sha256.json` was printed from the tree after that change (ALWAYS_COMBINED), also kept untouched. The chip test
 // then got a third size class (`uhd60`: 3840 x 2160 and smaller pictures of 31 to 60 frames a second, which had no class and so always
 // ran on the processor), so the chip lookup is now made for such a picture, and `exportFullGuard.uhd60.sha256.json` was printed from
-// the tree after that change: it is the one the four sections below compare with. The last two describes read the files from disk and
-// check that what differs between neighbours is what that change can reach and nothing else.
+// the tree after that change (UHD60_COMBINED), also kept untouched. Last, the export tool's reply stopped telling an assistant how long
+// the export is expected to take when that time is a guess from the size of the export (a time worked out from this PC's own earlier
+// exports is told as before): only the words of the reply's note differ, so only section C moves, and `exportFullGuard.noguess.sha256.json`
+// was printed from the tree after that change: it is the one the four sections below compare with. The last three describes read the files
+// from disk and check that what differs between neighbours is what that change can reach and nothing else.
 //
 //   check mode (the default): every hash is recomputed and compared with the fixture: every key present and equal, no key extra.
 //   print mode: EXPORT_GUARD_PRINT=<absolute path of a NEW file> writes the hashes there (UTF-8, LF, keys sorted) and compares
@@ -81,6 +84,7 @@ import type { Rung } from "./exportPlan";
 import {
   __resetExportQueue,
   cancelExport,
+  listExportRecords,
   whenExportEnds,
   whenExportsSettle,
   whenExportTelemetrySettles,
@@ -93,13 +97,16 @@ import { buildRenderCommand, encoderOptions, type RenderPlan } from "./render";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-const FIXTURE = "src/timeline/__fixtures__/exportFullGuard.uhd60.sha256.json";
+const FIXTURE = "src/timeline/__fixtures__/exportFullGuard.noguess.sha256.json";
+const UHD60_FIXTURE = "src/timeline/__fixtures__/exportFullGuard.uhd60.sha256.json";
 const ALWAYS_FIXTURE = "src/timeline/__fixtures__/exportFullGuard.always.sha256.json";
 const OLD_FIXTURE = "src/timeline/__fixtures__/exportFullGuard.sha256.json";
 const PRINT_TO = process.env.EXPORT_GUARD_PRINT;
 const NOTES_TO = process.env.EXPORT_GUARD_NOTES;
-/** The combined hash of the fixture printed after the chip test got its third size class (set once, when the fixture was made; see the header). */
-const PINNED_COMBINED = "bc08c42d43115dfe367f62b03cd2fbdd6f2777701cfbe369ed911b9ef6203715";
+/** The combined hash of the fixture printed after an assistant stopped being told a guessed time (set once, when the fixture was made; see the header). */
+const PINNED_COMBINED = "50880e6bc0b76e27a5e78ef83f394e1cbf926d4e2eb8a36f6866cfa2e3aab36e";
+/** The combined hash of the fixture printed after the chip test got its third size class, before that change (kept as the record; see the header). */
+const UHD60_COMBINED = "bc08c42d43115dfe367f62b03cd2fbdd6f2777701cfbe369ed911b9ef6203715";
 /** The combined hash of the fixture printed after the chip became the rule, before the third size class (kept as the record; see the header). */
 const ALWAYS_COMBINED = "a4e4d59c61535a7fca8c8f5b22418195caffbba86499847ea0bbef56c90bd170";
 /** The combined hash of the fixture made on 0.28.0, which is kept as the record (see the header). */
@@ -228,9 +235,11 @@ function collect(result: Computed, key: string, one: Digest): void {
 
 interface Fixture {
   format: number;
-  /** Only the fixture printed after the rule changed has these two: what it is and the fixture it comes from. */
+  /** Only the fixtures printed after a rule changed have these two: what it is and the fixture it comes from. */
   about?: string;
   derivedFrom?: { file: string; combined: string };
+  /** Only the fixture printed after an assistant stopped being told a guessed time has this: the keys whose reply carried a guess in the fixture before it. */
+  reachedKeys?: string[];
   sections: Record<string, { count: number }>;
   combined: string;
   hashes: Record<string, string>;
@@ -1548,6 +1557,17 @@ async function runC(row: CRow): Promise<Digest> {
     // For the notes file only: the reply's own note, and the hash of the whole record but for that note, so a diff can say that the note's words are all that moved.
     const { note, ...replyBesidesNote } = reply;
     const besides = hashOf({ ...record, reply: scrub({ ...replyBesidesNote }) });
+    // The rule of the reply, checked for EVERY call of the table and not only against the fixture: an assistant is never told a guess, and is told a time exactly where the
+    // admitted export's own expectation is one this PC measured. A refused call has no record and no note.
+    expect(note ?? "", `${row.key}: the reply tells a guess`).not.toMatch(
+      /rough guess|nothing like this/i,
+    );
+    const measured =
+      listExportRecords().find((one) => one.job_id === jobId)?.expected?.guessed === false;
+    expect(
+      typeof note === "string" && /Expected:/.test(note),
+      `${row.key}: the reply says a time that is not one this PC measured, or leaves out one that is`,
+    ).toBe(measured);
     return digest(record, tags, { note: typeof note === "string" ? note : null, besides });
   } finally {
     // End every job the case started, and leave nothing behind for the next one.
@@ -1907,7 +1927,7 @@ const gainsAClass = (p: Picture): boolean => {
 describe("what the third size class moved: the fixture before it against the one printed after it", () => {
   const both = (): { before: Fixture; now: Fixture; moved: string[] } => {
     const before = readFixture(ALWAYS_FIXTURE);
-    const now = readFixture();
+    const now = readFixture(UHD60_FIXTURE);
     const moved = Object.keys(now.hashes)
       .filter((key) => now.hashes[key] !== before.hashes[key])
       .sort();
@@ -1964,5 +1984,76 @@ describe("what the third size class moved: the fixture before it against the one
     });
     expect(lookedUp.length).toBeGreaterThan(0);
     expect(lookedUp.filter((key) => !movedSet.has(key))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What the rule for a guessed time moved: the fixture before it against the one printed after it (both read from disk, nothing recomputed)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** How many keys of each section differ between the fixture before an assistant stopped being told a guessed time and the one printed after it. Only the export tool's
+ *  reply says a time, so only section C moves: the keys whose reply carried a guess, which the new fixture lists (`reachedKeys`). A later change of the rule shows up as
+ *  a change of these numbers. */
+const MOVED_BY_THE_NO_GUESS_RULE: Record<SectionName, number> = { A: 0, B: 0, C: 1824, D: 0 };
+
+describe("what the rule for a guessed time moved: the fixture before it against the one printed after it", () => {
+  const both = (): { before: Fixture; now: Fixture; moved: string[] } => {
+    const before = readFixture(UHD60_FIXTURE);
+    const now = readFixture();
+    const moved = Object.keys(now.hashes)
+      .filter((key) => now.hashes[key] !== before.hashes[key])
+      .sort();
+    return { before, now, moved };
+  };
+  const calls = (now: Fixture): string[] =>
+    Object.keys(now.hashes).filter((key) => key.startsWith("C|"));
+
+  it("keeps the fixture before the rule as the record, and the new one names it as its origin", () => {
+    const { before, now } = both();
+    expect(combinedOf(before.hashes), "the earlier fixture's own lines").toBe(UHD60_COMBINED);
+    expect(before.combined).toBe(UHD60_COMBINED);
+    expect(now.derivedFrom).toEqual({
+      file: "exportFullGuard.uhd60.sha256.json",
+      combined: UHD60_COMBINED,
+    });
+    expect(now.about, "the new fixture says why it exists").toMatch(
+      /stopped being told a time the app marks as a guess/,
+    );
+  });
+
+  it("has the same keys in both, and only the export tool's reply (section C) moved", () => {
+    const { before, now, moved } = both();
+    expect(Object.keys(now.hashes).sort()).toEqual(Object.keys(before.hashes).sort());
+    for (const name of ["A", "B", "D"] as const) expect(movedIn(moved, name)).toEqual([]);
+  });
+
+  it("moved as many keys in each section as the rule reaches", () => {
+    const { moved } = both();
+    expect(Object.fromEntries(SECTIONS.map((name) => [name, movedIn(moved, name).length]))).toEqual(
+      MOVED_BY_THE_NO_GUESS_RULE,
+    );
+  });
+
+  it("moved exactly the keys whose reply carried a guessed expectation, which the new fixture lists, and no other", () => {
+    const { now, moved } = both();
+    expect(now.reachedKeys, "the new fixture lists the keys the rule reached").toBeDefined();
+    expect(moved).toEqual([...now.reachedKeys!].sort());
+    expect(new Set(now.reachedKeys).size, "a key is listed once").toBe(now.reachedKeys!.length);
+  });
+
+  it("moved every call with nothing measured on its PC, and none that a measurement of this PC speaks for", () => {
+    const { now, moved } = both();
+    const movedSet = new Set(moved);
+    // With nothing measured, the time of an admitted export is a guess from its size: its reply carried one, whoever asked and whatever the picture.
+    const unmeasured = calls(now).filter((key) => field(key, "hist") === "none");
+    expect(unmeasured.length).toBeGreaterThan(0);
+    expect(unmeasured.filter((key) => !movedSet.has(key))).toEqual([]);
+    // A measurement of this PC does not speak for every export (another picture, rate or encoder is not what it measured), but where it does the time is told as it was:
+    // some calls with a measurement did not move, and every key that did not move is one of those.
+    const measured = calls(now).filter((key) => field(key, "hist") === "slow");
+    expect(measured.some((key) => !movedSet.has(key))).toBe(true);
+    expect(calls(now).filter((key) => !movedSet.has(key))).toEqual(
+      measured.filter((key) => !movedSet.has(key)),
+    );
   });
 });

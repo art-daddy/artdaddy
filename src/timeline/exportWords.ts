@@ -215,8 +215,8 @@ export function busyNoteForAssistant(quietForSeconds: number): string {
   return `Still working: the processor is busy, it just has not finished a new picture for ${minutes} min. That is normal for a heavy project; do not cancel it for that alone.`;
 }
 
-/** What an export is expected to take: one sentence for the Export dialog before the click, the chat card while it runs,
- *  and an assistant's answer when it starts one, so all three say the same thing. Nothing when there is no time to say.
+/** What an export is expected to take: one sentence for the Export dialog before the click and for the chat card while it runs (the card leaves a guess out).
+ *  Nothing when there is no time to say. An assistant is told it through {@link describeExpectedForAssistant}, which says nothing for a guess.
  *  `all` is for several files run one after another: it names the time in all and no size, which is one file's. */
 export function describeExpected(
   estimate: DialogEstimate | null | undefined,
@@ -230,6 +230,24 @@ export function describeExpected(
     return `Expected: ${span}. A rough guess: nothing like this has been exported on this PC yet.`;
   const size = scope === "all" ? "" : describeExportSize(estimate.finalBytes);
   return `Expected: ${span}${size ? `, a file of ${size}` : ""}, from earlier exports on this PC.`;
+}
+
+/** What an assistant may be told about how long an export is expected to take: what the chat card shows, which is a time worked out from this PC's own earlier
+ *  exports, and nothing when it is a guess from the size of the export (said aloud by an assistant, a guess reads as a promise). The ONE rule of every place that
+ *  hands an expectation to an assistant (the `export` reply, for the whole timeline and for separate files, and the `manage_exports` list), so none of them reads `guessed`
+ *  on its own. Only an expectation marked as measured is told: one with no mark either way is not. Null for nothing to tell. */
+export function expectationForAssistant<E extends { readonly guessed: boolean }>(
+  expectation: E | null | undefined,
+): E | null {
+  return expectation?.guessed === false ? expectation : null;
+}
+
+/** {@link describeExpected} for an assistant: the card's own sentence for a measured time, and nothing for a guess ({@link expectationForAssistant}). */
+export function describeExpectedForAssistant(
+  expectation: DialogEstimate | null | undefined,
+  scope: "file" | "all" = "file",
+): string {
+  return describeExpected(expectationForAssistant(expectation), scope);
 }
 
 /** What the Export dialog's panel says while its own export goes. */

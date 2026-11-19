@@ -3267,7 +3267,7 @@ describe("what an export is expected to take", () => {
     expect(listExportRecords().find((r) => r.job_id === sub.job_id)?.state).toBe("done");
   });
 
-  it("is in the export list for an export that is still going, said as a guess when it is one, and not for one that ended", async () => {
+  it("is in the export list for an export that is still going when this PC measured it, left out when it is a guess, and not there for one that ended", async () => {
     const { fs, store } = await fresh();
     useExportJob.setState({ calibrations: [measuredRun] });
     let release!: () => void;
@@ -3304,10 +3304,15 @@ describe("what an export is expected to take", () => {
     );
     const rows = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
     const row = (id: string) => rows.find((r) => r.job_id === id);
+    // The premise: the second export was admitted with an expectation, and it is a guess. An assistant is not told a guess (said aloud it reads as a
+    // promise), so the list leaves it out: the number and the flag that called it one.
+    expect(guessed.expected).toMatchObject({ guessed: true });
     expect(row(measured.job_id)).toMatchObject({ expected_s: 150 });
     expect(row(measured.job_id)).not.toHaveProperty("expected_guessed");
-    expect(row(guessed.job_id)).toMatchObject({ expected_guessed: true });
-    expect(row(guessed.job_id).expected_s).toBeGreaterThan(0);
+    expect(row(guessed.job_id)).toMatchObject({ state: "queued" });
+    expect(Object.keys(row(guessed.job_id)).filter((key) => key.startsWith("expected"))).toEqual(
+      [],
+    );
     release();
     await whenExportsSettle();
     const after = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];

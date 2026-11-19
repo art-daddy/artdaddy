@@ -3,7 +3,7 @@
 // A user asked for "the 19 separate clips in a dedicated folder" and the agent could only offer a
 // zip of the project. These drive the real tool door (the registry's `export`) on an in-memory
 // disk and judge what lands there, what the queue reports and what wakes the agent.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
@@ -16,6 +16,7 @@ import {
   cancelExport,
   listExportOutcomes,
   listExportRecords,
+  manageExportsTool,
   __resetExportQueue,
   whenExportsSettle,
   whenExportTelemetrySettles,
@@ -24,13 +25,14 @@ import {
   ExportRequestError,
 } from "./exportQueue";
 import { describeExpected } from "./exportWords";
-import { totalExpectation } from "./exportOptions";
+import { totalExpectation, type Expectation } from "./exportOptions";
 import { ExportStory } from "./exportTrace";
 import { exportTool, MAX_EXPORT_MOVES, runWithMoves } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { setClerkTokenProvider } from "../api/auth";
+import { __setHeldOffByBuild } from "../api/exportFlags";
 import { useAuth } from "../store/auth";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import { useExportJob } from "../store/exportJob";
@@ -261,6 +263,22 @@ async function project(
     clips: { a: ids[0], b: ids[1] },
     ctx: { ...base, ...(o.origin ? { origin: AGENT } : {}) },
   };
+}
+
+/** This PC has exported something like `args` once before. What it measured is made a time of one and a half times each export's own length: a time that
+ *  asks no heads-up of any door (nothing is slow, nothing is long), and which every export of the same shape is then expected to take in proportion. */
+async function exportedBefore(p: Setup, args: Record<string, unknown>): Promise<void> {
+  useExportJob.setState({ calibrations: [] });
+  const earlier = (await exportTool({ ...args, output_dir: "earlier" }, p.ctx)) as Any;
+  expect(earlier.ok, earlier.error).toBe(true);
+  await whenExportsSettle();
+  expect(useExportJob.getState().calibrations.length).toBeGreaterThan(0);
+  useExportJob.setState((state) => ({
+    calibrations: state.calibrations.map((c) => ({
+      ...c,
+      elapsedSeconds: c.workload.durationSeconds * 1.5,
+    })),
+  }));
 }
 
 describe("export delivers separate files into a folder", () => {
@@ -544,19 +562,18 @@ describe("export delivers separate files into a folder", () => {
     }
     expect(String(r.note)).toMatch(/watermark/i);
     expect(String(r.note)).toMatch(/no end card/i);
-    // The files run one after another: the answer says how long all of them are expected to take, in the card's own
-    // words, from the same estimates the queue holds for each (a guess, as nothing has been exported here yet).
+    // The files run one after another. Nothing has been exported here yet, so their total is a guess, and an assistant is not told a
+    // guess (said aloud it reads as a promise): the answer says nothing of the time, and nothing else it said is lost.
     const total = totalExpectation(listExportRecords().map((record) => record.expected));
-    expect(total).not.toBeNull();
+    expect(total).toMatchObject({ guessed: true });
     expect(r.note).toBe(
-      "Saving 2 files to 'scenes' in your Downloads folder. Each clip from the timeline carries the ArtDaddy watermark (no end card). " +
-        describeExpected(total, "all"),
+      "Saving 2 files to 'scenes' in your Downloads folder. Each clip from the timeline carries the ArtDaddy watermark (no end card).",
     );
-    expect(String(r.note)).toMatch(/Expected: .+ in all\. A rough guess: /);
     expect(listExportOutcomes().every((x) => x.state === "done")).toBe(true);
   });
 
-  it("says how long the clips are expected to take even when library files are delivered with them, counting only the clips", async () => {
+  it("tells nothing of the time of the clips while it is a guess, even when library files are delivered with them, and still says they are copied as they are", async () => {
+    useExportJob.setState({ calibrations: [] });
     const p = await project();
     const r = (await exportTool(
       { media_refs: ["media_aaa"], clip_ids: [p.clips.a], output_dir: "mixed" },
@@ -565,9 +582,27 @@ describe("export delivers separate files into a folder", () => {
     expect(r.ok, r.error).toBe(true);
     const records = listExportRecords();
     expect(records).toHaveLength(2);
-    // The copy has nothing to estimate; the clip's own estimate is the total.
+    // The copy has nothing to estimate; the clip's own estimate is a guess.
     expect(records[0].expected).toBeUndefined();
-    expect(records[1].expected).toBeDefined();
+    expect(records[1].expected).toMatchObject({ guessed: true });
+    expect(String(r.note)).toContain("Library files are copied as they are.");
+    expect(String(r.note)).not.toMatch(/Expected|rough guess/);
+    await whenExportsSettle();
+  });
+
+  it("says how long the clips are expected to take once this PC has exported such a clip, counting only the clips when library files are delivered with them", async () => {
+    const p = await project();
+    await exportedBefore(p, { clip_ids: [p.clips.a] });
+    const r = (await exportTool(
+      { media_refs: ["media_aaa"], clip_ids: [p.clips.a], output_dir: "mixed" },
+      p.ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    const records = listExportRecords().filter((record) => record.destPath.includes("/mixed/"));
+    expect(records).toHaveLength(2);
+    // The copy has nothing to estimate; the clip's own estimate, worked out from the earlier export, is the total.
+    expect(records[0].expected).toBeUndefined();
+    expect(records[1].expected).toMatchObject({ guessed: false });
     expect(String(r.note)).toContain(describeExpected(records[1].expected, "all"));
     expect(String(r.note)).toContain("Library files are copied as they are.");
     await whenExportsSettle();
@@ -1196,5 +1231,191 @@ describe("starting again where the person chose (Save to)", () => {
       "requested:chat",
     ]);
     expect(words.filter((word: string) => word.startsWith("retry"))).toEqual(["retry:browse"]);
+  });
+});
+
+// An assistant is told what the chat card shows of how long an export will take: a time worked out from this PC's own earlier exports, in the card's words, and
+// nothing for a guess from the size of the export (said aloud, a guess reads as a promise). Every way an assistant can start an export and ask after it is walked
+// here, through the real tool and the real queue: the reply it gets, and the export list it reads while the files are still being made. The build's state is the shipped one.
+describe("what an assistant is told of how long an export will take", () => {
+  const DOORS = ["menu", "chat", "mcp"] as const;
+  type Door = (typeof DOORS)[number];
+  const asked = (p: Setup, door: Door) =>
+    door === "chat"
+      ? { ...p.ctx, origin: AGENT }
+      : door === "mcp"
+        ? { ...p.ctx, surface: "mcp" }
+        : p.ctx;
+  // The words of a guess, and any field that carries one.
+  const GUESS_WORDS = /Expected|rough guess|nothing like this/i;
+
+  beforeEach(() => {
+    __setHeldOffByBuild(true);
+    useExportJob.setState({ calibrations: [] });
+  });
+  afterEach(() => {
+    __setHeldOffByBuild(null);
+    useExportJob.setState({ calibrations: [] });
+  });
+
+  /** What the assistant is handed when it asks: the reply, and the export list read at once, while the files are still being made (the encodes and the copies are held). */
+  async function ask(p: Setup, door: Door, args: Record<string, unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    p.hold.gate = gate;
+    for (const file of ["media_aaa.mp4", "media_bbb.mov"])
+      p.disk.gates.set(`${DIR}/library/${file}`, gate);
+    const reply = (await exportTool(args, asked(p, door) as Any)) as Any;
+    expect(reply.ok, reply.error).toBe(true);
+    const rows = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
+    // The export's own record, for each file of this call.
+    const ids: string[] = Array.isArray(reply.exports)
+      ? reply.exports.map((e: Any) => e.job_id)
+      : [reply.job_id];
+    const records = ids.map((id) => listExportRecords().find((r) => r.job_id === id)!);
+    release();
+    await whenExportsSettle();
+    return { reply, rows: rows.filter((row) => ids.includes(row.job_id)), records };
+  }
+
+  /** The expectation of the files that render (a library file is copied and has none), as the queue holds it. */
+  const expectedOf = (records: Array<{ expected?: Expectation }>) =>
+    totalExpectation(records.filter((r) => r.expected).map((r) => r.expected));
+
+  const everyRowOpen = (rows: Any[]) =>
+    rows.every((row) => row.state === "running" || row.state === "queued");
+
+  describe.each(DOORS)("asked by %s", (door) => {
+    const GUESSED = [
+      { name: "the whole timeline", renders: true, args: () => ({ output_dir: "whole" }) },
+      {
+        name: "one clip",
+        renders: true,
+        args: (p: Setup) => ({ clip_ids: [p.clips.a], output_dir: "one" }),
+      },
+      {
+        name: "two clips",
+        renders: true,
+        args: (p: Setup) => ({ clip_ids: [p.clips.a, p.clips.b], output_dir: "two" }),
+      },
+      {
+        name: "a clip and a library file",
+        renders: true,
+        args: (p: Setup) => ({
+          media_refs: ["media_aaa"],
+          clip_ids: [p.clips.a],
+          output_dir: "both",
+        }),
+      },
+      {
+        name: "library files only",
+        renders: false,
+        args: () => ({ media_refs: ["media_aaa", "media_bbb"], output_dir: "files" }),
+      },
+    ];
+
+    describe("a guess", () => {
+      it.each(GUESSED)("is told nowhere: $name", async ({ renders, args }) => {
+        const p = await project();
+        const { reply, rows, records } = await ask(p, door, args(p));
+        expect(rows.length).toBeGreaterThan(0);
+        expect(everyRowOpen(rows), "the list is read while the files are being made").toBe(true);
+        // The premise: whatever renders was admitted with an expectation, and it is a guess. It is what the assistant is handed that leaves it out.
+        expect(records.some((r) => r.expected !== undefined)).toBe(renders);
+        for (const record of records)
+          if (record.expected) expect(record.expected.guessed).toBe(true);
+        expect(JSON.stringify(reply)).not.toMatch(GUESS_WORDS);
+        for (const row of rows) {
+          expect(Object.keys(row).filter((key) => key.startsWith("expected"))).toEqual([]);
+          expect(JSON.stringify(row)).not.toMatch(GUESS_WORDS);
+        }
+        // What else the reply says is still said.
+        expect(String(reply.note)).toMatch(/Saving|Downloads/);
+      });
+    });
+
+    describe("a time from this PC's own earlier exports", () => {
+      const MEASURED = [
+        {
+          name: "the whole timeline",
+          scope: "file" as const,
+          earlier: () => ({}),
+          args: () => ({ output_dir: "whole" }),
+        },
+        {
+          name: "one clip",
+          scope: "all" as const,
+          earlier: (p: Setup) => ({ clip_ids: [p.clips.a] }),
+          args: (p: Setup) => ({ clip_ids: [p.clips.a], output_dir: "one" }),
+        },
+        {
+          name: "two clips",
+          scope: "all" as const,
+          earlier: (p: Setup) => ({ clip_ids: [p.clips.a, p.clips.b] }),
+          args: (p: Setup) => ({ clip_ids: [p.clips.a, p.clips.b], output_dir: "two" }),
+        },
+        {
+          name: "a clip and a library file",
+          scope: "all" as const,
+          earlier: (p: Setup) => ({ clip_ids: [p.clips.a] }),
+          args: (p: Setup) => ({
+            media_refs: ["media_aaa"],
+            clip_ids: [p.clips.a],
+            output_dir: "both",
+          }),
+        },
+      ];
+
+      it.each(MEASURED)("is told as the card says it: $name", async ({ scope, earlier, args }) => {
+        const p = await project();
+        await exportedBefore(p, earlier(p));
+        const { reply, rows, records } = await ask(p, door, args(p));
+        expect(everyRowOpen(rows), "the list is read while the files are being made").toBe(true);
+        // The premise: what renders was admitted with an expectation from the earlier export, and it is not a guess.
+        const rendered = records.filter((r) => r.expected !== undefined);
+        expect(rendered.length).toBeGreaterThan(0);
+        for (const record of rendered) expect(record.expected).toMatchObject({ guessed: false });
+        // The reply says the card's sentence, once: a file's own time and size for the whole timeline, the time of all of them for several files.
+        const sentence = describeExpected(
+          scope === "file" ? rendered[0].expected : expectedOf(records),
+          scope,
+        );
+        expect(sentence).toMatch(/^Expected: .+, from earlier exports on this PC\.$/);
+        expect(String(reply.note)).toContain(sentence);
+        expect(String(reply.note).split("Expected:")).toHaveLength(2);
+        expect(JSON.stringify(reply)).not.toMatch(/rough guess|nothing like this/i);
+        // The list gives each rendered file's number, without a flag that would call it a guess, and none for a copy.
+        for (const row of rows) {
+          const record = records.find((r) => r.job_id === row.job_id)!;
+          if (record.expected) {
+            expect(row.expected_s).toBe(Math.round(record.expected.seconds));
+            expect(row).not.toHaveProperty("expected_guessed");
+          } else expect(Object.keys(row).filter((key) => key.startsWith("expected"))).toEqual([]);
+        }
+      });
+
+      it("is told nothing of a batch with one part measured and one a guess, and the list keeps the measured part's own time", async () => {
+        const p = await project();
+        // A title over the second clip makes it a picture this PC has measured nothing like: two layers where the first clip has one.
+        const title = (await addTextClipsTool(
+          { entries: [{ content: "Title", timeline_in: 90, timeline_out: 240 }] },
+          p.ctx,
+        )) as Any;
+        expect(title.ok, title.error).toBe(true);
+        await exportedBefore(p, { clip_ids: [p.clips.a] });
+        const { reply, rows, records } = await ask(p, door, {
+          clip_ids: [p.clips.a, p.clips.b],
+          output_dir: "pair",
+        });
+        // The premise: one part is measured and the other is a guess, so the total of the two is a guess.
+        expect(records.map((r) => r.expected?.guessed)).toEqual([false, true]);
+        expect(expectedOf(records)).toMatchObject({ guessed: true });
+        expect(JSON.stringify(reply)).not.toMatch(GUESS_WORDS);
+        const [first, second] = records.map((r) => rows.find((row) => row.job_id === r.job_id)!);
+        expect(first.expected_s).toBe(Math.round(records[0].expected!.seconds));
+        expect(first).not.toHaveProperty("expected_guessed");
+        expect(Object.keys(second).filter((key) => key.startsWith("expected"))).toEqual([]);
+      });
+    });
   });
 });

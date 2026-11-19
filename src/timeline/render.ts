@@ -108,7 +108,7 @@ import {
 } from "./exportQueue";
 import type { RestartLink } from "./exportAttempts";
 import type { ExportStory } from "./exportTrace";
-import { describeExpected } from "./exportWords";
+import { describeExpectedForAssistant } from "./exportWords";
 import type { ExportQuestionKind } from "./exportQuestions";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
@@ -4109,9 +4109,11 @@ export async function exportTimelineTool(
       : folder
         ? `Saving to ${folder.label}.`
         : "";
-  // How long it is expected to take, in the words the card and the Export dialog use: an assistant that started the
-  // export is the one who has to tell the person, and used to be told nothing.
-  const note = [where, brandNote, describeExpected(sub.expected)].filter(Boolean).join(" ");
+  // How long it is expected to take, in the words the card uses: an assistant that started the export is the one who has to tell the
+  // person, and used to be told nothing. Only a time worked out from this PC's own earlier exports is told, never a guess.
+  const note = [where, brandNote, describeExpectedForAssistant(sub.expected)]
+    .filter(Boolean)
+    .join(" ");
   return {
     ok: true,
     status: sub.queue_position > 0 ? "queued" : "exporting",

@@ -118,6 +118,7 @@ import {
   QUIET_SECONDS,
   busyNoteForAssistant,
   describeChipFailure,
+  expectationForAssistant,
   failureOf,
   quietSeconds,
   shownTimeLeftSeconds,
@@ -388,7 +389,8 @@ export interface ExportRecord {
   rung?: 1 | 2;
   /** What the export is expected to take, worked out once as it was admitted ({@link estimateOf}): what the card says
    *  under the status line for the whole run. Absent for an export nothing describes (a copy, one adopted after a
-   *  restart), which is then said nothing about. */
+   *  restart), which is then said nothing about. A guess is kept (the slow watch and the automatic restart read it); the card
+   *  leaves it out, and so does an assistant's list and answer (`expectationForAssistant`, exportWords.ts). */
   expected?: Expectation;
   /** The honest estimate the export was admitted with: its range and where the number came from. `expected` carries its central value for the
    *  readers that only need a number. Absent when the new estimate is off or could not be made. */
@@ -687,6 +689,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
     // A running export that is slower than said: the two facts, and what the assistant is to do about them (not cancel and start again).
     const slow = r.state === "running" && !r.cancelling ? helpRowOf3c(r.job_id) : null;
+    // What was expected of it, as an assistant may be told (expectationForAssistant): while it is going, and only a time worked out from this PC's own earlier exports.
+    const told = isOpen(r) ? expectationForAssistant(r.expected) : null;
     const notes = [
       ...(restartNote ? [restartNote] : []),
       ...(busy === true && quiet >= QUIET_SECONDS ? [busyNoteForAssistant(quiet)] : []),
@@ -715,13 +719,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       // How long an unfinished export has been at it (or waiting), so an agent can judge it.
       ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((now - r.startedAt) / 1000)) } : {}),
       // What it was expected to take when it was admitted (the estimate the card and the `export` answer give), so an
-      // agent can say how long to wait for one it did not start in this call. Said as a guess when it is one.
-      ...(r.expected && isOpen(r)
-        ? {
-            expected_s: Math.round(r.expected.seconds),
-            ...(r.expected.guessed ? { expected_guessed: true } : {}),
-          }
-        : {}),
+      // agent can say how long to wait for one it did not start in this call. A guess is left out, as the card leaves it out.
+      ...(told ? { expected_s: Math.round(told.seconds) } : {}),
       // A cancel was asked and the export has not stopped yet.
       ...(r.cancelling && isOpen(r) ? { cancelling: true } : {}),
       // The setting it runs at, when it is below the normal one: why it may be slower.
@@ -1056,7 +1055,8 @@ export interface ExportSubmission {
   job_id: string;
   /** How many exports are ahead of this one. 0 means it starts immediately. */
   queue_position: number;
-  /** What it is expected to take (the record's own), for the answer to whoever asked; absent when nothing describes it. */
+  /** What it is expected to take (the record's own), for the answer to whoever asked; absent when nothing describes it. It keeps a guess: the answer is made
+   *  with `expectationForAssistant` (exportWords.ts) and says nothing for one. */
   expected?: Expectation;
 }
 
