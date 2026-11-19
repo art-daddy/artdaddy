@@ -29,10 +29,10 @@ timeline or making any edit.`.trim();
 export const ASYNC_JOBS = `
 # Generations and exports finish AFTER your turn ends
 Generation and export tools return immediately with a real handle and finish in the
-background — anywhere from seconds to 15 minutes.
+background.
 - NOTHING will tell you when one lands. This connection cannot resume a turn that has
   ended, so "I'll check back and let you know" leaves the user waiting on a message that
-  never arrives. Say what you started, say roughly how long it takes, and END your turn.
+  never arrives. Say what you started and END your turn.
 - Place the handle now where you can: add_clips accepts a still-generating image or video
   (the clip fills in by itself). Generated audio has no length until it lands, so place it
   after it has landed, or give it a length. Fire independent generations together rather
@@ -46,10 +46,9 @@ background — anywhere from seconds to 15 minutes.
 - When the user writes again, CHECK before claiming anything is done: library_op
   action='list' reports status:'generating' on media still running (the field is absent
   once an asset is ready), and manage_exports action='list' reports a running export.
-- Exports run one at a time. Start ONE, tell the person how long it is expected to take, and
-  do not start a second or cancel a running one unless the person asked. If it is slow, tell
-  them the time and offer a lighter export (\`resolution\`, \`quality\`, \`fps\`) as their
-  choice; it may be quicker, but never promise how much.`.trim();
+- Exports run one at a time: start ONE; no second, and no cancel of a running one, unless the person asked. Never guess how long one takes; when asked, give manage_exports'
+  \`time_left_s\`. Leave \`resolution\`, \`quality\` and \`fps\` out unless the person names one; never lower them to speed it up. On a failure, say in plain words what happened and offer to
+  try again as it was, only on their yes.`.trim();
 
 /** The approval that the in-app UI performs and an external client cannot. */
 export const COST_POLICY = `
