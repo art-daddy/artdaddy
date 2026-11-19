@@ -1,11 +1,27 @@
 // The Export dialog as a SHIPPED build has it. The unit suite's mode is "test", where nothing is held, so a green dialog suite says nothing about a build that holds `estimate_v2` and `pc_check`
-// (api/exportFlags.ts, OFF_IN_THIS_BUILD) and no longer holds `quick_route`. Here the hold is ON (`__setHeldOffByBuild(true)`, as in a production build) and nothing is forced for the Fast choice:
-// the real menu bar opens the dialog, the dialog draws the Quality | Fast choice, and a Fast pick reaches the tool host as the route slot with the flags of what the person set. The tool host
-// is a fake, as in MenuBar.fastWire.test.tsx; the same journey through the real export tool is in timeline/exportFast.journey.test.ts (case 3b) and exportFast.dialog.journey.test.tsx (D).
+// (api/exportFlags.ts, OFF_IN_THIS_BUILD) and no longer holds `quick_route`. Here the hold is ON (`__setHeldOffByBuild(true)`, as in a production build). The Quality | Fast choice is PARKED in this
+// release: `FAST_CHOICE_OFFERED` (timeline/exportChoiceView.ts) is false, so the real dialog draws Quality alone whatever the server's switch says. The choice is parked, not deleted, so its wiring stays held:
+// the first describe forces the constant on, as every other Fast test does (the real dialog without it is also held by ExportDialog.noChoiceConstant.test.tsx), and holds the real menu bar opening the dialog
+// with the choice, a Fast pick reaching the tool host as the route slot with the flags of what the person set, and the server's switch taking the choice away. The last describe reads the constant as the
+// build has it and holds what a person gets today. The tool host is a fake, as in MenuBar.fastWire.test.tsx; the same journey through the real export tool is in timeline/exportFast.journey.test.ts
+// (case 3b) and exportFast.dialog.journey.test.tsx (D).
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// `forced` is the one switch between the two kinds of test below: true (the default, set before every test) holds the choice offered whatever the constant says, as the other Fast tests do with
+// `FAST_CHOICE_OFFERED: true`; the last describe sets it false and the getter then hands back the constant as the build has it.
+const choice = vi.hoisted(() => ({ forced: true }));
+vi.mock("../timeline/exportChoiceView", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../timeline/exportChoiceView")>();
+  return {
+    ...real,
+    get FAST_CHOICE_OFFERED() {
+      return choice.forced ? true : real.FAST_CHOICE_OFFERED;
+    },
+  };
+});
 
 const ed = {
   selection: null as string | null,
@@ -118,13 +134,14 @@ function projectOf(width: number, height: number, fps: number) {
 }
 
 beforeEach(() => {
+  choice.forced = true; // the last describe sets it false to read the constant as the build has it
   ed.selection = null;
   ed.clipboard = null;
   ed.dirty = false;
   ed.timeline = projectOf(1920, 1080, 30) as never;
   authState.status = "locked";
   localStorage.clear();
-  // A shipped build: the hold is on and nothing is forced for the Fast choice (no `__setExportFlag("quick_route", ...)`), so the switch is what the build and the server give it.
+  // A shipped build: the hold is on and the server's switch for Fast is what the build and the server give it (no `__setExportFlag("quick_route", ...)`).
   __resetExportFlags();
   __setHeldOffByBuild(true);
   useExportJob.getState().reset();
@@ -158,8 +175,8 @@ async function openExportDialog(): Promise<ReturnType<typeof userEvent.setup>> {
   return user;
 }
 
-describe("the Export dialog of a shipped build (the hold on the estimate and the speed check, the Fast choice not held)", () => {
-  it("is the state this file means: the estimate and the speed check are off, the Fast choice is on", () => {
+describe("the Export dialog of a shipped build, the parked Fast choice forced on (the hold on the estimate and the speed check; the Fast switch not held)", () => {
+  it("is the state this file means: the estimate and the speed check are held off by the build, the Fast switch is not held and is on", () => {
     expect(isOffInThisBuild("estimate_v2")).toBe(true);
     expect(isOffInThisBuild("pc_check")).toBe(true);
     expect(exportFlag("estimate_v2")).toBe(false);
@@ -212,5 +229,36 @@ describe("the Export dialog of a shipped build (the hold on the estimate and the
     await openExportDialog();
     expect(screen.queryByRole("radiogroup", { name: "export choice" })).toBeNull();
     expect(screen.getByLabelText("resolution")).toBeTruthy();
+  });
+});
+
+// What a person gets TODAY: the constant is read as the build has it (false: the choice is parked, see exportChoiceView.ts), the hold is on, and the server's switch for Fast is on too.
+// This is the shipped path through the real menu bar; ExportDialog.noChoiceConstant.test.tsx holds the same state at the dialog without the menu bar and the hold. The day the choice is offered
+// again, the constant becomes true and this describe is the one that has to change (its Fast tests above already run with it on).
+describe("the Export dialog of a shipped build as it is: the Fast choice is parked (FAST_CHOICE_OFFERED false)", () => {
+  beforeEach(() => {
+    choice.forced = false;
+  });
+
+  it("draws no Quality | Fast choice and no Mode row though the server's switch for Fast is on, and Export hands the tool host Quality's call with no route slot", async () => {
+    expect(exportFlag("quick_route")).toBe(true);
+    const user = await openExportDialog();
+    const parked =
+      "the shipped build draws the Fast choice: FAST_CHOICE_OFFERED is true again, so this describe is out of date";
+    expect(screen.queryByRole("radiogroup", { name: "export choice" }), parked).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Fast" }), parked).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Quality" }), parked).toBeNull();
+    expect(screen.queryByRole("radiogroup", { name: "export mode" })).toBeNull();
+    expect(screen.queryByLabelText("export estimate")).toBeNull();
+    // The dialog is still the dialog: its lists are there and Export is one button.
+    expect(screen.getByLabelText("resolution")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(runTool).toHaveBeenCalledTimes(1));
+    const [name, args, options] = runTool.mock.calls[0];
+    await waitFor(() => expect(useExportJob.getState().phase).toBe("done"));
+    expect(name).toBe("export");
+    expect(args).toEqual({ resolution: "source", quality: "medium" });
+    expect(options.exportRoute).toBeUndefined();
+    expect(options.exportMode).toBeUndefined();
   });
 });
