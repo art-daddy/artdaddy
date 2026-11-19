@@ -4612,7 +4612,13 @@ describe("manage_exports: one call that waits, instead of a polling loop", () =>
     expect(props.wait_seconds?.type).toBe("number");
     expect(props.wait_seconds?.description).toContain(`0 to ${MAX_EXPORT_WAIT_S}`);
     expect(tool.description).toContain(`0 to ${MAX_EXPORT_WAIT_S}`);
-    expect(tool.description).toMatch(/`retry_after_s`/);
-    expect(tool.description).toMatch(/`elapsed_s`/);
+    // What a list row carries, as the description now says it: the time so far, the progress and the time left while it renders, and what happened when it failed. Each is a field the tool
+    // returns, and the tests of this file hold that (elapsed_s above; progress_percent and time_left_s on a running row; failure and failure_code on a failed one).
+    for (const field of ["elapsed_s", "progress_percent", "time_left_s", "failure", "failure_code"])
+      expect(tool.description, field).toContain(`\`${field}\``);
+    // `retry_after_s` is no longer demanded of the description. It used to be: the old text named it and the line "while any export is unfinished the reply carries `retry_after_s` and a `note`".
+    // The description (decision of 19 Nov 2026) tells the model to pass `wait_seconds` instead of polling and does not name it, while the tool still returns it: its value and its absence once
+    // nothing is unfinished are held by "at the bound it names what is still unfinished" and "without a wait it answers at once" above. A field the tool returns and the description leaves
+    // out is a gap in what the model is told, not a failure of the tool, so it is not pinned here.
   });
 });
