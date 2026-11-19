@@ -1248,3 +1248,29 @@ describe("the words of the reachable surfaces carry none of the old names", () =
       }
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The privacy text names the encoder in the owner's words
+// ---------------------------------------------------------------------------------------------------------------------
+// The installer shows src-tauri/PRIVACY.txt, and it says which encoder made the video. It calls the processor's lighter setting what the dialog calls it, never by an old name: a person who reads both finds one
+// name for one thing.
+
+describe("the privacy text names the encoder the way the app does", () => {
+  const PRIVACY = normalised(
+    readFileSync(path.resolve(SRC, "..", "src-tauri", "PRIVACY.txt"), "utf8"),
+  );
+
+  it("says which encoder made the video: your processor, light compression on your processor, or your graphics chip", () => {
+    expect(PRIVACY).toContain(
+      "which encoder made the video: your processor, light compression on your processor, or your graphics chip, with the chip's maker (AMD, NVIDIA or Intel)",
+    );
+  });
+
+  it("carries no retired name and no claim about the picture anywhere, and says the lighter setting once, in the dialog's own name", () => {
+    expect(retiredIn(PRIVACY)).toEqual([]);
+    const name = "light compression";
+    // the dialog says it with this name too (the same two words, from the one words file)
+    expect(D2_WORDS.lightCompressionLine).toContain(name);
+    expect(PRIVACY.split(name)).toHaveLength(2);
+  });
+});
