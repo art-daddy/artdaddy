@@ -640,7 +640,7 @@ describe("C. the flags of the slot are the dialog's word on what the person set,
 describe("D. the switch is read by the tool when it runs, not by the dialog at the click", () => {
   const OFF = [{ name: "switched off on the server", off: "off" as const }];
   it.each(OFF)(
-    "$name: the tool runs what the dialog showed, on the plain encoder, with no route",
+    "$name: the tool runs what the dialog showed, with no route, on the encoder an export nobody pinned gets",
     async ({ off }) => {
       // What the dialog showed for each project (the click happened with the switch on): 1080p at 30 for 4K at 60, 720p at 30 for 1080p at 30, both at Medium.
       const cases: [Canvas, Picture][] = [
@@ -661,15 +661,43 @@ describe("D. the switch is read by the tool when it runs, not by the dialog at t
           const byHand = await observe({ canvas, args: typed, chip, switch: off });
           expect(ran.output, where).toEqual(shown);
           expect(ran.command, where).toEqual(byHand.command);
-          expect(ran.codec, where).toBe("libx264");
+          // The dialog left the encoder to the app and the slot is ignored, so the encoder is the one any export nobody pinned gets: the chip where this PC has one that passed for the picture,
+          // else the processor's plain setting; never the faster setting. Medium is crf 23 on the processor and qp 24 on AMD's chip (the ladder pinned in exportEncoder.test.ts).
+          expect(ran.codec, where).toBe(chip ? "h264_amf" : "libx264");
           expect(after(ran.command, "-preset"), where).toBeUndefined();
-          expect(after(ran.command, "-crf"), where).toBe("23");
+          if (chip) {
+            expect(after(ran.command, "-rc"), where).toBe("cqp");
+            expect(after(ran.command, "-qp_i"), where).toBe("24");
+            expect(after(ran.command, "-crf"), where).toBeUndefined();
+          } else expect(after(ran.command, "-crf"), where).toBe("23");
           expect(ran.running, where).not.toHaveProperty("route");
           expect(ran.done, where).not.toHaveProperty("route");
-          // The same object with the switch on is Fast: not the same command.
+          // The control: the same object with the switch on is Fast, and the record says so. Its command is another one on the processor (the faster setting). On a PC with a chip an export nobody
+          // pinned is already on the chip, so Fast's command can be this one and the route in the record is what tells them apart; the control of the command there is the person's own Full quality,
+          // which is the processor.
           const on = await observe({ canvas, ...call, chip });
-          expect(on.command, where).not.toEqual(ran.command);
           expect(on.running.route, where).toBe("quick");
+          if (chip) {
+            const full = await observe({ canvas, args: typed, chip, switch: off, mode: "quality" });
+            expect([full.codec, after(full.command, "-crf")], where).toEqual(["libx264", "23"]);
+            expect(full.command, where).not.toEqual(ran.command);
+          } else expect(on.command, where).not.toEqual(ran.command);
+          // A slot that would change the picture if it were honoured changes nothing either: this call sets nothing, so with the switch on Fast makes the smaller picture of it; with the switch
+          // off it is the project's own picture, and exactly the command of the same call without the slot.
+          const bare = { resolution: "source", quality: "medium" };
+          const unset = Object.freeze({
+            route: "quick",
+            explicit: Object.freeze({ size: false, fps: false, quality: false }),
+          });
+          expect((await observe({ canvas, args: bare, slot: unset, chip })).output, where).toEqual(
+            shown,
+          );
+          const kept = await observe({ canvas, args: bare, slot: unset, chip, switch: off });
+          const plain = await observe({ canvas, args: bare, chip, switch: off });
+          expect(kept.output, where).toEqual(pic(canvas.w, canvas.h, canvas.fps));
+          expect(kept.command, where).toEqual(plain.command);
+          expect(kept.running, where).not.toHaveProperty("route");
+          expect(kept.done, where).not.toHaveProperty("route");
         }
     },
     300_000,
@@ -696,7 +724,7 @@ describe("E. the chat and MCP doors never take Fast", () => {
     { name: "an outside program over MCP", surface: "mcp" as const },
   ];
   it.each(DOORS)(
-    "$name: no slot, so the project's own picture, or exactly what the arguments say, on Quality's encoder",
+    "$name: no slot, so the project's own picture, or exactly what the arguments say, with no route and no faster setting",
     async ({ surface }) => {
       const shown = callOf(await dialogGives(UHD60, ["fast"])).args;
       for (const chip of [false, true]) {
@@ -706,18 +734,26 @@ describe("E. the chat and MCP doors never take Fast", () => {
         expect(open.output, where).toEqual(pic(3840, 2160, 60));
         expect(open.running, where).not.toHaveProperty("route");
         expect(textOf(open.command), where).not.toContain("veryfast");
-        // The values Fast's dialog showed, sent without the slot: those values and nothing more, never the chip, never the faster setting.
+        // The values Fast's dialog showed, sent without the slot: those values and nothing more, no route and never the faster setting. The encoder is the one any export nobody pinned gets, the
+        // same for the chat and MCP as for the menu: the chip where this PC has one that passed for the picture, else the processor's plain setting (Medium is crf 23, or qp 24 on AMD's chip).
         const asked = await observe({ canvas: UHD60, args: shown, chip, surface });
         expect(asked.output, where).toEqual(pic(1920, 1080, 30));
-        expect(asked.codec, where).toBe("libx264");
+        expect(asked.codec, where).toBe(chip ? "h264_amf" : "libx264");
         expect(textOf(asked.command), where).not.toContain("veryfast");
-        expect(after(asked.command, "-crf"), where).toBe("23");
+        if (chip) {
+          expect(after(asked.command, "-rc"), where).toBe("cqp");
+          expect(after(asked.command, "-qp_i"), where).toBe("24");
+          expect(after(asked.command, "-crf"), where).toBeUndefined();
+        } else expect(after(asked.command, "-crf"), where).toBe("23");
         expect(asked.running, where).not.toHaveProperty("route");
         expect(asked.done, where).not.toHaveProperty("route");
-        // What the slot adds is the encoder alone: on the processor the same call with Fast's slot is this command plus the faster setting.
-        if (!chip) {
-          const slot = callOf(await dialogGives(UHD60, ["fast"])).slot;
-          const fast = await observe({ canvas: UHD60, args: shown, slot, surface });
+        // What the slot adds: on the processor the same call with Fast's slot is this command plus the faster setting. With a chip an export nobody pinned is already on the chip, so the slot
+        // adds no more to the command than the route its record carries (the export of the doors has none).
+        const slot = callOf(await dialogGives(UHD60, ["fast"])).slot;
+        const fast = await observe({ canvas: UHD60, args: shown, slot, chip, surface });
+        expect(fast.running.route, where).toBe("quick");
+        if (chip) expect(fast.codec, where).toBe("h264_amf");
+        else {
           expect(withoutPreset(fast.command)).toEqual(asked.command);
           expect(after(fast.command, "-preset")).toBe("veryfast");
         }

@@ -95,6 +95,18 @@ const wantsRow = (): ExportEncoderDecision =>
     fastSeconds: 240,
     facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
   });
+/** A chip has passed for the picture's size, whatever the length: the app chooses it for the person (`chip_default`), the Mode row is on offer and starts on Fast. */
+const chipChosen = (): ExportEncoderDecision =>
+  decision({
+    mode: "fast",
+    chip: "amd",
+    showRow: true,
+    defaultMode: "fast",
+    reason: "chip_default",
+    fullSeconds: 40,
+    fastSeconds: 15,
+    facts: { encoder: "amd", chip: "amd", reason: "chip_default", tests: [] },
+  });
 
 const sized = (width: number, height: number, fps: number): RenderWorkload => ({
   width,
@@ -112,7 +124,7 @@ const DEFAULT = sized(1080, 1920, 30);
 const LIGHT_LINE =
   "To save time, ArtDaddy will use light compression; the picture may be slightly softer.";
 const CHIP_PASSED_NOTE =
-  "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.";
+  "Auto: used on this PC. The file is usually larger and the picture can differ slightly.";
 
 const settleAll = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 30))));
@@ -505,6 +517,8 @@ describe("T4: what is never drawn, hidden or not, closed or open", () => {
   const LOOKS: [string, ExportEncoderDecision, GraphicsAdapter[]][] = [
     ["an answer that wants the old Mode row, on a PC with no chip row", wantsRow(), []],
     ["an answer that wants the old Mode row, on a PC with a chip", wantsRow(), [amd]],
+    ["an answer that chooses the chip for the person, on a PC with no chip row", chipChosen(), []],
+    ["an answer that chooses the chip for the person, on a PC with a chip", chipChosen(), [amd]],
     ["an answer for the app's lighter setting", decision({ faster: true }), []],
     ["an ordinary answer", decision(), [amd]],
   ];

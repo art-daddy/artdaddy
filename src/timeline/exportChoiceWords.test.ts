@@ -39,7 +39,7 @@ describe("D2_WORDS: the owner's copy, word for word (the spec's strings table)",
       qualityLabel: "Quality",
       qualityName: "quality",
       chipNotePassed:
-        "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.",
+        "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
       chipNotePassedFast:
         "Auto: used on this PC. The file is usually larger and the picture can differ slightly.",
       cancel: "Cancel",

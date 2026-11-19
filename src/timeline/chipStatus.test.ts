@@ -15,7 +15,7 @@ import {
   liftChipSetAside,
   markChipSuspect,
 } from "./chipTest";
-import type { SizeClass } from "./exportEncoder";
+import { SIZE_CLASSES, type SizeClass } from "./exportEncoder";
 
 const FLAGS: readonly ExportFlagName[] = ["chip_amd", "chip_nvidia", "chip_intel", "chip_default"];
 beforeEach(() => {
@@ -141,19 +141,22 @@ describe("what the chip row reads", () => {
     expect((await chipStatusOf("hd", passing.deps)).verdict).toBe("unknown");
   });
 
-  it("says at 4K what the 1080p test said when that failed (4K is offered only to a chip that passed there), and knows nothing until both are in", async () => {
-    const bad = harness([nvidia], { chip: "fail" });
-    await findChip("uhd", { allowRun: true }, bad.deps);
-    const failed = await chipStatusOf("uhd", bad.deps);
-    expect(failed.verdict).toBe("not_passed");
-    expect(failed.adapters[0].result).toBe("encode_failed");
+  it.each(["uhd", "uhd60"] as const)(
+    "says at %s what the 1080p test said when that failed (a 4K class is offered only to a chip that passed there), and knows nothing until both are in",
+    async (sizeClass) => {
+      const bad = harness([nvidia], { chip: "fail" });
+      await findChip(sizeClass, { allowRun: true }, bad.deps);
+      const failed = await chipStatusOf(sizeClass, bad.deps);
+      expect(failed.verdict).toBe("not_passed");
+      expect(failed.adapters[0].result).toBe("encode_failed");
 
-    const good = harness([amd]);
-    await findChip("hd", { allowRun: true }, good.deps);
-    expect(await chipStatusOf("uhd", good.deps)).toMatchObject({ verdict: "unknown" }); // 4K itself not tested yet
-    await findChip("uhd", { allowRun: true }, good.deps);
-    expect(await chipStatusOf("uhd", good.deps)).toMatchObject({ verdict: "passed" });
-  });
+      const good = harness([amd]);
+      await findChip("hd", { allowRun: true }, good.deps);
+      expect(await chipStatusOf(sizeClass, good.deps)).toMatchObject({ verdict: "unknown" }); // 4K itself not tested yet
+      await findChip(sizeClass, { allowRun: true }, good.deps);
+      expect(await chipStatusOf(sizeClass, good.deps)).toMatchObject({ verdict: "passed" });
+    },
+  );
 
   it("never throws: a PC that cannot be asked has no chip, and a damaged memory knows nothing", async () => {
     const h = harness([amd]);
@@ -181,7 +184,7 @@ describe("agrees with the lookup an export asks", () => {
       fc.asyncProperty(
         fc.subarray([amd, nvidia, intel]),
         fc.constantFrom(...behaviours),
-        fc.constantFrom<SizeClass>("hd", "uhd"),
+        fc.constantFrom<SizeClass>(...SIZE_CLASSES),
         fc.array(fc.boolean(), { minLength: 3, maxLength: 3 }),
         fc.array(fc.boolean(), { minLength: 3, maxLength: 3 }),
         fc.boolean(),

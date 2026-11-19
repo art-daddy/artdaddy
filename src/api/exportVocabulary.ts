@@ -93,6 +93,7 @@ export const EXPORT_TRACE_VALUES = [
   "passed",
   "no_device",
   "encode_failed",
+  "driver_too_old",
   "garbled",
   "below_x264",
   "wrong_frames",
@@ -118,7 +119,13 @@ export const EXPORT_STARTERS = ["chat", "elsewhere"] as const;
  *  chip the PC has (the maker only: never a device name or a driver), and why the mode was what it was. */
 export const EXPORT_ENCODERS = ["x264", "x264_fast", "amd", "nvidia", "intel"] as const;
 export const EXPORT_CHIPS = ["amd", "nvidia", "intel"] as const;
-export const EXPORT_MODE_REASONS = ["over_minute", "person", "promise_line", "none"] as const;
+export const EXPORT_MODE_REASONS = [
+  "over_minute",
+  "person",
+  "promise_line",
+  "none",
+  "chip_default",
+] as const;
 /** The run facts and the largest value the server keeps of each (memory in MiB or GiB, time in s). */
 export const EXPORT_FACT_LIMITS = {
   peak_resident_mib: 1_048_576,

@@ -122,19 +122,23 @@ describe("the encoder ids history is kept under", () => {
 });
 
 describe("which size class a picture is tested and used in", () => {
-  it("puts a phone-sized picture, either way up, in the 1080p class and a 4K one in the other", () => {
+  it("puts a phone-sized picture, either way up, in the 1080p class, a 4K one at 30 in the next and a 4K one at 60 in the last", () => {
     expect(sizeClassOf(1080, 1920, 30)).toBe("hd");
     expect(sizeClassOf(1920, 1080, 30)).toBe("hd");
     expect(sizeClassOf(1280, 720, 24)).toBe("hd");
     expect(sizeClassOf(2560, 1440, 30)).toBe("uhd");
     expect(sizeClassOf(2160, 3840, 30)).toBe("uhd");
     expect(sizeClassOf(3840, 2160, 30)).toBe("uhd");
+    expect(sizeClassOf(2160, 3840, 60)).toBe("uhd60");
+    expect(sizeClassOf(3840, 2160, 60)).toBe("uhd60");
     expect(sizeClassOf(2160, 1080, 30)).toBe("uhd"); // an ultra-wide: its long side is past the 1080p class's
   });
 
   it("is no class at all above what the chips were tested at, and for anything that is not a size", () => {
-    expect(sizeClassOf(4096, 2304, 30)).toBeNull(); // more than the 4K class: no maker's limits were checked here
+    expect(sizeClassOf(4096, 2304, 30)).toBeNull(); // more than the 4K classes: no maker's limits were checked here
+    expect(sizeClassOf(4096, 2304, 60)).toBeNull();
     expect(sizeClassOf(7680, 4320, 30)).toBeNull();
+    expect(sizeClassOf(7680, 4320, 60)).toBeNull();
     for (const [w, h] of [
       [0, 100],
       [100, 0],
@@ -146,23 +150,49 @@ describe("which size class a picture is tested and used in", () => {
   });
 
   // Found by review: a class by pixel count alone let a picture with a long side nobody tested (4000 by 500: two million
-  // pixels, a "1080p-class" picture) and a frame rate nobody tested (4K at 60 needs more than H.264 level 5.2 gives) use a
-  // chip that had proved itself at 1080 by 1920 and 30 frames a second.
+  // pixels, a "1080p-class" picture) and a frame rate nobody tested use a chip that had proved itself at 1080 by 1920 and
+  // 30 frames a second.
   it("is no class for a long side, or a frame rate, past what each class was tested at", () => {
     expect(sizeClassOf(4000, 500, 30)).toBeNull();
     expect(sizeClassOf(500, 4000, 30)).toBeNull();
     expect(sizeClassOf(3840, 1080, 30)).toBe("uhd"); // within the 4K class's long side
     expect(sizeClassOf(1920, 1080, 60)).toBe("hd");
-    expect(sizeClassOf(1920, 1080, 61)).toBeNull(); // 1080p120 and the like: not the 1080p class, and past the 4K class's rate
+    expect(sizeClassOf(1920, 1080, 61)).toBeNull(); // 1080p120 and the like: past every class's rate
     expect(sizeClassOf(1920, 1080, 120)).toBeNull();
-    expect(sizeClassOf(3840, 2160, 60)).toBeNull();
-    expect(sizeClassOf(2560, 1440, 31)).toBeNull();
     for (const fps of [0, -30, Number.NaN, Number.POSITIVE_INFINITY])
       expect(sizeClassOf(1920, 1080, fps), `${fps} fps`).toBeNull();
   });
 
+  // Each limit of each class, at it and one step beyond it, with the class the picture falls to written out by hand.
+  it.each([
+    [1920, 1080, 30, "hd"],
+    [1920, 1080, 60, "hd"],
+    [1920, 1080, 61, null],
+    [1921, 1080, 30, "uhd"], // one past the 1080p class's long side
+    [1921, 1080, 60, "uhd60"],
+    [1920, 1081, 30, "uhd"], // one past its pixel count
+    [1920, 1081, 60, "uhd60"],
+    [2560, 1440, 30, "uhd"],
+    [2560, 1440, 31, "uhd60"],
+    [2560, 1440, 60, "uhd60"],
+    [2560, 1440, 61, null],
+    [3840, 2160, 30, "uhd"],
+    [3840, 2160, 31, "uhd60"],
+    [3840, 2160, 60, "uhd60"],
+    [3840, 2160, 61, null],
+    [3841, 2160, 30, null], // one past the 4K classes' long side
+    [3841, 2160, 60, null],
+    [3840, 2161, 30, null], // one past their pixel count
+    [3840, 2161, 60, null],
+    [7680, 4320, 30, null],
+    [7680, 4320, 60, null],
+  ])("puts %i by %i at %i frames a second in %s", (width, height, fps, expected) => {
+    expect(sizeClassOf(width, height, fps)).toBe(expected);
+  });
+
   it("only ever gets larger as the picture, or its frame rate, does", () => {
-    const rank = (c: ReturnType<typeof sizeClassOf>) => (c === "hd" ? 1 : c === "uhd" ? 2 : 3);
+    const rank = (c: ReturnType<typeof sizeClassOf>) =>
+      c === "hd" ? 1 : c === "uhd" ? 2 : c === "uhd60" ? 3 : 4;
     fc.assert(
       fc.property(
         fc.integer({ min: 2, max: 8000 }),
@@ -199,36 +229,44 @@ const base: ChoiceInput = {
 const choose = (over: Partial<ChoiceInput> = {}) => chooseEncoder({ ...base, ...over });
 
 describe("the one rule that decides the encoder", () => {
-  it("shows Fast and selects it for an export that would take over a minute and that the chip would speed up", () => {
-    expect(choose()).toMatchObject({
-      encoder: "amd",
+  it("chooses the chip for the automatic request whatever the estimate says: long, short, on the old line, none, or a chip that saves nothing", () => {
+    // Each of these stayed on the processor under the rule that needed over a minute and a quarter saved; neither is needed now.
+    const estimates: [number | null, number | null][] = [
+      [300, 100],
+      [40, 15],
+      [FAST_DEFAULT_SECONDS, 20],
+      [FAST_DEFAULT_SECONDS + 1, 20],
+      [null, null],
+      [600, 560],
+      [400, 400 * (1 - FAST_MIN_SAVING) + 1],
+      [600, 900],
+    ];
+    for (const [fullSeconds, fastSeconds] of estimates) {
+      const answer = choose({ fullSeconds, fastSeconds });
+      expect(answer, JSON.stringify({ fullSeconds, fastSeconds })).toMatchObject({
+        encoder: "amd",
+        reason: "chip_default",
+        showRow: true,
+        defaultMode: "fast",
+      });
+      expect(answer.preset).toBeUndefined();
+    }
+  });
+
+  it("offers the Mode row wherever a chip is usable and starts it on Fast only where the app chooses the chip for the person", () => {
+    expect(choose()).toMatchObject({ showRow: true, defaultMode: "fast" });
+    expect(choose({ chipDefaultOn: false })).toMatchObject({
       showRow: true,
-      defaultMode: "fast",
-      reason: "over_minute",
+      defaultMode: "quality",
     });
-  });
-
-  it("shows Fast but leaves Full selected for a short export, so short exports stay exactly as they are", () => {
-    const short = choose({ fullSeconds: 40, fastSeconds: 15 });
-    expect(short).toMatchObject({ encoder: "x264", showRow: true, defaultMode: "quality" });
-    // The line is over a minute, not at it.
-    expect(choose({ fullSeconds: FAST_DEFAULT_SECONDS, fastSeconds: 20 }).defaultMode).toBe(
-      "quality",
-    );
-    expect(choose({ fullSeconds: FAST_DEFAULT_SECONDS + 1, fastSeconds: 20 }).defaultMode).toBe(
-      "fast",
-    );
-  });
-
-  it("does not show Fast where it would save less than a quarter of the time", () => {
-    // 8K HEVC: decoding dominates, the chip gains almost nothing (the lab: 19.6 s against 21.2 s).
-    const decodeBound = choose({ fullSeconds: 600, fastSeconds: 560 });
-    expect(decodeBound).toMatchObject({ showRow: false, encoder: "x264" });
-    const edge = choose({ fullSeconds: 400, fastSeconds: 400 * (1 - FAST_MIN_SAVING) });
-    expect(edge.showRow).toBe(true); // exactly a quarter saved is enough
-    expect(choose({ fullSeconds: 400, fastSeconds: 400 * (1 - FAST_MIN_SAVING) + 1 }).showRow).toBe(
-      false,
-    );
+    // The same for the person's own pick: the row is about the chip being there, not about who asked.
+    for (const request of ["full", "fast"] as ModeRequest[]) {
+      expect(choose({ request })).toMatchObject({ showRow: true, defaultMode: "fast" });
+      expect(choose({ request, chipDefaultOn: false })).toMatchObject({
+        showRow: true,
+        defaultMode: "quality",
+      });
+    }
   });
 
   it("never shows or uses a chip that is not there, and falls back to the processor without a word", () => {
@@ -252,16 +290,36 @@ describe("the one rule that decides the encoder", () => {
     });
     expect(slow).toMatchObject({ encoder: "x264", reason: "person" });
     expect(slow.preset).toBeUndefined();
-    // Fast asked for when the row is not on offer is the processor, not an error.
+    // Fast is the chip wherever there is one, even where the estimate says it saves next to nothing: it is the person's pick.
     expect(choose({ request: "fast", fullSeconds: 600, fastSeconds: 590 })).toMatchObject({
+      encoder: "amd",
+      reason: "person",
+    });
+    // And with no chip it is the processor, not an error.
+    expect(choose({ request: "fast", chip: null })).toMatchObject({
       encoder: "x264",
+      reason: "none",
     });
   });
 
-  it("does not choose Fast for the person when the switch for that is off, and still offers it", () => {
+  it("never chooses the chip for the person when the switch is off, and still offers it and honours their pick", () => {
     const off = choose({ chipDefaultOn: false });
-    expect(off).toMatchObject({ encoder: "x264", showRow: true, defaultMode: "quality" });
-    expect(choose({ chipDefaultOn: false, request: "fast" }).encoder).toBe("amd");
+    expect(off).toMatchObject({
+      encoder: "x264",
+      reason: "none",
+      showRow: true,
+      defaultMode: "quality",
+    });
+    for (const [fullSeconds, fastSeconds] of [
+      [300, 100],
+      [40, 15],
+      [null, null],
+    ] as const)
+      expect(choose({ chipDefaultOn: false, fullSeconds, fastSeconds }).encoder).toBe("x264");
+    expect(choose({ chipDefaultOn: false, request: "fast" })).toMatchObject({
+      encoder: "amd",
+      reason: "person",
+    });
   });
 
   it("uses the faster processor setting only for a slow export on a PC with no usable chip", () => {
@@ -282,10 +340,34 @@ describe("the one rule that decides the encoder", () => {
     expect(choose({ ...slow, fullSeconds: 201 }).encoder).toBe("x264_fast");
     // The heavier classes have more room before the line.
     expect(choose({ ...slow, promiseMultiple: 4, fullSeconds: 399 }).encoder).toBe("x264");
-    // Switched off, or a usable chip that is simply not worth it, or an explicit Full.
+    // Switched off, or an explicit Full: the faster setting is not for them.
     expect(choose({ ...slow, fasterX264On: false }).encoder).toBe("x264");
-    expect(choose({ chip: "amd", fullSeconds: 600, fastSeconds: 590 }).encoder).toBe("x264");
     expect(choose({ ...slow, request: "full" }).encoder).toBe("x264");
+    // A usable chip is used whatever the export's length, and never the faster setting: it has no saving test of its own.
+    for (const fullSeconds of [60, 200, 600, 100_000])
+      expect(choose({ chip: "amd", fullSeconds, fastSeconds: fullSeconds })).toMatchObject({
+        encoder: "amd",
+        reason: "chip_default",
+      });
+  });
+
+  it("chooses the processor's faster setting only where it saves at least a quarter of the time, and the chip has no such test", () => {
+    const slow = {
+      chip: null,
+      fastSeconds: null,
+      durationSeconds: 100,
+      promiseMultiple: 2,
+      fullSeconds: 500,
+    };
+    const edge = 500 * (1 - FAST_MIN_SAVING);
+    expect(choose({ ...slow, fasterSeconds: edge }).encoder).toBe("x264_fast");
+    expect(choose({ ...slow, fasterSeconds: edge + 1 }).encoder).toBe("x264");
+    // The same estimates change nothing about a chip.
+    for (const fasterSeconds of [0, edge, edge + 1, 500, null])
+      expect(choose({ ...slow, chip: "amd", fasterSeconds })).toMatchObject({
+        encoder: "amd",
+        reason: "chip_default",
+      });
   });
 
   it("does not take the quality down on a guess unless the guess is plainly over the line", () => {
@@ -319,26 +401,35 @@ describe("the one rule that decides the encoder", () => {
     ).toBe("x264_fast");
   });
 
-  it("never reads an estimate that is not a finite number as a saving", () => {
-    for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, -5]) {
-      expect(choose({ fullSeconds: bad, fastSeconds: bad })).toMatchObject({
-        showRow: false,
-        encoder: "x264",
-      });
-      expect(choose({ fullSeconds: 300, fastSeconds: bad }).showRow).toBe(false);
-      expect(choose({ fullSeconds: bad, fastSeconds: 100 }).showRow).toBe(false);
-      expect(choose({ request: "fast", fullSeconds: bad, fastSeconds: bad }).encoder).toBe("x264");
+  it("takes an estimate that is not a finite number for no information about the chip: it changes nothing about the choice", () => {
+    for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, -5, null]) {
+      for (const over of [
+        { fullSeconds: bad, fastSeconds: bad },
+        { fullSeconds: 300, fastSeconds: bad },
+        { fullSeconds: bad, fastSeconds: 100 },
+      ]) {
+        expect(choose(over), JSON.stringify(over)).toEqual(choose());
+        expect(choose({ ...over, request: "fast" })).toEqual(choose({ request: "fast" }));
+        const none = choose({ ...over, chip: null });
+        expect(none.showRow, JSON.stringify(over)).toBe(false);
+        expect(["x264", "x264_fast"], JSON.stringify(over)).toContain(none.encoder);
+      }
     }
   });
 
-  it("decides nothing without an estimate", () => {
+  it("chooses the chip with no estimate at all, and the processor with no chip", () => {
     const blind = choose({ fullSeconds: null, fastSeconds: null });
-    expect(blind).toMatchObject({ showRow: false, encoder: "x264", defaultMode: "quality" });
+    expect(blind).toMatchObject({
+      showRow: true,
+      encoder: "amd",
+      reason: "chip_default",
+      defaultMode: "fast",
+    });
     expect(choose({ chip: null, fullSeconds: null, fastSeconds: null }).encoder).toBe("x264");
   });
 
   const input = fc.record({
-    request: fc.constantFrom<ModeRequest>("auto", "full", "fast"),
+    request: fc.constantFrom<ModeRequest>("auto", "full", "fast", "quick"),
     chip: fc.constantFrom<ChipMaker | null>(null, "amd", "nvidia", "intel"),
     chipDefaultOn: fc.boolean(),
     fasterX264On: fc.boolean(),
@@ -358,45 +449,41 @@ describe("the one rule that decides the encoder", () => {
       fc.property(input, (facts) => {
         const c = chooseEncoder(facts);
         const full = facts.fullSeconds;
-        const fast = facts.fastSeconds;
-        const finite = (value: number | null): value is number =>
-          value !== null && Number.isFinite(value);
-        const saves =
-          facts.chip !== null &&
-          finite(full) &&
-          finite(fast) &&
-          full > 0 &&
-          fast >= 0 &&
-          fast <= full * (1 - FAST_MIN_SAVING);
-        // The row is on offer exactly when a chip is proven and would save a quarter.
-        expect(c.showRow).toBe(saves);
-        // A chip runs only where the row is on offer, and only when it was chosen, by the person or by the rule.
         const chip = (CHIP_MAKERS as readonly string[]).includes(c.encoder);
+        const chosenForThem = facts.chip !== null && facts.chipDefaultOn;
+        // The row is on offer exactly when a chip is usable, and starts on Fast exactly where the app chooses the chip for the person.
+        expect(c.showRow).toBe(facts.chip !== null);
+        expect(c.defaultMode).toBe(chosenForThem ? "fast" : "quality");
+        // A chip runs only where there is one, and only that one.
         if (chip) {
           expect(c.showRow).toBe(true);
           expect(c.encoder).toBe(facts.chip);
         }
+        // The automatic request gets the chip exactly where the app chooses it for the person; Fast and Quick get it wherever there is one.
+        if (facts.request === "auto") expect(chip).toBe(chosenForThem);
+        if (facts.request === "fast" || facts.request === "quick")
+          expect(chip).toBe(facts.chip !== null);
         // Full is never changed.
         if (facts.request === "full") {
           expect(c.encoder).toBe("x264");
           expect(c.preset).toBeUndefined();
         }
-        // What the row starts on, and why.
-        const selected =
-          saves && facts.chipDefaultOn && full !== null && full > FAST_DEFAULT_SECONDS;
-        expect(c.defaultMode).toBe(selected ? "fast" : "quality");
-        if (facts.request === "auto") expect(chip).toBe(selected);
-        // The faster setting is the processor's, with its own preset, and only when nothing else changed the plan.
+        // The faster setting is the processor's, with its own preset, and only where there is no chip.
         if (c.encoder === "x264_fast") {
           expect(c.preset).toBe("veryfast");
-          expect(facts.request).toBe("auto");
+          expect(["auto", "quick"]).toContain(facts.request);
           expect(facts.chip).toBeNull();
           expect(facts.fasterX264On).toBe(true);
-          // Only where the time saved matters: an export that takes a minute or less keeps its quality.
-          expect(full).toBeGreaterThan(FAST_DEFAULT_SECONDS);
+          // The automatic request takes it only where the time saved matters: an export that takes a minute or less keeps its quality.
+          if (facts.request === "auto") expect(full).toBeGreaterThan(FAST_DEFAULT_SECONDS);
         } else expect(c.preset).toBeUndefined();
-        // The reason fits what happened.
-        if (c.reason === "over_minute") expect(chip).toBe(true);
+        // The reason fits what happened; over_minute is no longer chosen.
+        expect(c.reason).not.toBe("over_minute");
+        if (c.reason === "chip_default") {
+          expect(chip).toBe(true);
+          expect(facts.request).toBe("auto");
+          expect(facts.chipDefaultOn).toBe(true);
+        }
         if (c.reason === "promise_line") expect(c.encoder).toBe("x264_fast");
         if (c.reason === "person") expect(facts.request).not.toBe("auto");
       }),

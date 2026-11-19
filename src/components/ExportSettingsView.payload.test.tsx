@@ -1,7 +1,7 @@
 // What the Quality / Fast view's settings view hands to onStart when Export is pressed, and what it does at the click: the object (exactly four keys, never a route), the values the person picked on the
 // selects they see, the clamps when the project shrinks under the open view, and the moves made at the click (the speed check told, the old Mode row said to be off screen). The expected objects are written out
 // here (an oracle), never computed by the model. The only boundaries mocked are the ones the dialog tests mock: the app's look at the encoder and the PC the Graphics chip row asks.
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
@@ -11,6 +11,7 @@ import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
 import { amd, harness } from "../test/chipHarness";
 import { __resetChipTests } from "../timeline/chipTest";
+import * as chipTest from "../timeline/chipTest";
 import * as exportAsk from "../timeline/exportAsk";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { emptyTimeline } from "../timeline/model";
@@ -509,30 +510,52 @@ describe("what Export hands over as `mode`: the app's look decides, exactly as 0
 });
 
 describe("what the Graphics chip row is told", () => {
-  it("is the picture Export will deliver, so the chip is tested where the export runs: a pick on a 4K 60 project brings the row", async () => {
+  it("is the picture Export will deliver, so the chip is tested where the export runs: a pick on an 8K project brings the row", async () => {
     pcWith([amd]);
-    const view = mount(workloadOf(3840, 2160, 60));
+    const view = mount(workloadOf(7680, 4320, 30));
     await openDoor(view.user);
     await settle();
-    // 4K at 60 frames a second is a picture no chip is asked about
+    // 8K is a picture no chip is asked about
     expect(screen.queryByRole("radiogroup", { name: "Graphics chip" })).toBeNull();
-    // at 30 it is one, so the row is drawn for the picture the export will make
-    await view.user.selectOptions(box("frame rate"), "30 fps");
+    // 2160p is one (3840 x 2160 at 30), so the row is drawn for the picture the export will make
+    await view.user.selectOptions(box("resolution"), "2160p (4K)");
     expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
-    // and back at the project's own rate it is not again
-    await view.user.selectOptions(box("frame rate"), "Same as project (60 fps)");
+    // and back at the project's own size it is not again
+    await view.user.selectOptions(box("resolution"), "Same as project (7680 x 4320)");
     await settle();
     expect(screen.queryByRole("radiogroup", { name: "Graphics chip" })).toBeNull();
   });
 
-  it("follows the size too: 1080p of a 4K project at 60 is a picture the chip serves", async () => {
+  it("follows the size and the rate too: the chip is asked about 4K at 60 as it is (class uhd60), about 1080p of it (hd) and about 4K at 30 (uhd)", async () => {
     pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const classesAsked = () => [...new Set(asked.mock.calls.map((call) => call[0]))].sort();
     const view = mount(workloadOf(3840, 2160, 60));
+    await openDoor(view.user);
+    expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
+    expect(classesAsked()).toEqual(["uhd60"]);
+    asked.mockClear();
+    await view.user.selectOptions(box("resolution"), "1080p");
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["hd"]);
+    asked.mockClear();
+    await view.user.selectOptions(box("resolution"), "Same as project (3840 x 2160)");
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd60"]);
+    asked.mockClear();
+    await view.user.selectOptions(box("frame rate"), "30 fps");
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd"]);
+  });
+
+  it("asks no lookup and draws no row for a picture no class holds: 4K above 60 frames a second", async () => {
+    pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const view = mount(workloadOf(3840, 2160, 120));
     await openDoor(view.user);
     await settle();
     expect(screen.queryByRole("radiogroup", { name: "Graphics chip" })).toBeNull();
-    await view.user.selectOptions(box("resolution"), "1080p");
-    expect(await screen.findByRole("radiogroup", { name: "Graphics chip" })).toBeVisible();
+    expect(asked).not.toHaveBeenCalled();
   });
 
   it("is not drawn, and no chip is tested, with no project", async () => {

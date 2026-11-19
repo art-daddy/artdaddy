@@ -168,7 +168,7 @@ export async function setupExport() {
 }
 export type ExportRig = Awaited<ReturnType<typeof setupExport>>;
 
-/** A project this PC has measured to take ten minutes on the processor: long enough for the app to choose the chip by itself. Leaves
+/** A project this PC has measured to take ten minutes on the processor (a long export; the app uses a chip that passed whatever the length). Leaves
  *  the chip lookup answering with `chip` (a proven AMD chip unless told otherwise), and no trace of the measuring export on the card
  *  or in the list. The lookup says the chip is still fine after it stopped an export, as the 0.27.0 journeys do (a restart must not
  *  depend on it); `honourSetAside` makes it answer as the real one does, with a chip that failed an export set aside. */

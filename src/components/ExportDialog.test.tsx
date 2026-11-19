@@ -38,6 +38,18 @@ const withRow = (over: Partial<ExportEncoderDecision> = {}): ExportEncoderDecisi
     facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
     ...over,
   });
+/** What the app says when a chip has passed for the picture's size, as the rule words it now: the chip is chosen for the person (`chip_default`), whatever the length, and the row starts on Fast. */
+const chipChosen = (over: Partial<ExportEncoderDecision> = {}): ExportEncoderDecision =>
+  decision({
+    mode: "fast",
+    chip: "amd",
+    reason: "chip_default",
+    showRow: true,
+    defaultMode: "fast",
+    fastSeconds: 15,
+    facts: { encoder: "amd", chip: "amd", reason: "chip_default", tests: [] },
+    ...over,
+  });
 
 beforeEach(() => {
   useExportJob.getState().reset();
@@ -305,7 +317,7 @@ describe("ExportDialog", () => {
     });
   });
 
-  it("selects Fast for the person when the export is over a minute and says why; picking Full quality is sent as their choice", async () => {
+  it("keeps the over-a-minute wording for a decision that carries the old reason: selects Fast for the person and says why; picking Full quality is sent as their choice", async () => {
     vi.mocked(decideExportEncoder).mockResolvedValue(
       withRow({ defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
     );
@@ -327,6 +339,46 @@ describe("ExportDialog", () => {
     expect(screen.getByText("Fast would take about 4 min.")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  // The chip is used whenever it passed, so the row starts on Fast for any length of export, and the only thing it says is what Fast costs: the sentence about a minute is for a decision that carries the old reason (the test above).
+  it("selects Fast for the person where the app chose the chip for them, for a short export too, and says only what Fast costs; picking Full quality is sent as their choice", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(chipChosen());
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
+    expect(
+      screen.getByText(
+        "The file will be larger and the picture can differ slightly from Full quality.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/is selected because|over a minute/)).toBeNull();
+    expect(screen.getByText("Full quality would take under a minute.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null })); // left as the app chose
+    fireEvent.click(screen.getByRole("radio", { name: "Full quality" }));
+    expect(screen.queryByText(/The file will be larger/)).toBeNull();
+    expect(screen.getByText("Fast would take under a minute.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("starts on Full quality and offers Fast where the app did not choose the chip for the person, even for a long export; picking Fast is sent as their choice", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(
+      withRow({ fullSeconds: 720, fastSeconds: 240 }),
+    );
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    expect(await screen.findByRole("radio", { name: "Full quality" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Fast" })).not.toBeChecked();
+    expect(
+      screen.queryByText(/is selected because|over a minute|The file will be larger/),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null }));
+    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "fast" }));
   });
 
   it("says where the faster setting will be used when there is no Mode row", async () => {

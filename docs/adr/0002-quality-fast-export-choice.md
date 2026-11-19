@@ -45,8 +45,8 @@ above that row and records the time-left rule that runs beside it.
      softer." where the app will use that setting.
    - One Frame rate list per project serves both choices and holds Fast's own rate where the ladder 60 / 50 / 30 / 25 / 24 has none
      (72 gives 18); a rate is kept only while the list holds it.
-   - The chip row's note for a passed chip reads "Auto: used when it saves time. ..." under Quality and "Auto: used on this PC. ..."
-     under Fast, which uses a passed chip whether or not it saves time.
+   - The chip row's note for a passed chip reads "Auto: used on this PC. ..." under Quality and under Fast alike: the chip is used
+     whenever it passed its test for the picture's size, so the note names no saving and no kind of export.
    - A key pressed in the dialog does not leave it (the panel stops every key but Escape). The editor behind it steps the playhead on
      an arrow key and cancels the browser's move between radios, plays on Space and deletes the selected clip on Delete: without this
      the radios could not be operated from the keyboard, and Delete in a dialog control removed a clip, in 0.28.0 as well.
@@ -88,17 +88,17 @@ read, draw and compress split was not measured). Time ratios (Quality seconds di
 less time), one Windows laptop, strong profile, rounded to one decimal because every run was made on a PC that other programs were
 also using (the lab flags all of them as busy, 3.5 to 12 cores):
 
-| Project (length tested)              | Fast vs Quality, processor | Fast vs Quality's light compression | Fast vs Quality, chip |
-| ------------------------------------ | -------------------------- | ----------------------------------- | --------------------- |
-| Phone reel 1080x1920 at 30 (2 min)   | 1.3 to 1.4                 | 1.0                                 | 0.9                   |
-| Talking head, captions (2 min)       | 1.4                        | 1.0                                 | 0.9                   |
-| Horizontal HD, crossfades (2 min)    | 1.3 to 1.4                 | 1.0                                 | 0.9 to 1.0            |
-| HD at 60 fps (2 min)                 | 1.9 to 2.1                 | (1.2)                               | 1.0                   |
-| Photo slideshow, zoom (2 min)        | (1.05)                     | not measured                        | (0.9)                 |
-| Zoom-heavy real reel (2 min)         | 1.1                        | not measured                        | 0.9 to 1.0            |
-| 4K at 30, 3 clips, streamed (30 s)   | 1.4                        | 1.0                                 | 1.0                   |
-| 4K at 60, 2 clips, streamed (20 s)   | 1.3 to 1.4                 | 1.0                                 | not measured          |
-| 36-clip HD edit, streamed (2 min)    | (2.4)                      | (1.1)                               | (1.0)                 |
+| Project (length tested)            | Fast vs Quality, processor | Fast vs Quality's light compression | Fast vs Quality, chip |
+| ---------------------------------- | -------------------------- | ----------------------------------- | --------------------- |
+| Phone reel 1080x1920 at 30 (2 min) | 1.3 to 1.4                 | 1.0                                 | 0.9                   |
+| Talking head, captions (2 min)     | 1.4                        | 1.0                                 | 0.9                   |
+| Horizontal HD, crossfades (2 min)  | 1.3 to 1.4                 | 1.0                                 | 0.9 to 1.0            |
+| HD at 60 fps (2 min)               | 1.9 to 2.1                 | (1.2)                               | 1.0                   |
+| Photo slideshow, zoom (2 min)      | (1.05)                     | not measured                        | (0.9)                 |
+| Zoom-heavy real reel (2 min)       | 1.1                        | not measured                        | 0.9 to 1.0            |
+| 4K at 30, 3 clips, streamed (30 s) | 1.4                        | 1.0                                 | 1.0                   |
+| 4K at 60, 2 clips, streamed (20 s) | 1.3 to 1.4                 | 1.0                                 | not measured          |
+| 36-clip HD edit, streamed (2 min)  | (2.4)                      | (1.1)                               | (1.0)                 |
 
 Brackets: every run of that figure is in a block the lab flagged or in an unfinished segment. A range is the lab's two readings (ratio
 of the means of the valid runs; paired median of the blocks). "Processor" is Quality as the app runs it there (standard compression);

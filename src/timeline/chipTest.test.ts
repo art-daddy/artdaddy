@@ -1,4 +1,5 @@
 import fc from "fast-check";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,6 +13,7 @@ import {
   chipEncodeArgs,
   chipStatusOf,
   chipTestSource,
+  encodeFailure,
   findChip,
   judge,
   markChipSuspect,
@@ -24,6 +26,7 @@ import {
 } from "./chipTest";
 import {
   CHIP_MAKERS,
+  SIZE_CLASSES,
   SIZE_CLASS_LIMITS,
   chipVideoArgs,
   type ChipMaker,
@@ -32,8 +35,10 @@ import {
 import { buildRenderCommand } from "./render";
 import type { Timeline } from "./model";
 import { __setExportFlag } from "../api/exportFlags";
+import { EXPORT_TRACE_VALUES } from "../api/exportVocabulary";
 import { amd, harness, intel, nvidia, ssimText, type Behaviour } from "../test/chipHarness";
 import { CHIP_PREF_KEY } from "./chipPref";
+import { chipAdvice } from "./chipAdvice";
 
 beforeEach(() => {
   __resetChipTests();
@@ -46,7 +51,7 @@ describe("what the test asks ffmpeg to do", () => {
   // export is bigger or faster than what was proved (review finding 1, second pass: a 60 fps export was served by a chip
   // that had only been tried at 30).
   it("tests each size class at the largest picture the class admits, at exactly the frame rate the class admits", () => {
-    for (const cls of ["hd", "uhd"] as const) {
+    for (const cls of SIZE_CLASSES) {
       const [w, h] = /size=(\d+)x(\d+)/.exec(chipTestSource(cls))!.slice(1).map(Number);
       expect(Math.max(w, h), cls).toBe(SIZE_CLASS_LIMITS[cls].longSide);
       expect(w * h, cls).toBe(SIZE_CLASS_LIMITS[cls].pixels);
@@ -111,6 +116,7 @@ describe("what the test asks ffmpeg to do", () => {
     for (const [cls, size] of [
       ["hd", "1080x1920"],
       ["uhd", "3840x2160"],
+      ["uhd60", "3840x2160"],
     ] as const) {
       expect(chipTestSource(cls)).toContain(`size=${size}`);
       expect(framesOf(chipTestSource(cls)), cls).toBe(TEST_FRAMES);
@@ -124,7 +130,7 @@ describe("what the test asks ffmpeg to do", () => {
   });
 
   it("compares against a source longer than the file and ends with the file, so the frame count it reports is the file's own", () => {
-    for (const cls of ["hd", "uhd"] as const) {
+    for (const cls of SIZE_CLASSES) {
       const args = ssimArgs("/t.mp4", cls);
       expect(args.join(" ")).toContain("ssim=shortest=1");
       const longer = chipTestSource(cls, TEST_FRAMES * 2);
@@ -281,17 +287,22 @@ describe("finding a graphics chip that can be trusted", () => {
       "chip-test-encode-ref",
       "chip-test-compare-ref",
     ]);
-    const uhd = harness([amd]);
-    await findChip("uhd", { allowRun: true }, uhd.deps);
-    // The 4K class needs the 1080p class's parity proof first, then runs its own encode and compare only.
-    expect(uhd.calls.map((call) => call.kind)).toEqual([
-      "chip-test-encode",
-      "chip-test-compare",
-      "chip-test-encode-ref",
-      "chip-test-compare-ref",
-      "chip-test-encode",
-      "chip-test-compare",
-    ]);
+    for (const sizeClass of ["uhd", "uhd60"] as const) {
+      const large = harness([amd]);
+      await findChip(sizeClass, { allowRun: true }, large.deps);
+      // A 4K class needs the 1080p class's parity proof first, then runs its own encode and compare only.
+      expect(
+        large.calls.map((call) => call.kind),
+        sizeClass,
+      ).toEqual([
+        "chip-test-encode",
+        "chip-test-compare",
+        "chip-test-encode-ref",
+        "chip-test-compare-ref",
+        "chip-test-encode",
+        "chip-test-compare",
+      ]);
+    }
   });
 
   it("removes the files it made, whether the chip passed or not", async () => {
@@ -489,17 +500,20 @@ describe("finding a graphics chip that can be trusted", () => {
     expect(h.calls.length).toBeGreaterThan(calls);
   });
 
-  it("gives the 4K class only to a chip that was good enough for the 1080p class", async () => {
-    const bad = harness([amd], { chipSsim: 0.6, referenceSsim: 0.85 }); // fails parity at 1080p
-    const found = await findChip("uhd", { allowRun: true }, bad.deps);
-    expect(found.chip).toBeNull();
-    expect(bad.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true); // 4K was never tried
-    const good = harness([amd]);
-    expect((await findChip("uhd", { allowRun: true }, good.deps)).chip).toMatchObject({
-      maker: "amd",
-      sizeClass: "uhd",
-    });
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "gives the %s class only to a chip that was good enough for the 1080p class",
+    async (sizeClass) => {
+      const bad = harness([amd], { chipSsim: 0.6, referenceSsim: 0.85 }); // fails parity at 1080p
+      const found = await findChip(sizeClass, { allowRun: true }, bad.deps);
+      expect(found.chip).toBeNull();
+      expect(bad.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true); // 4K was never tried
+      const good = harness([amd]);
+      expect((await findChip(sizeClass, { allowRun: true }, good.deps)).chip).toMatchObject({
+        maker: "amd",
+        sizeClass,
+      });
+    },
+  );
 
   it("runs one test however many callers ask at once", async () => {
     const h = harness([amd]);
@@ -533,11 +547,17 @@ describe("finding a graphics chip that can be trusted", () => {
     },
   );
 
-  it("does not need a reference at the 4K class: it passes the chip that has already passed at 1080p", async () => {
-    // The reference is only made at 1080p, so a broken one there must not be a way round it, and 4K needs none of its own.
-    const good = harness([amd]);
-    expect((await findChip("uhd", { allowRun: true }, good.deps)).chip?.sizeClass).toBe("uhd");
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "does not need a reference at the %s class: it passes the chip that has already passed at 1080p",
+    async (sizeClass) => {
+      // The reference is only made at 1080p, so a broken one there must not be a way round it, and 4K needs none of its own.
+      const good = harness([amd]);
+      expect((await findChip(sizeClass, { allowRun: true }, good.deps)).chip?.sizeClass).toBe(
+        sizeClass,
+      );
+      expect(good.calls.filter((call) => call.kind.endsWith("-ref"))).toHaveLength(2); // the 1080p class's, and no more
+    },
+  );
 
   // Found by review: a remembered answer that is the right shape but not true to the rules must be tested again, never believed.
   describe("a damaged memory", () => {
@@ -642,22 +662,25 @@ describe("finding a graphics chip that can be trusted", () => {
     ).toBeNull();
   });
 
-  it("keeps the result of every test one dialog can run, for the export that follows: two classes for each of eight chips", async () => {
-    const chips = Array.from({ length: 8 }, (_, i) => ({ ...amd, device: `15b${i}` }));
-    const h = harness(chips);
-    // Every chip passes at 1080p and fails at 4K: sixteen results, the most one look can make.
-    const deps: ChipDeps = {
-      ...h.deps,
-      probe: async (args, options) =>
-        options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
-          ? { kind: "ran", code: 1, stdout: "", stderr: "Error while opening encoder", ms: 3 }
-          : h.deps.probe(args, options),
-    };
-    expect((await findChip("uhd", { allowRun: true }, deps)).chip).toBeNull();
-    const told = takeChipTestEvents();
-    expect(told).toHaveLength(16);
-    expect(told.filter((event) => event.result === "passed")).toHaveLength(8);
-  });
+  it.each(["uhd", "uhd60"] as const)(
+    "keeps the result of every test one %s look can run, for the export that follows: two classes for each of eight chips",
+    async (sizeClass) => {
+      const chips = Array.from({ length: 8 }, (_, i) => ({ ...amd, device: `15b${i}` }));
+      const h = harness(chips);
+      // Every chip passes at 1080p and fails at 4K: sixteen results, the most one look can make.
+      const deps: ChipDeps = {
+        ...h.deps,
+        probe: async (args, options) =>
+          options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
+            ? { kind: "ran", code: 1, stdout: "", stderr: "Error while opening encoder", ms: 3 }
+            : h.deps.probe(args, options),
+      };
+      expect((await findChip(sizeClass, { allowRun: true }, deps)).chip).toBeNull();
+      const told = takeChipTestEvents();
+      expect(told).toHaveLength(16);
+      expect(told.filter((event) => event.result === "passed")).toHaveLength(8);
+    },
+  );
 
   it("lets a caller stop waiting without stopping the test: it finishes, is remembered, and the next caller has it", async () => {
     const h = harness([amd]);
@@ -769,7 +792,7 @@ describe("finding a graphics chip that can be trusted", () => {
     const found = await findChip("hd", { allowRun: true }, h.deps);
     for (const event of found.events) {
       expect(CHIP_MAKERS as readonly string[]).toContain(event.maker);
-      expect(["hd", "uhd"] as SizeClass[]).toContain(event.sizeClass);
+      expect(SIZE_CLASSES as readonly SizeClass[]).toContain(event.sizeClass);
       expect(Number.isFinite(event.ms) && event.ms >= 0).toBe(true);
     }
     vi.restoreAllMocks();
@@ -886,7 +909,7 @@ describe("the chip test takes its turn", () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom(...modes),
-        fc.constantFrom<SizeClass>("hd", "uhd"),
+        fc.constantFrom<SizeClass>(...SIZE_CLASSES),
         async (chip, sizeClass) => {
           __resetChipTests();
           const plain = harness([amd], { chip });
@@ -961,10 +984,10 @@ describe("the person's Off and the server's switch for Quick export", () => {
     }
   });
 
-  it("holds for every maker, both size classes and every scripted behaviour, with the switch on or off: a stored Off gives no chip and runs nothing (rule over the class)", async () => {
+  it("holds for every maker, every size class and every scripted behaviour, with the switch on or off: a stored Off gives no chip and runs nothing (rule over the class)", async () => {
     const behaviours: Behaviour[] = [{}, { chip: "fail" }, { chip: "no_device" }, { chip: "busy" }];
     for (const maker of [amd, nvidia, intel])
-      for (const sizeClass of ["hd", "uhd"] as const)
+      for (const sizeClass of SIZE_CLASSES)
         for (const behaviour of behaviours)
           for (const allowRun of [true, false])
             for (const quickExport of [true, false]) {
@@ -1051,5 +1074,303 @@ describe("the person turns the chip off while it is being tested", () => {
     expect(await lookup).toEqual({ chip: null, events: [] });
     expect(h.calls).toEqual([]);
     expect(takeChipTestEvents()).toEqual([]);
+  });
+});
+
+// WHY a test failed: the maker's own refusal of the driver. The two sentences are the NVENC loader's, word for word, as the pinned
+// ffmpeg prints them (master snapshot N-127021); the lines around them are what ffmpeg prints after an encoder that could not open.
+const DRIVER_SENTENCES = [
+  "Driver does not support the required nvenc API version. Required: 13.1 Found: 12.1",
+  "The minimum required Nvidia driver for nvenc is 610.00 or newer",
+] as const;
+const NVENC_LOADER = "[h264_nvenc @ 000001e3b9d6c0c0]";
+const AFTER_AN_OPEN_THAT_FAILED = [
+  "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.",
+  "[vf#0:0 @ 000001e3b9d5f400] Error sending frames to consumers: Function not implemented",
+  "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Could not open encoder before EOF",
+  "[out#0/mp4 @ 000001e3b9d4cc80] Nothing was written into output file, because at least one of its streams received no packets.",
+  "Conversion failed!",
+] as const;
+/** ffmpeg's report of an NVENC open that was refused: the loader's sentences, then the lines every failed open ends with. */
+const stderrOf = (...sentences: readonly string[]): string =>
+  [
+    ...sentences.map((sentence) => `${NVENC_LOADER} ${sentence}`),
+    ...AFTER_AN_OPEN_THAT_FAILED,
+  ].join("\n") + "\n";
+const DRIVER_STDERR = stderrOf(...DRIVER_SENTENCES);
+const NO_DEVICE_STDERR = stderrOf("Cannot load nvcuda.dll", "No capable devices found");
+/** One sentence for each way the pattern for a missing device can be met. */
+const NO_DEVICE_SENTENCES = [
+  "[h264_nvenc @ 0000] Cannot load nvcuda.dll",
+  "[h264_nvenc @ 0000] No capable devices found",
+  "[h264_amf @ 0000] No AMF capable device",
+  "[h264_qsv @ 0000] No device available for encoding",
+  "Device not found",
+  "[h264_amf @ 0000] Component AMFVideoEncoderVCE_AVC not found",
+  "[h264_nvenc @ 0000] OpenEncodeSessionEx failed: unsupported device (2)",
+] as const;
+const UNRELATED_FAILURES = [
+  "Error while opening encoder",
+  "",
+  "Conversion failed!",
+  stderrOf("OpenEncodeSessionEx failed: out of memory (10)"),
+  "[h264_nvenc @ 0000] Nvidia driver reported an error",
+] as const;
+const ADAPTER: Record<ChipMaker, typeof amd> = { amd, nvidia, intel };
+const MEMORY_KEY = "artdaddy.chipTest.v1";
+
+describe("why a chip's test failed: the maker's own refusal of the driver", () => {
+  /** What one look at one size class finds on a PC whose chip's encode exits with an error and says exactly `stderr`. */
+  async function lookAt(maker: ChipMaker, stderr: string, sizeClass: SizeClass = "hd") {
+    const h = harness([ADAPTER[maker]], { chipStderr: stderr });
+    const found = await findChip(sizeClass, { allowRun: true }, h.deps);
+    return { h, found, results: found.events.map((event) => event.result) };
+  }
+
+  it.each(SIZE_CLASSES)(
+    "files the driver's refusal under its own word when the %s look is made, and the event says the maker and nothing about the driver",
+    async (sizeClass) => {
+      const { h, found } = await lookAt("nvidia", DRIVER_STDERR, sizeClass);
+      expect(found.chip).toBeNull();
+      // The 4K class is only asked of a chip that passed the HD test, so a refused driver ends the look at the HD test.
+      expect(found.events).toEqual([
+        { maker: "nvidia", sizeClass: "hd", result: "driver_too_old", ms: 0, ssimMilli: 0 },
+      ]);
+      expect(h.calls.every((call) => !call.args.join(" ").includes("3840x2160"))).toBe(true);
+      // What the next export's report is told is the same event, once.
+      expect(takeChipTestEvents()).toEqual(found.events);
+      expect(takeChipTestEvents()).toEqual([]);
+    },
+  );
+
+  it.each(["uhd", "uhd60"] as const)(
+    "files it under its own word at the %s class too, when that is where the maker said it",
+    async (sizeClass) => {
+      const h = harness([nvidia]);
+      const deps: ChipDeps = {
+        ...h.deps,
+        probe: async (args, options) =>
+          options.kind === "chip-test-encode" && args.join(" ").includes("3840x2160")
+            ? { kind: "ran", code: 1, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
+            : h.deps.probe(args, options),
+      };
+      const found = await findChip(sizeClass, { allowRun: true }, deps);
+      expect(found.chip).toBeNull();
+      expect(found.events.map((event) => [event.sizeClass, event.result])).toEqual([
+        ["hd", "passed"],
+        [sizeClass, "driver_too_old"],
+      ]);
+    },
+  );
+
+  it.each(DRIVER_SENTENCES)(
+    "recognises the sentence %j on its own, in any letter case",
+    async (sentence) => {
+      for (const text of [sentence, sentence.toLowerCase(), sentence.toUpperCase()])
+        expect((await lookAt("nvidia", stderrOf(text))).results, text).toEqual(["driver_too_old"]);
+    },
+  );
+
+  it("says driver_too_old for a stderr that also says there is no device, in either order, and no_device when only that is said", async () => {
+    for (const stderr of [
+      stderrOf("No capable devices found", ...DRIVER_SENTENCES),
+      stderrOf(...DRIVER_SENTENCES, "Cannot load nvcuda.dll"),
+    ])
+      expect((await lookAt("nvidia", stderr)).results).toEqual(["driver_too_old"]);
+    expect((await lookAt("nvidia", NO_DEVICE_STDERR)).results).toEqual(["no_device"]);
+  });
+
+  it.each(CHIP_MAKERS)(
+    "still files every 'no device' sentence as no_device, and every unrelated failure as encode_failed, for %s",
+    async (maker) => {
+      for (const sentence of NO_DEVICE_SENTENCES)
+        expect((await lookAt(maker, sentence)).results, sentence).toEqual(["no_device"]);
+      for (const stderr of UNRELATED_FAILURES)
+        expect((await lookAt(maker, stderr)).results, stderr).toEqual(["encode_failed"]);
+    },
+  );
+
+  it.each(["amd", "intel"] as const)(
+    "does not call the same sentences a driver refusal when %s's chip says them: only NVIDIA's loader says it",
+    async (maker) => {
+      expect((await lookAt(maker, DRIVER_STDERR)).results).toEqual(["encode_failed"]);
+      expect(
+        (await lookAt(maker, stderrOf(...DRIVER_SENTENCES, "No capable devices found"))).results,
+      ).toEqual(["no_device"]);
+    },
+  );
+
+  it("does not read a warning of a chip that encoded as a refusal: with exit 0 the test goes on to the picture and passes", async () => {
+    const h = harness([nvidia]);
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) =>
+        options.kind === "chip-test-encode"
+          ? { kind: "ran", code: 0, stdout: "", stderr: DRIVER_STDERR, ms: 4 }
+          : h.deps.probe(args, options),
+    };
+    expect((await findChip("hd", { allowRun: true }, deps)).chip).toMatchObject({
+      maker: "nvidia",
+      result: "passed",
+    });
+  });
+
+  it("stays on the catch-all when ffmpeg's text cannot even be read", async () => {
+    const h = harness([nvidia]);
+    const hostile = {
+      toString() {
+        throw new Error("not a text");
+      },
+    } as unknown as string;
+    const deps: ChipDeps = {
+      ...h.deps,
+      probe: async (args, options) =>
+        options.kind === "chip-test-encode"
+          ? { kind: "ran", code: 1, stdout: "", stderr: hostile, ms: 1 }
+          : h.deps.probe(args, options),
+    };
+    expect((await findChip("hd", { allowRun: true }, deps)).events).toEqual([
+      expect.objectContaining({ result: "encode_failed" }),
+    ]);
+  });
+
+  it("is driver_too_old exactly when the maker is NVIDIA and a driver sentence is there, else no_device exactly when a no-device sentence is there, else encode_failed (property)", () => {
+    type Part = { readonly text: string; readonly kind: "driver" | "no_device" | "noise" };
+    const parts: Part[] = [
+      ...DRIVER_SENTENCES.flatMap((sentence) =>
+        [sentence, sentence.toLowerCase(), sentence.toUpperCase()].map((text) => ({
+          text: `${NVENC_LOADER} ${text}`,
+          kind: "driver" as const,
+        })),
+      ),
+      ...NO_DEVICE_SENTENCES.map((text) => ({ text, kind: "no_device" as const })),
+      ...AFTER_AN_OPEN_THAT_FAILED.map((text) => ({ text, kind: "noise" as const })),
+      { text: "", kind: "noise" },
+    ];
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...CHIP_MAKERS),
+        fc.array(fc.constantFrom(...parts), { maxLength: 8 }),
+        (maker, said) => {
+          const has = (kind: Part["kind"]) => said.some((part) => part.kind === kind);
+          const expected =
+            maker === "nvidia" && has("driver")
+              ? "driver_too_old"
+              : has("no_device")
+                ? "no_device"
+                : "encode_failed";
+          expect(encodeFailure(maker, said.map((part) => part.text).join("\n"))).toBe(expected);
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+});
+
+describe("a refused driver is remembered like any failure", () => {
+  it("is remembered for a day: the next look says cached_fail and runs nothing; a new day tests again, and so does a new driver", async () => {
+    const behaviour: Behaviour = { chipStderr: DRIVER_STDERR };
+    const h = harness([nvidia], behaviour);
+    const first = await findChip("hd", { allowRun: true }, h.deps);
+    expect(first.events).toEqual([expect.objectContaining({ result: "driver_too_old" })]);
+    const calls = h.calls.length;
+    const again = await findChip("hd", { allowRun: true }, h.deps);
+    expect(again.chip).toBeNull();
+    expect(again.events).toEqual([expect.objectContaining({ result: "cached_fail" })]);
+    expect(h.calls.length).toBe(calls);
+    // What the chip row reads is the word itself, not the cache's.
+    expect((await chipStatusOf("hd", h.deps)).adapters[0].result).toBe("driver_too_old");
+    // A day later the same driver is asked again, and says the same.
+    h.now.t += FAIL_TTL_MS + 1;
+    const later = await findChip("hd", { allowRun: true }, h.deps);
+    expect(h.calls.length).toBeGreaterThan(calls);
+    expect(later.events).toEqual([expect.objectContaining({ result: "driver_too_old" })]);
+    // The person updates the driver: another key, a fresh test, and now the chip is accepted.
+    delete behaviour.chipStderr;
+    const updated: ChipDeps = {
+      ...h.deps,
+      adapters: async () => [{ ...nvidia, driver: "32.0.16.1012" }],
+    };
+    expect((await findChip("hd", { allowRun: true }, updated)).chip).toMatchObject({
+      maker: "nvidia",
+    });
+  });
+
+  it("still reads back a failure that the build before this one wrote, and refuses a damaged entry that carries the new word", async () => {
+    const h = harness([nvidia], { chip: "fail" });
+    await findChip("hd", { allowRun: true }, h.deps);
+    const memory = JSON.parse(h.storage.get(MEMORY_KEY)!);
+    const [key] = Object.keys(memory.results);
+    // The shape the old build wrote for the catch-all: nothing about it changed.
+    expect(memory.results[key]).toMatchObject({ ok: false, result: "encode_failed" });
+    const calls = h.calls.length;
+    expect((await findChip("hd", { allowRun: true }, h.deps)).events).toEqual([
+      expect.objectContaining({ result: "cached_fail" }),
+    ]);
+    expect(h.calls.length).toBe(calls);
+    expect((await chipStatusOf("hd", h.deps)).adapters[0].result).toBe("encode_failed");
+    // The new word with ok true is not something this module could have written: tested again, never believed.
+    memory.results[key] = { ...memory.results[key], ok: true, result: "driver_too_old" };
+    h.storage.set(MEMORY_KEY, JSON.stringify(memory));
+    const found = await findChip("hd", { allowRun: true }, h.deps);
+    expect(h.calls.length).toBeGreaterThan(calls);
+    expect(found.events).toEqual([expect.objectContaining({ result: "encode_failed" })]);
+  });
+});
+
+describe("what the person is told for a refused driver", () => {
+  it("is the NVIDIA driver line, built from what the test itself remembered, for a driver under 610 (and not for a newer one)", async () => {
+    const hint = async (driver: string) => {
+      const h = harness([{ ...nvidia, driver }], { chipStderr: DRIVER_STDERR });
+      await findChip("hd", { allowRun: true }, h.deps);
+      const status = await chipStatusOf("hd", h.deps);
+      expect(status.verdict).toBe("not_passed");
+      return chipAdvice({
+        adapters: status.adapters.map(({ adapter, result }) => ({
+          maker: adapter.maker,
+          driver: adapter.driver,
+          result,
+        })),
+        processor: null,
+      });
+    };
+    expect((await hint("31.0.15.5123"))?.text).toContain("Your NVIDIA graphics driver is 551.23.");
+    expect(await hint("32.0.16.1012")).toBeNull();
+  });
+});
+
+describe("the words a chip test can say are words a report may carry, and words the memory can keep", () => {
+  const source = readFileSync("src/timeline/chipTest.ts", "utf8").replace(/\r\n/g, "\n");
+  const union = /export type ChipTestResult\s*=((?:\s*\|\s*"[a-z_0-9]+")+);/.exec(source);
+  const words = union ? [...union[1].matchAll(/"([a-z_0-9]+)"/g)].map((found) => found[1]) : [];
+  // Made when the memory is read, or nothing was learned: never stored.
+  const NEVER_STORED = ["cached_pass", "cached_fail", "skipped_busy"];
+
+  it("reads the type it guards (a parse that found nothing would pass everything below)", () => {
+    expect(words.length).toBeGreaterThanOrEqual(11);
+    expect(new Set(words).size).toBe(words.length);
+    expect(words).toContain("passed");
+  });
+
+  it("has every member of ChipTestResult in the list a report is cleaned against", () => {
+    for (const word of words)
+      expect(EXPORT_TRACE_VALUES as readonly string[], word).toContain(word);
+  });
+
+  it("keeps every result a test can end in, and reads it back as the same word; the words that are never stored are refused", async () => {
+    const h = harness([amd]);
+    await findChip("hd", { allowRun: true }, h.deps);
+    const memory = JSON.parse(h.storage.get(MEMORY_KEY)!);
+    const [key] = Object.keys(memory.results);
+    const readBack = async (word: string): Promise<string | null> => {
+      memory.results = {
+        [key]: { ...memory.results[key], ok: word === "passed", result: word },
+      };
+      h.storage.set(MEMORY_KEY, JSON.stringify(memory));
+      return (await chipStatusOf("hd", h.deps)).adapters[0].result;
+    };
+    for (const word of words.filter((w) => !NEVER_STORED.includes(w)))
+      expect(await readBack(word), word).toBe(word);
+    for (const word of NEVER_STORED) expect(await readBack(word), word).toBeNull();
   });
 });

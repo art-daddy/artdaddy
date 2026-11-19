@@ -776,10 +776,12 @@ export function exportVia(
   return ctx?.surface === "mcp" ? "mcp" : "menu";
 }
 
-/** A chip's maker as the trace says it: 1 AMD, 2 NVIDIA, 3 Intel, and 10 more for the 4K size class. */
+/** A chip's maker as the trace says it: 1 AMD, 2 NVIDIA, 3 Intel, and 10 more for the 4K size class at 30 frames a second and 20 more for the one at 60
+ *  (the server keeps any whole number, so a class costs nothing there). */
 const MAKER_CODES: Record<ChipMaker, number> = { amd: 1, nvidia: 2, intel: 3 };
+const CLASS_CODES: Record<SizeClass, number> = { hd: 0, uhd: 10, uhd60: 20 };
 export function makerCode(maker: ChipMaker, sizeClass?: SizeClass): number {
-  return MAKER_CODES[maker] + (sizeClass === "uhd" ? 10 : 0);
+  return MAKER_CODES[maker] + (sizeClass ? CLASS_CODES[sizeClass] : 0);
 }
 
 const isChipEncoder = (encoder: string): encoder is ChipMaker =>

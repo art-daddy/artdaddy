@@ -102,7 +102,7 @@ function start(
     rung?: 1 | 2;
     /** How the encoder was chosen (exportChoice.ts); the normal setting when left out. */
     encoder?: "x264" | "x264_fast" | "amd" | "nvidia" | "intel";
-    reason?: "over_minute" | "person" | "promise_line" | "none";
+    reason?: "over_minute" | "person" | "promise_line" | "none" | "chip_default";
     /** The export is described the way a real one is (its size and the settings it was planned at), so the queue can say
      *  what it is expected to take. Left out, nothing describes it and nothing is expected. */
     described?: boolean;
@@ -240,10 +240,16 @@ describe("ExportCard", () => {
 
   it.each([
     [
-      "the graphics chip, chosen by the app",
+      "the graphics chip, chosen by an app that chose it for long exports (a job that carries the old reason)",
       "amd",
       "over_minute",
       "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+    ],
+    [
+      "the graphics chip, chosen by the app because it passed its test",
+      "amd",
+      "chip_default",
+      "Using your graphics chip · the file is larger and the picture can differ slightly",
     ],
     [
       "the graphics chip, picked by the person",
@@ -264,6 +270,22 @@ describe("ExportCard", () => {
       await start("one.mp4", g.wait, { encoder, reason });
       render(<ExportCard />);
       expect(screen.getByText(line)).toBeVisible();
+      g.open();
+    },
+  );
+
+  it.each(["amd", "nvidia", "intel"] as const)(
+    "does not say the graphics chip saves time when the app chose %s because it passed its test: the card says what it costs, and nothing else",
+    async (encoder) => {
+      const g = gated();
+      await start("one.mp4", g.wait, { encoder, reason: "chip_default" });
+      render(<ExportCard />);
+      expect(
+        screen.getByText(
+          "Using your graphics chip · the file is larger and the picture can differ slightly",
+        ),
+      ).toBeVisible();
+      expect(screen.queryByText(/save time|saves time|long exports|over a minute/)).toBeNull();
       g.open();
     },
   );

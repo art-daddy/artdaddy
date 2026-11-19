@@ -70,7 +70,7 @@ describe("the graphics-chip row: the states the mockups draw", () => {
     expect(model({ verdict: "passed" })).toEqual({
       state: "auto_passed",
       visible: true,
-      note: "Auto: used for long exports where it saves time. When it is used, the file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
+      note: "Auto: used on this PC. The file is usually larger and the picture can differ slightly. It passed ArtDaddy's test on this PC.",
       action: "turn_off",
     });
   });
@@ -122,7 +122,7 @@ describe("the graphics-chip row: the states the mockups draw", () => {
 
   // The Export dialog leaves the old Mode row out where this row is drawn, and that row is where the person was told, before the start, what the chip costs.
   it("says what the chip costs, the file usually larger and the picture able to differ slightly, in the one state where the chip is used and in no other", () => {
-    const COST = "the file is usually larger and the picture can differ slightly";
+    const COST = "The file is usually larger and the picture can differ slightly";
     const states = new Set<string>();
     for (const input of everyInput()) {
       const row = chipRowModel(input);

@@ -121,31 +121,43 @@ describe("the encoder an export gets", () => {
     expect(decision).toMatchObject({
       mode: "fast",
       chip: "amd",
-      reason: "over_minute",
+      reason: "chip_default",
       showRow: true,
       defaultMode: "fast",
     });
     expect(decision.faster).toBeUndefined();
     expect(asked).toEqual([{ sizeClass: "hd", allowRun: true }]);
-    expect(decision.facts).toMatchObject({ encoder: "amd", chip: "amd", reason: "over_minute" });
+    expect(decision.facts).toMatchObject({ encoder: "amd", chip: "amd", reason: "chip_default" });
     expect(decision.fullSeconds).toBeGreaterThan(60);
     expect(decision.fastSeconds!).toBeLessThan(decision.fullSeconds!);
   });
 
-  it("stays Full quality for a short export, and still offers the row", async () => {
+  it("is the graphics chip for a short export too: ten seconds, two seconds, and history that says the chip is slower", async () => {
     const { lookup } = lookupWith(verdict("amd"));
-    const decision = await decideExportEncoder(
-      input({ workload: workload({ durationSeconds: 10 }) }),
-      lookup,
-    );
-    expect(decision).toMatchObject({
-      mode: "quality",
-      reason: "none",
-      showRow: true,
-      defaultMode: "quality",
-    });
-    expect(decision.chip).toBeUndefined();
-    expect(decision.facts).toMatchObject({ encoder: "x264", chip: "amd", reason: "none" });
+    const two = workload({ durationSeconds: 2 });
+    const cases: [string, Partial<ChoiceInput>][] = [
+      ["ten seconds", { workload: workload({ durationSeconds: 10 }) }],
+      ["two seconds", { workload: two }],
+      [
+        "history that says the chip is slower",
+        { workload: two, history: [sample("x264-crf", 20, two), sample("chip-amd", 40, two)] },
+      ],
+    ];
+    for (const [name, over] of cases) {
+      const decision = await decideExportEncoder(input(over), lookup);
+      expect(decision, name).toMatchObject({
+        mode: "fast",
+        chip: "amd",
+        reason: "chip_default",
+        showRow: true,
+        defaultMode: "fast",
+      });
+      expect(decision.facts, name).toMatchObject({
+        encoder: "amd",
+        chip: "amd",
+        reason: "chip_default",
+      });
+    }
   });
 
   it("never changes what the person picked: Full is the processor, and no chip is even tested for it", async () => {
@@ -157,12 +169,18 @@ describe("the encoder an export gets", () => {
     expect(asked).toEqual([]);
   });
 
-  it("gives Fast to the person who picked it, and the processor when no chip can serve", async () => {
+  it("gives Fast to the person who picked it whatever the history says, and the processor when no chip can serve", async () => {
     const withChip = await decideExportEncoder(
       input({ request: "fast" }),
       lookupWith(verdict("nvidia")).lookup,
     );
     expect(withChip).toMatchObject({ mode: "fast", chip: "nvidia", reason: "person" });
+    // Their own pick is the chip even where this PC's history says it would not be quicker.
+    const slower = await decideExportEncoder(
+      input({ request: "fast", history: [sample("x264-crf", 600), sample("chip-nvidia", 900)] }),
+      lookupWith(verdict("nvidia")).lookup,
+    );
+    expect(slower).toMatchObject({ mode: "fast", chip: "nvidia", reason: "person" });
     const without = await decideExportEncoder(input({ request: "fast" }), lookupWith(null).lookup);
     expect(without).toMatchObject({ mode: "quality", reason: "none" });
     expect(without.chip).toBeUndefined();
@@ -184,13 +202,32 @@ describe("the encoder an export gets", () => {
       uhd.lookup,
     );
     expect(uhd.asked).toEqual([{ sizeClass: "uhd", allowRun: true }]);
+    const uhd60 = lookupWith(verdict("amd", "uhd60"));
+    const sixty = await decideExportEncoder(
+      input({ workload: workload({ width: 3840, height: 2160, fps: 60 }) }),
+      uhd60.lookup,
+    );
+    expect(uhd60.asked).toEqual([{ sizeClass: "uhd60", allowRun: true }]);
+    expect(sixty.chip).toBe("amd"); // 4K at 60 is served now, by the chip that passed that class
+    // A rate that the project is delivered at, not the one it was made at, decides: 4K at 60 brought down to 30 is the 30 class.
+    const down = lookupWith(verdict("amd", "uhd"));
+    await decideExportEncoder(
+      input({
+        workload: workload({ width: 3840, height: 2160, fps: 60 }),
+        settings: { fps: 30 },
+      }),
+      down.lookup,
+    );
+    expect(down.asked).toEqual([{ sizeClass: "uhd", allowRun: true }]);
   });
 
-  it("uses no chip, and tests none, for a picture or frame rate no chip is tested at (8K, 4K at 60)", async () => {
+  it("uses no chip, and tests none, for a picture or frame rate no chip is tested at (8K, 4K above 60)", async () => {
     const { lookup, asked } = lookupWith(verdict("amd"));
     for (const shape of [
       { width: 7680, height: 4320 },
-      { width: 3840, height: 2160, fps: 60 },
+      { width: 7680, height: 4320, fps: 60 },
+      { width: 3840, height: 2160, fps: 61 },
+      { width: 4096, height: 2304 },
       { width: 4000, height: 500 },
       { width: 1920, height: 1080, fps: 120 },
     ]) {
@@ -218,11 +255,18 @@ describe("the encoder an export gets", () => {
     expect(asked).toEqual([]);
   });
 
-  it("does not offer Fast where this PC's own history says it would not save a quarter of the time", async () => {
+  it("uses the chip even where this PC's own history says it would not save a quarter of the time, and still words the estimate from that history", async () => {
     const history = [sample("x264-crf", 600), sample("chip-amd", 560)];
     const { lookup } = lookupWith(verdict("amd"));
     const decision = await decideExportEncoder(input({ history }), lookup);
-    expect(decision).toMatchObject({ showRow: false, mode: "quality", reason: "none" });
+    expect(decision).toMatchObject({
+      showRow: true,
+      mode: "fast",
+      chip: "amd",
+      reason: "chip_default",
+    });
+    // The estimate is what the dialog words; it decided nothing.
+    expect(decision.fastSeconds).toBe(560);
     const quick = await decideExportEncoder(
       input({ history: [sample("x264-crf", 600), sample("chip-amd", 200)] }),
       lookup,
@@ -231,7 +275,7 @@ describe("the encoder an export gets", () => {
       showRow: true,
       mode: "fast",
       chip: "amd",
-      reason: "over_minute",
+      reason: "chip_default",
     });
     expect(quick.fastSeconds).toBe(200);
     expect(quick.fullGuessed).toBe(false);
@@ -341,7 +385,7 @@ describe("the encoder an export gets", () => {
     expect(callsAfterDialog).toBeGreaterThan(0);
     // The export starts: the chip is used with no new test, and the test's result is told with this export.
     const started = await decideExportEncoder(input(), real);
-    expect(started).toMatchObject({ mode: "fast", chip: "amd", reason: "over_minute" });
+    expect(started).toMatchObject({ mode: "fast", chip: "amd", reason: "chip_default" });
     expect(h.calls.length).toBe(callsAfterDialog);
     expect(started.tests).toEqual([
       expect.objectContaining({ maker: "amd", sizeClass: "hd", result: "passed" }),
@@ -469,11 +513,19 @@ describe("the rules, over every shape of PC, project and request", () => {
             expect(asked).toEqual([]);
           }
           if (decision.showRow) expect(offered).not.toBeNull();
-          if (decision.reason === "over_minute") {
+          // The rule itself: a chip that passed is used by the automatic request while the switch is on, by Fast always, and by nobody else.
+          if (request !== "full") expect(decision.showRow).toBe(offered !== null);
+          if (offered !== null && request === "auto")
+            expect(decision.chip).toBe(chipDefault ? offered.maker : undefined);
+          if (offered !== null && request === "fast") expect(decision.chip).toBe(offered.maker);
+          if (decision.reason === "chip_default") {
             expect(request).toBe("auto");
             expect(decision.chip).toBeDefined();
             expect(chipDefault).toBe(true);
           }
+          if (offered !== null && request === "auto" && chipDefault)
+            expect(decision.reason).toBe("chip_default");
+          expect(decision.reason).not.toBe("over_minute");
           if (decision.reason === "promise_line") expect(decision.faster).toBe(true);
           expect(decision.facts.encoder).toBe(
             decision.chip ?? (decision.faster ? "x264_fast" : "x264"),

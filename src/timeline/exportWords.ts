@@ -302,7 +302,7 @@ export function describeRung(rung: unknown): string {
 /** What the Export dialog knows about the mode: what the app decided (exportChoice.ts) and what each way is estimated to
  *  take. */
 export interface ModeView {
-  /** The Mode row is shown (a graphics chip has proven itself and would save a quarter of the time). */
+  /** The Mode row is on offer (a graphics chip has proven itself for this size, so the person may choose Full quality or Fast). */
   readonly showRow: boolean;
   /** What the row starts on. */
   readonly defaultMode: ExportMode;

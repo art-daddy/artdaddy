@@ -43,8 +43,8 @@ export interface AdvancedSettingsProps {
   fastChosen?: boolean;
 }
 
-// The owner's sentence for the state where the chip passed its test (OD-5); the other four states keep the row's own notes. With Fast chosen the sentence does not say when the chip is used: a Fast
-// export uses a chip that passed.
+// The note for the state where the chip passed its test; the other four states keep the row's own notes. The chip is used whenever it passed, so Quality and Fast say the same sentence; the two entries stay
+// apart so that the dialog can word them apart again without touching the component.
 const CHIP_NOTES = { auto_passed: D2_WORDS.chipNotePassed } as const;
 const CHIP_NOTES_FAST = { auto_passed: D2_WORDS.chipNotePassedFast } as const;
 

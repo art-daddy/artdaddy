@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { EXPORT_REASON_CODES, reasonOfError } from "../api/exportReason";
+import { EXPORT_CHIPS, EXPORT_MODE_REASONS } from "../api/exportVocabulary";
 import {
   ENCODER_FAILURE_LOG,
   ENCODER_FAILURE_PIECES,
@@ -315,8 +316,13 @@ describe("the encoder an export runs on, in words", () => {
   it("says nothing about the processor's normal setting, and what the graphics chip and the faster setting cost about the others", () => {
     expect(describeEncoder("x264", "none")).toBe("");
     for (const chip of ["amd", "nvidia", "intel"] as const) {
+      // A job or a report from an app that chose the chip only for long exports still carries this reason: it keeps its own words.
       expect(describeEncoder(chip, "over_minute")).toBe(
         "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+      );
+      // Chosen because it passed its test for the picture's size: no saving is claimed, since none was measured.
+      expect(describeEncoder(chip, "chip_default")).toBe(
+        "Using your graphics chip · the file is larger and the picture can differ slightly",
       );
       // Picked by the person: no need to say why it is used.
       expect(describeEncoder(chip, "person")).toBe(
@@ -332,6 +338,17 @@ describe("the encoder an export runs on, in words", () => {
     for (const odd of [undefined, null, 7, Number.NaN, "x", "gpu", {}])
       expect(describeEncoder(odd as never, "over_minute")).toBe("");
     expect(describeEncoder("amd", undefined as never)).toMatch(/graphics chip/);
+  });
+
+  // The rule over the whole vocabulary of reasons (the list the report is cleaned against), so a reason added later is held to it too: only a job that says the chip was chosen for a long export is told it saves time.
+  it("says the graphics chip saves time for the reason over_minute alone: every reason of the vocabulary, every maker", () => {
+    expect(EXPORT_MODE_REASONS).toContain("chip_default");
+    for (const chip of EXPORT_CHIPS)
+      for (const reason of EXPORT_MODE_REASONS) {
+        const line = describeEncoder(chip, reason);
+        expect(line, `${chip} ${reason}`).toMatch(/^Using your graphics chip/);
+        expect(line.includes("to save time"), `${chip} ${reason}`).toBe(reason === "over_minute");
+      }
   });
 
   it("says what happened and what Try again will do when the graphics chip stopped an export, for the card and for the assistant", () => {
@@ -394,6 +411,41 @@ describe("what the Export dialog says about the mode, in words", () => {
     expect(lines.alternative).toBe("Full quality would take about 12 min.");
   });
 
+  // The chip is used whenever it passed, so the row starts on Fast for any length of export and the only thing said about it is what Fast costs; the sentence about a minute is for a decision that carries the old reason.
+  it("selects Fast for the person where the chip is chosen for them, whatever the length, and says what Fast costs, never that the export is long", () => {
+    for (const [fullSeconds, fastSeconds] of [
+      [20, 8],
+      [40, 15],
+      [720, 240],
+      [20, null],
+      [null, null],
+    ] as const) {
+      const lines = describeModeLines(
+        row({ defaultMode: "fast", reason: "chip_default", fullSeconds, fastSeconds }),
+        null,
+      );
+      expect(lines.selected, `${fullSeconds}`).toBe("fast");
+      expect(lines.note, `${fullSeconds}`).toBe(
+        "The file will be larger and the picture can differ slightly from Full quality.",
+      );
+    }
+  });
+
+  it("says the over-a-minute sentence for the reason over_minute alone: every reason of the vocabulary, every start and every pick", () => {
+    for (const reason of EXPORT_MODE_REASONS)
+      for (const defaultMode of ["quality", "fast"] as const)
+        for (const picked of [null, "quality", "fast"] as const) {
+          const lines = describeModeLines(
+            row({ reason, defaultMode, fullSeconds: 720, fastSeconds: 240 }),
+            picked,
+          );
+          expect(
+            /over a minute/.test(lines.note ?? ""),
+            JSON.stringify({ reason, defaultMode, picked }),
+          ).toBe(reason === "over_minute" && defaultMode === "fast" && picked === null);
+        }
+  });
+
   it("follows what the person picked over what the app selected, either way", () => {
     const long = row({
       defaultMode: "fast",
@@ -427,7 +479,7 @@ describe("what the Export dialog says about the mode, in words", () => {
       fc.property(
         fc.boolean(),
         fc.constantFrom<"quality" | "fast">("quality", "fast"),
-        fc.constantFrom("over_minute", "person", "promise_line", "none" as const),
+        fc.constantFrom("over_minute", "person", "promise_line", "none", "chip_default" as const),
         fc.boolean(),
         seconds,
         seconds,

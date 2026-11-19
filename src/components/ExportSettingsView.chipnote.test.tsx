@@ -1,5 +1,6 @@
-// The note under the Graphics chip row follows the choice. Under Quality the chip is used when it saves time, and the note says so; a Fast export uses a chip that passed whether or not it saves time
-// (`chooseEncoder`, request "quick"), so under Fast the note must not say "when it saves time". Without the choice row the dialog is Quality only and keeps the first sentence.
+// The note under the Graphics chip row, for a chip that passed, is one true sentence under Quality and under Fast: the chip is used whenever it passed, so the note says it is used on this PC and what that
+// costs, and never claims a saving or a kind of export. The view still hands the row the entry that belongs to the choice (`fastChosen`); the two entries are the same sentence now, so what is drawn is the
+// same after every change of the choice. Without the choice row the dialog is Quality only and says the same. The last block holds the 0.28.0-style dialog (the one this build draws) to the same sentence.
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +26,7 @@ import * as exportAsk from "../timeline/exportAsk";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { emptyTimeline } from "../timeline/model";
 import type { RenderWorkload } from "../timeline/renderPlan";
+import ExportDialog from "./ExportDialog";
 import ExportSettingsView from "./ExportSettingsView";
 
 vi.mock("../timeline/exportChoice", async (importOriginal) => ({
@@ -108,16 +110,17 @@ const workload: RenderWorkload = {
   peakMediaLayers: 2,
 };
 
-const QUALITY_NOTE =
-  "Auto: used when it saves time. The file is usually larger and the picture can differ slightly.";
-const FAST_NOTE =
+const NOTE =
   "Auto: used on this PC. The file is usually larger and the picture can differ slightly.";
+/** What the note must never claim: a saving, a length or a kind of export. */
+const CLAIMS_A_SAVING = /saves? time|saving|long exports|minute/i;
 
 const noteIs = (text: string) =>
   waitFor(() => expect(screen.getByTestId("chip-row-note").textContent).toBe(text));
+const noteNow = () => screen.getByTestId("chip-row-note").textContent ?? "";
 
 describe("the Graphics chip note for a chip that passed, by choice", () => {
-  it("says when the chip is used under Quality, and what a Fast export does under Fast, and follows the choice both ways", async () => {
+  it("says the same under Quality and under Fast, names no saving, and follows the choice both ways", async () => {
     const user = userEvent.setup();
     render(
       <ExportSettingsView
@@ -127,17 +130,19 @@ describe("the Graphics chip note for a chip that passed, by choice", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Advanced settings" }));
-    await noteIs(QUALITY_NOTE);
+    await noteIs(NOTE);
+    expect(noteNow()).not.toMatch(CLAIMS_A_SAVING);
 
     await user.click(screen.getByRole("radio", { name: "Fast" }));
-    await noteIs(FAST_NOTE);
-    expect(screen.getByTestId("chip-row-note").textContent).not.toMatch(/saves time/);
+    await noteIs(NOTE);
+    expect(noteNow()).not.toMatch(CLAIMS_A_SAVING);
 
     await user.click(screen.getByRole("radio", { name: "Quality" }));
-    await noteIs(QUALITY_NOTE);
+    await noteIs(NOTE);
+    expect(noteNow()).not.toMatch(CLAIMS_A_SAVING);
   });
 
-  it("keeps the Quality sentence where the dialog has no choice row", async () => {
+  it("says the same where the dialog has no choice row", async () => {
     const user = userEvent.setup();
     render(
       <ExportSettingsView
@@ -148,7 +153,48 @@ describe("the Graphics chip note for a chip that passed, by choice", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Advanced settings" }));
-    await noteIs(QUALITY_NOTE);
+    await noteIs(NOTE);
+    expect(noteNow()).not.toMatch(CLAIMS_A_SAVING);
     expect(screen.queryByRole("radio", { name: "Fast" })).toBeNull();
+  });
+});
+
+// Both Export dialogs speak for the same chip, and the chip is used whenever it passed: the 0.28.0-style dialog (the one this build draws) and the Quality / Fast view must say the same of it.
+describe("both Export dialogs say the same about a chip that passed", () => {
+  it("is 'used on this PC' and no saving, in the 0.28.0-style dialog and in the Quality / Fast view under Quality and under Fast", async () => {
+    const user = userEvent.setup();
+    const live = render(
+      <ExportDialog
+        open
+        onCancel={() => undefined}
+        onStart={() => undefined}
+        workload={workload}
+      />,
+    );
+    await waitFor(() => expect(noteNow()).toMatch(/^Auto: used on this PC\./));
+    const inTheLiveDialog = noteNow();
+    live.unmount();
+
+    render(
+      <ExportSettingsView
+        workload={workload}
+        onCancel={() => undefined}
+        onStart={() => undefined}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
+    await noteIs(NOTE);
+    const underQuality = noteNow();
+    await user.click(screen.getByRole("radio", { name: "Fast" }));
+    await noteIs(NOTE);
+    const underFast = noteNow();
+
+    for (const note of [inTheLiveDialog, underQuality, underFast]) {
+      expect(note).toMatch(/used on this PC/);
+      expect(note).not.toMatch(CLAIMS_A_SAVING);
+    }
+    // One truth: the Quality / Fast view leaves out the sentence about the test, which only the 0.28.0-style dialog says.
+    expect(inTheLiveDialog).toBe(`${underQuality} It passed ArtDaddy's test on this PC.`);
+    expect(underFast).toBe(underQuality);
   });
 });

@@ -103,21 +103,26 @@ export function chipVideoArgs(
   return { codec: spec.codec, pixFmt: spec.pixFmt, rate: spec.rate(tier) };
 }
 
-export type SizeClass = "hd" | "uhd";
+/** The size classes, smallest first: a picture is tested and served in the first one that holds it. */
+export const SIZE_CLASSES = ["hd", "uhd", "uhd60"] as const;
+export type SizeClass = (typeof SIZE_CLASSES)[number];
 
 /** What each size class stands for: the picture and the frame rate the chip's test is run at, and the most a picture may
  *  have to be served by a chip that proved itself there. Every maker's encoder has limits (a longest side, a macroblock
- *  rate, a level) that only a real encode proves; the test runs a 1080 by 1920 picture (class "hd") at 60 frames a second
- *  and a 3840 by 2160 one (class "uhd") at 30 (`chipTest.ts` reads the rate from here, and a test pins them equal), so a
- *  picture beyond those bounds is served by the processor, not by a chip nobody asked about it. 1080p at 60 is within what
- *  every H.264 hardware encoder does (level 4.2); 4K at 60 is not (it needs more than level 5.2), and neither is 1080p at
- *  120. */
+ *  rate, a level) that only a real encode proves; the test runs a 1080 by 1920 picture (class "hd") at 60 frames a second,
+ *  a 3840 by 2160 one (class "uhd") at 30 and the same 3840 by 2160 one at 60 (class "uhd60") (`chipTest.ts` reads the rate
+ *  from here, and a test pins them equal), so a picture beyond those bounds is served by the processor, not by a chip nobody
+ *  asked about it. 1080p at 60 is within what every H.264 hardware encoder does (level 4.2); 4K at 60 fits level 5.2 (32,400
+ *  macroblocks a frame times 60 is 1,944,000 a second, and the level allows 2,073,600), and 8K needs level 6, which no
+ *  class stands for. What a class proves is not a level but the test: a chip is used at a class only after it encoded that
+ *  class's picture, at its rate, on this PC. */
 export const SIZE_CLASS_LIMITS: Record<
   SizeClass,
   { readonly longSide: number; readonly pixels: number; readonly fps: number }
 > = {
   hd: { longSide: 1920, pixels: 1920 * 1080, fps: 60 },
   uhd: { longSide: 3840, pixels: 3840 * 2160, fps: 30 },
+  uhd60: { longSide: 3840, pixels: 3840 * 2160, fps: 60 },
 };
 
 /** The class a delivered picture is tested, and used, in: the smallest whose bounds hold it, or null (the processor). */
@@ -125,18 +130,20 @@ export function sizeClassOf(width: number, height: number, fps: number): SizeCla
   if (![width, height, fps].every((value) => Number.isFinite(value) && value > 0)) return null;
   const longSide = Math.max(width, height);
   const pixels = width * height;
-  for (const cls of ["hd", "uhd"] as const) {
+  for (const cls of SIZE_CLASSES) {
     const limit = SIZE_CLASS_LIMITS[cls];
     if (longSide <= limit.longSide && pixels <= limit.pixels && fps <= limit.fps) return cls;
   }
   return null;
 }
 
-/** An export whose estimate is over this is one the person is better off with the chip for (the owner's rule). */
+/** An export whose estimate is over this is one the processor's faster setting may be chosen for (a minute or less keeps its picture
+ *  as it is). The chip has no such test: it is used whenever it passed. */
 export const FAST_DEFAULT_SECONDS = 60;
-/** The chip is offered only where it saves at least this share of the time. */
+/** The processor's faster setting is chosen only where it saves at least this share of the time. The chip has no such test. */
 export const FAST_MIN_SAVING = 0.25;
-/** What the chip does to an export's time when this PC has no measurement of it yet. Cautious: the lab saw 1.5 on a
+/** What the chip does to an export's time when this PC has no measurement of it yet (the dialog's expected time only: the chip is
+ *  used whenever it passed, whatever this says). Cautious: the lab saw 1.5 on a
  *  source that is hard to decode and 3.7 on an ordinary one. A measured export replaces it after the first run. */
 export const CHIP_CAUTIOUS_GAIN = 1.5;
 /** What the processor's faster setting does to the time (the lab: 2.1 times quicker, about 2.6 VMAF points less). */
@@ -144,21 +151,24 @@ export const FASTER_X264_GAIN = 2.1;
 
 /** `quick` is the person's pick of Quick export (exportRoute.ts decides whether it is on offer): the chip where there is one, else the faster setting. */
 export type ModeRequest = "auto" | "full" | "fast" | "quick";
-export type ModeReason = "over_minute" | "person" | "promise_line" | "none";
+/** Why the encoder is what it is: `person` (they picked it), `chip_default` (the app chose the chip for them: it passed for the size), `promise_line`
+ *  (the processor's faster setting), `none` (nothing special). `over_minute` is what releases before the chip was used whenever it passed said when the
+ *  estimate was over a minute; it is no longer chosen, and stays here for a job or a report that carries it. */
+export type ModeReason = "over_minute" | "person" | "promise_line" | "none" | "chip_default";
 
 export interface ChoiceInput {
   /** What the person chose in the Export dialog; "auto" for everyone else (the app's chat, MCP, no row shown). */
   readonly request: ModeRequest;
   /** A chip that passed its test for this picture size, is switched on and is not under suspicion; else null. */
   readonly chip: ChipMaker | null;
-  /** The switch for choosing Fast on the person's behalf. */
+  /** The switch for choosing the chip on the person's behalf (the automatic request). Off: the chip is never chosen for them; their own pick still works. */
   readonly chipDefaultOn: boolean;
   /** The switch for the processor's faster setting. */
   readonly fasterX264On: boolean;
   /** The processor's estimate at the person's quality, and whether it is a measurement made on this PC. */
   readonly fullSeconds: number | null;
   readonly fullMeasured: boolean;
-  /** The chip's estimate (measured, or the processor's divided by the cautious gain). */
+  /** The chip's estimate (measured, or the processor's divided by the cautious gain). It decides nothing: the chip is used whenever it passed. The dialog's words read it. */
   readonly fastSeconds: number | null;
   /** The honest estimate with the processor's faster setting. Absent, the faster setting needs no saving test (0.27.0's rule). Present,
    *  `null` included, it is chosen only where it saves at least `FAST_MIN_SAVING` of `fullSeconds`; `null` is no estimate and shows no saving. */
@@ -172,14 +182,14 @@ export interface EncoderChoice {
   readonly encoder: EncoderKind;
   /** The processor's `-preset` for the faster setting; absent leaves x264 on its own default. */
   readonly preset?: "veryfast";
-  /** Whether the Export dialog shows the Mode row at all. */
+  /** Whether the Export dialog's Mode row is on offer: a chip is usable at this size, so the person may choose Full quality or Fast (the row is drawn only where the Graphics chip row is not). */
   readonly showRow: boolean;
-  /** What the row starts on. */
+  /** What the row starts on: Fast exactly where the app chooses the chip for the person. */
   readonly defaultMode: "quality" | "fast";
   readonly reason: ModeReason;
 }
 
-/** The faster setting's own saving test: it changes the picture, so it needs the same real gain as the chip. */
+/** The faster setting's own saving test: it changes the picture, so it needs a real gain. */
 function fasterSaves(fasterSeconds: number | null, full: number): boolean {
   return (
     fasterSeconds !== null &&
@@ -190,30 +200,24 @@ function fasterSaves(fasterSeconds: number | null, full: number): boolean {
 }
 
 /** The one rule. The Export dialog, the app's chat and MCP all read it, so an export gets the same encoder wherever
- *  it was asked for (exporter document 19.7, I-S4-3). */
+ *  it was asked for (exporter document 19.7, I-S4-3).
+ *
+ *  `input.chip` already means a chip that passed its test for this picture size, is switched on, is not set aside and is not Off. Where there is
+ *  one it is used whenever nobody asked for the processor: the automatic request gets it (reason `chip_default`) with no estimate, no length and no
+ *  saving to pass first, unless the `chip_default` switch is off; `full` is the processor; `fast` and `quick` are the person's own pick of the chip.
+ *  With no chip no request gets a chip encoder. */
 export function chooseEncoder(input: ChoiceInput): EncoderChoice {
   const full = input.fullSeconds;
-  const fast = input.fastSeconds;
-  const saves =
-    input.chip !== null &&
-    full !== null &&
-    fast !== null &&
-    Number.isFinite(full) &&
-    Number.isFinite(fast) &&
-    full > 0 &&
-    fast >= 0 &&
-    fast <= full * (1 - FAST_MIN_SAVING);
-  const selectedForThem =
-    saves && input.chipDefaultOn && full !== null && full > FAST_DEFAULT_SECONDS;
-  const row = {
-    showRow: saves,
-    defaultMode: selectedForThem ? ("fast" as const) : ("quality" as const),
-  };
   const chip = input.chip;
+  const chosenForThem = chip !== null && input.chipDefaultOn;
+  const row = {
+    showRow: chip !== null,
+    defaultMode: chosenForThem ? ("fast" as const) : ("quality" as const),
+  };
 
   if (input.request === "full") return { encoder: "x264", reason: "person", ...row };
   if (input.request === "fast") {
-    return saves && chip !== null
+    return chip !== null
       ? { encoder: chip, reason: "person", ...row }
       : { encoder: "x264", reason: "none", ...row };
   }
@@ -223,7 +227,8 @@ export function chooseEncoder(input: ChoiceInput): EncoderChoice {
       ? { encoder: "x264_fast", preset: "veryfast", reason: "person", ...row }
       : { encoder: "x264", reason: "person", ...row };
   }
-  if (selectedForThem && chip !== null) return { encoder: chip, reason: "over_minute", ...row };
+  if (chip !== null && input.chipDefaultOn)
+    return { encoder: chip, reason: "chip_default", ...row };
 
   // No usable chip, and the processor would be slower than the product promises: the faster setting, unless that
   // would take the quality down on a mere guess that is not plainly over the line. And only where the time saved

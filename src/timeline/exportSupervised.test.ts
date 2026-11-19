@@ -30,6 +30,7 @@ import {
   listExportOutcomes,
   listExportRecords,
   localDeliveryPort,
+  makerCode,
   manageExportsTool,
   retryExport,
   submitExport,
@@ -41,6 +42,11 @@ import { describeLiveStatus } from "./exportWords";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
 import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
+import oldTable from "./__fixtures__/chooseEncoder.golden.json";
+import { combinations, readTable, type Table } from "./__fixtures__/chooseEncoderTable";
+import { amd, harness, nvidia, type Behaviour } from "../test/chipHarness";
+import { CHIP_MAKERS, SIZE_CLASSES } from "./exportEncoder";
+import { setCanvasTool } from "./ops";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -593,12 +599,35 @@ describe("the graphics chip, from the export tool to the card", () => {
   const story = (report: Any): string[] =>
     (report.trace as Any[]).map((e) => (e.v ? `${e.e}:${e.v}` : e.e));
   const codec = (spec: { args: string[] }) => spec.args[spec.args.lastIndexOf("-c:v") + 1];
+  // Clocks differ between two runs of anything; the rest of two report bodies is compared leaf by leaf. A clock here is the time since the request and the time the run took (`t`, `elapsed_ms`,
+  // `active_ms`), the longest gap between two marks (`longest_gap_s`) and the whole seconds that a step carries as its first number (`outcome`'s elapsed time, the stall and gap steps): two runs that
+  // fall either side of a rounding edge of a second, or that wait a second longer on a busy PC, differ there and in nothing the export did. The other numbers of a step stay compared.
+  const SECONDS_STEPS = new Set(["outcome", "stall_detected", "heartbeat_gap"]);
+  const withoutClocks = (report: Any): Any => ({
+    ...report,
+    elapsed_ms: 0,
+    active_ms: 0,
+    longest_gap_s: 0,
+    trace: (report.trace as Any[]).map((event) => ({
+      ...event,
+      t: 0,
+      ...(SECONDS_STEPS.has(event.e) ? { n: 0 } : {}),
+    })),
+  });
+  const differences = (a: Any, b: Any, path = "report"): string[] =>
+    typeof a === "object" && a !== null && typeof b === "object" && b !== null
+      ? [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap((key) =>
+          differences(a[key], b[key], Array.isArray(a) ? `${path}[${key}]` : `${path}.${key}`),
+        )
+      : Object.is(a, b)
+        ? []
+        : [path];
   const DRIVER_ERROR =
     "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder\n";
   const FLOOR =
     "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself\n";
 
-  /** A project this PC has measured to take ten minutes on the processor: long enough for the app to choose the chip. */
+  /** A project this PC has measured to take ten minutes on the processor (a long export; the app uses a chip that passed whatever the length). */
   async function longProject() {
     const t = await setup();
     const first = await t.exportNow("first");
@@ -635,7 +664,7 @@ describe("the graphics chip, from the export tool to the card", () => {
     expect((spec.meta.telemetry as Any).choice).toMatchObject({
       encoder: "amd",
       chip: "amd",
-      reason: "over_minute",
+      reason: "chip_default",
       shown: "fast",
     });
     t.jobs.exit(started.job_id, 0);
@@ -647,7 +676,7 @@ describe("the graphics chip, from the export tool to the card", () => {
       status: "done",
       encoder: "amd",
       chip: "amd",
-      mode_reason: "over_minute",
+      mode_reason: "chip_default",
     });
     expect(story(report)).toEqual(
       expect.arrayContaining(["chip_test:passed", "mode_shown:fast", "mode_selected:fast"]),
@@ -688,20 +717,259 @@ describe("the graphics chip, from the export tool to the card", () => {
     expect(reported.at(-1)).toMatchObject({ encoder: "amd", mode_reason: "person" });
   });
 
-  it("stays on the processor for a short export the person did not choose a mode for", async () => {
-    const t = await setup();
+  it("runs a short export on the chip too when the person did not choose a mode: no estimate and no minute to pass first", async () => {
+    const t = await setup(); // two seconds: well under a minute, and this PC has measured nothing
     vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
     const started = await t.exportNow("short");
     await flush();
-    expect(codec(t.jobs.submitted.at(-1)!)).toBe("libx264");
+    const spec = t.jobs.submitted.at(-1)!;
+    expect(codec(spec)).toBe("h264_amf");
+    expect(spec.args).not.toContain("libx264");
+    expect((spec.meta.telemetry as Any).calibration.encoder).toBe("chip-amd");
     t.jobs.exit(started.job_id, 0);
     await whenExportsSettle();
     await whenExportTelemetrySettles();
-    // The chip was offered (the row would have been shown) but not chosen: said so.
-    expect(reported.at(-1)).toMatchObject({ encoder: "x264", chip: "amd", mode_reason: "none" });
+    expect(reported.at(-1)).toMatchObject({
+      status: "done",
+      encoder: "amd",
+      chip: "amd",
+      mode_reason: "chip_default",
+    });
     expect(story(reported.at(-1)!)).toEqual(
+      expect.arrayContaining(["mode_shown:fast", "mode_selected:fast"]),
+    );
+  });
+
+  it("stays on the processor for a short export when the switch for choosing the chip is off, offers the row, and keeps the person's own pick", async () => {
+    __setExportFlag("chip_default", false);
+    try {
+      const t = await setup();
+      vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+      const started = await t.exportNow("short");
+      await flush();
+      expect(codec(t.jobs.submitted.at(-1)!)).toBe("libx264");
+      t.jobs.exit(started.job_id, 0);
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      // The chip was offered (the row was shown) but not chosen: said so.
+      expect(reported.at(-1)).toMatchObject({ encoder: "x264", chip: "amd", mode_reason: "none" });
+      expect(story(reported.at(-1)!)).toEqual(
+        expect.arrayContaining(["mode_shown:full", "mode_selected:full"]),
+      );
+      const picked = await t.exportNow("picked", { exportMode: "fast" });
+      await flush();
+      expect(codec(t.jobs.submitted.at(-1)!)).toBe("h264_amf");
+      t.jobs.exit(picked.job_id, 0);
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect(reported.at(-1)).toMatchObject({ encoder: "amd", mode_reason: "person" });
+    } finally {
+      __setExportFlag("chip_default", true);
+    }
+  });
+
+  // The two artifacts compared: the stored report of ONE short export (the project of setup(): two seconds, nothing measured) as the old rule made it,
+  // and the real report of the same export now. "Before" is the export the old rule ran for these facts: the 0.27.0 table's row for request auto, chip amd,
+  // the switch on, a short export (30 s on the processor, the chip estimated at half) is the processor with nothing to say, the Mode row on offer and
+  // started on Full. The same export with the chip's switch off is that answer today, so its report is "before", and the table's row is what it is held to.
+  it("changes what a short export reports in the encoder, the reason and the Mode row's steps, and in nothing else", async () => {
+    const old = oldTable as Table;
+    const pick = {
+      request: "auto",
+      chip: "amd",
+      chipDefaultOn: true,
+      fasterX264On: true,
+      fullSeconds: 30,
+      fullMeasured: false,
+      fastSeconds: 15,
+      durationSeconds: 7.625,
+      promiseMultiple: 2,
+    };
+    let row = 0;
+    let tableRow = -1;
+    for (const input of combinations(old)) {
+      if (Object.entries(pick).every(([key, value]) => (input as Any)[key] === value)) {
+        tableRow = row;
+        break;
+      }
+      row += 1;
+    }
+    expect(tableRow).toBeGreaterThanOrEqual(0);
+    const frozen = readTable(old).answerAt(tableRow);
+    expect(frozen).toEqual({
+      encoder: "x264",
+      reason: "none",
+      showRow: true,
+      defaultMode: "quality",
+    });
+
+    const reportFor = async (name: string, switchOn: boolean): Promise<Any> => {
+      __setExportFlag("chip_default", switchOn);
+      try {
+        useExportJob.setState({ calibrations: [] });
+        vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+        const t = await setup();
+        const started = await t.exportNow(name);
+        await flush();
+        t.jobs.exit(started.job_id, 0);
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        return structuredClone(reported.at(-1)!);
+      } finally {
+        __setExportFlag("chip_default", true);
+      }
+    };
+    const before = await reportFor("short", false);
+    const after = await reportFor("short", true);
+    expect(before).toMatchObject({ encoder: frozen.encoder, mode_reason: frozen.reason });
+    expect(after).toMatchObject({ encoder: "amd", mode_reason: "chip_default" });
+    expect(before.chip).toBe("amd");
+    expect(after.chip).toBe("amd");
+    const at = (report: Any, name: string) =>
+      (report.trace as Any[]).findIndex((event) => event.e === name);
+    expect(story(before)).toEqual(
       expect.arrayContaining(["mode_shown:full", "mode_selected:full"]),
     );
+    expect(story(after)).toEqual(expect.arrayContaining(["mode_shown:fast", "mode_selected:fast"]));
+    expect(at(before, "mode_shown")).toBeGreaterThanOrEqual(0);
+    // `mode_selected` carries the estimate of the encoder that was selected: the processor's before, the chip's (the smaller) now.
+    const selected = at(before, "mode_selected");
+    expect(at(after, "mode_selected")).toBe(selected);
+    expect(after.trace[selected].n).toBeLessThan(before.trace[selected].n);
+    expect(differences(withoutClocks(before), withoutClocks(after)).sort()).toEqual(
+      [
+        "report.encoder",
+        "report.mode_reason",
+        `report.trace[${at(before, "mode_shown")}].v`,
+        `report.trace[${selected}].v`,
+        `report.trace[${selected}].n`,
+      ].sort(),
+    );
+  });
+
+  // The two artifacts compared: the report of an export whose chip test failed in the plain way, and the report of the same export whose
+  // chip test failed with the maker's own refusal of the driver. Everything the new word adds to what the server receives is that one word.
+  it("tells why the chip test failed: a refused driver and a plain failure make two reports that differ in the word of one step, and nowhere else", async () => {
+    const actual = await vi.importActual<typeof import("./chipTest")>("./chipTest");
+    __setExportFlag("chip_nvidia", true);
+    const reportFor = async (name: string, chipStderr: string): Promise<Any> => {
+      actual.__resetChipTests();
+      useExportJob.setState({ calibrations: [] });
+      const pc = harness([nvidia], { chipStderr });
+      vi.mocked(findChip).mockImplementation((size, options) =>
+        actual.findChip(size, options, pc.deps),
+      );
+      const t = await setup();
+      const started = await t.exportNow(name);
+      await flush();
+      expect(codec(t.jobs.submitted.at(-1)!), "no chip passed: the processor encodes").toBe(
+        "libx264",
+      );
+      t.jobs.exit(started.job_id, 0);
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      return structuredClone(reported.at(-1)!);
+    };
+    const plain = await reportFor("plain", "Error while opening encoder");
+    const refused = await reportFor(
+      "refused",
+      [
+        "[h264_nvenc @ 000001e3b9d6c0c0] Driver does not support the required nvenc API version. Required: 13.1 Found: 12.1",
+        "[h264_nvenc @ 000001e3b9d6c0c0] The minimum required Nvidia driver for nvenc is 610.00 or newer",
+        "[vost#0:0/h264_nvenc @ 000001e3b9d5f100] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.",
+      ].join("\n"),
+    );
+    const step = (report: Any) => (report.trace as Any[]).findIndex((e) => e.e === "chip_test");
+    expect(step(plain)).toBeGreaterThanOrEqual(0);
+    expect(plain.trace[step(plain)]).toMatchObject({ v: "encode_failed", n: 2 });
+    expect(refused.trace[step(refused)]).toMatchObject({ v: "driver_too_old", n: 2 });
+    expect(differences(withoutClocks(plain), withoutClocks(refused))).toEqual([
+      `report.trace[${step(plain)}].v`,
+    ]);
+    // The number of the step is the maker, plus ten for the 4K class at 30 frames a second and twenty for the one at 60.
+    expect([
+      makerCode("nvidia", "hd"),
+      makerCode("nvidia", "uhd"),
+      makerCode("nvidia", "uhd60"),
+    ]).toEqual([2, 12, 22]);
+  });
+
+  // The number is what the server is told of a chip test: the maker and the class in one whole number. Written out, so that a class
+  // added later without a number of its own, or a number two classes share, is a failure here and not a report nobody can read.
+  it("numbers every test by maker and class: 1 to 3 at 1080p, 11 to 13 at 4K, 21 to 23 at 4K 60, and no two the same", () => {
+    const numbers = Object.fromEntries(
+      CHIP_MAKERS.flatMap((maker) =>
+        SIZE_CLASSES.map((sizeClass) => [`${maker}/${sizeClass}`, makerCode(maker, sizeClass)]),
+      ),
+    );
+    expect(numbers).toEqual({
+      "amd/hd": 1,
+      "amd/uhd": 11,
+      "amd/uhd60": 21,
+      "nvidia/hd": 2,
+      "nvidia/uhd": 12,
+      "nvidia/uhd60": 22,
+      "intel/hd": 3,
+      "intel/uhd": 13,
+      "intel/uhd60": 23,
+    });
+    expect(new Set(Object.values(numbers)).size).toBe(Object.values(numbers).length);
+  });
+
+  // A 3840 by 2160 project at 60 frames a second, through the real lookup, the real choice and the real command: the chip is used
+  // where it passed the test of that class, and the processor where it did not. The PC's only chip is scripted by `behaviour`.
+  async function exportUhd60(behaviour: Behaviour) {
+    const actual = await vi.importActual<typeof import("./chipTest")>("./chipTest");
+    actual.__resetChipTests();
+    useExportJob.setState({ calibrations: [] });
+    const pc = harness([amd], behaviour);
+    vi.mocked(findChip).mockImplementation((size, options) =>
+      actual.findChip(size, options, pc.deps),
+    );
+    const t = await setup();
+    const set = await setCanvasTool(
+      { width: 3840, height: 2160, fps: 60 },
+      { store: t.store, runner: t.nextPage().runner },
+    );
+    if (set.ok === false) throw new Error(`the canvas was not set: ${JSON.stringify(set)}`);
+    const started = await t.exportNow("uhd60");
+    await flush();
+    const spec = t.jobs.submitted.at(-1)!;
+    t.jobs.exit(started.job_id, 0);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const tested = (report: Any) =>
+      (report.trace as Any[]).filter((e) => e.e === "chip_test").map((e) => [e.v, e.n]);
+    return { spec, pc, report: structuredClone(reported.at(-1)!) as Any, tested };
+  }
+
+  it("exports a 3840 by 2160 project at 60 frames a second on the chip that passed the test of that class, and the report says which tests were made", async () => {
+    const { spec, pc, report, tested } = await exportUhd60({});
+    // The project really was 4K at 60: the plan the app process was handed says so.
+    expect((spec.meta.plan as Any).output).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+    expect(codec(spec)).toBe("h264_amf");
+    expect(report).toMatchObject({ status: "done", encoder: "amd", chip: "amd" });
+    // The 1080p test and the 4K 60 test, in that order, each with its own number; the 4K 30 test was not made.
+    expect(tested(report)).toEqual([
+      ["passed", 1],
+      ["passed", 21],
+    ]);
+    const sources = pc.calls.map((call) => call.args.join(" "));
+    expect(sources.some((line) => line.includes("size=3840x2160:rate=60"))).toBe(true);
+    expect(sources.some((line) => line.includes("size=3840x2160:rate=30"))).toBe(false);
+  });
+
+  it("exports the same project on the processor when the chip passed 1080p and 4K at 30 but not 4K at 60, and says the 4K 60 test failed", async () => {
+    // 4K at 30 is 249 million pixels a second and 4K at 60 is 498 million: this chip stops between them.
+    const { spec, report, tested } = await exportUhd60({ failsAbovePixelRate: 300_000_000 });
+    expect((spec.meta.plan as Any).output).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+    expect(codec(spec)).toBe("libx264");
+    expect(report).toMatchObject({ status: "done", encoder: "x264" });
+    expect(report.chip).toBeUndefined();
+    expect(tested(report)).toEqual([
+      ["passed", 1],
+      ["encode_failed", 21],
+    ]);
   });
 
   it("replays the journey: the chip fails in the middle, the card says so, one click runs the same export on the processor, and the chip is set aside", async () => {

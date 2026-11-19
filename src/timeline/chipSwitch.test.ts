@@ -8,6 +8,7 @@ import { amd, harness, nvidia, type Behaviour } from "../test/chipHarness";
 import { CHIP_PREF_KEY } from "./chipPref";
 import { __resetChipTests, findChip } from "./chipTest";
 import { decideExportEncoder } from "./exportChoice";
+import { SIZE_CLASSES } from "./exportEncoder";
 import type { RenderWorkload } from "./renderPlan";
 
 // The host's two calls the chip lookup makes on the real PC. Everything else of the module stays real.
@@ -106,10 +107,10 @@ describe("Off means off", () => {
     expect(h.calls.length).toBe(tested); // remembered: the pass was kept while it was Off
   });
 
-  it("holds for every maker and for the 4K class, which tests the chip at 1080p first", async () => {
+  it("holds for every maker and for every larger class, which tests the chip at 1080p first", async () => {
     const lots: Behaviour[] = [{}, { chip: "fail" }, { chip: "no_device" }, { chip: "busy" }];
     for (const behaviour of lots)
-      for (const sizeClass of ["hd", "uhd"] as const) {
+      for (const sizeClass of SIZE_CLASSES) {
         __resetChipTests();
         const h = harness([nvidia, amd], behaviour);
         h.storage.set(CHIP_PREF_KEY, "off");
@@ -138,21 +139,31 @@ describe("Off means off", () => {
     );
     expect(auto.facts.encoder).toBe("amd");
     expect(auto.showRow).toBe(true);
+    // And so is a short one: a chip that passed is used whatever the length, so the switch is the only thing that keeps it away.
+    const SHORT = { ...WORKLOAD, durationSeconds: 5 };
+    const shortAuto = await decideExportEncoder(
+      { request: "auto", workload: SHORT, settings: {}, history: [] },
+      lookup,
+    );
+    expect(shortAuto.facts.encoder).toBe("amd");
+    expect(shortAuto.showRow).toBe(true);
     __resetChipTests();
     h.calls.length = 0;
     h.storage.clear();
     h.storage.set(CHIP_PREF_KEY, "off");
-    for (const request of ["auto", "fast"] as const) {
-      const decision = await decideExportEncoder(
-        { request, workload: WORKLOAD, settings: {}, history: [] },
-        lookup,
-      );
-      expect(decision.facts.encoder, request).toBe("x264");
-      expect(decision.chip, request).toBeUndefined();
-      expect(decision.mode, request).toBe("quality");
-      expect(decision.showRow, request).toBe(false);
-      expect(decision.facts.adapter, request).toBeUndefined();
-    }
+    for (const workload of [WORKLOAD, SHORT])
+      for (const request of ["auto", "fast"] as const) {
+        const decision = await decideExportEncoder(
+          { request, workload, settings: {}, history: [] },
+          lookup,
+        );
+        const which = `${request} ${workload.durationSeconds} s`;
+        expect(decision.facts.encoder, which).toBe("x264");
+        expect(decision.chip, which).toBeUndefined();
+        expect(decision.mode, which).toBe("quality");
+        expect(decision.showRow, which).toBe(false);
+        expect(decision.facts.adapter, which).toBeUndefined();
+      }
     expect(h.calls).toEqual([]);
   });
 });
@@ -196,6 +207,7 @@ describe("on the real wiring", () => {
     store.set(CHIP_PREF_KEY, "off");
     expect(await findChip("hd", { allowRun: true })).toEqual({ chip: null, events: [] });
     expect(await findChip("uhd", { allowRun: true })).toEqual({ chip: null, events: [] });
+    expect(await findChip("uhd60", { allowRun: true })).toEqual({ chip: null, events: [] });
     expect(probe).not.toHaveBeenCalled();
   });
 

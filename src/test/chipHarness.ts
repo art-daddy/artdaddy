@@ -16,6 +16,8 @@ export const ssimText = (all: number, frames = TEST_FRAMES) =>
 /** How the scripted ffmpeg behaves. */
 export interface Behaviour {
   chip?: "ok" | "fail" | "no_device" | "slow" | "busy" | "stopped";
+  /** The chip's encode exits with an error and says exactly this (what a maker's loader prints), whatever `chip` says. */
+  chipStderr?: string;
   chipSsim?: number;
   chipFrames?: number;
   decodeFails?: boolean;
@@ -25,6 +27,9 @@ export interface Behaviour {
   referenceCompare?: "fails" | "unreadable" | "short";
   /** The chip's encode fails at a frame rate above this (a limit of the chip that only an encode at that rate shows). */
   failsAboveFps?: number;
+  /** The chip's encode fails above this many pixels a second, the picture's pixels times its frame rate (a limit that only an
+   *  encode at the size AND the rate shows: a chip that does 4K at 30 and not at 60 passes the 1080p class at 60). */
+  failsAbovePixelRate?: number;
 }
 
 export function harness(
@@ -50,6 +55,7 @@ export function harness(
       if (options.kind.includes("encode")) {
         const codec = args[args.indexOf("-c:v") + 1];
         if (codec === "libx264") return ran("");
+        if (behaviour.chipStderr !== undefined) return ran(behaviour.chipStderr, 1);
         const mode = behaviour.chip ?? "ok";
         if (mode === "busy") return { kind: "busy" };
         if (mode === "stopped") return { kind: "stopped" };
@@ -59,6 +65,14 @@ export function harness(
         if (mode === "fail") return ran("Error while opening encoder", 1);
         const fps = Number(args[args.indexOf("-r") + 1]);
         if (behaviour.failsAboveFps !== undefined && fps > behaviour.failsAboveFps)
+          return ran("Error while opening encoder", 1);
+        const picture = /size=(\d+)x(\d+):rate=(\d+)/.exec(args[args.indexOf("-i") + 1] ?? "");
+        if (
+          behaviour.failsAbovePixelRate !== undefined &&
+          picture &&
+          Number(picture[1]) * Number(picture[2]) * Number(picture[3]) >
+            behaviour.failsAbovePixelRate
+        )
           return ran("Error while opening encoder", 1);
         return ran("");
       }

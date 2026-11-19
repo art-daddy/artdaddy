@@ -393,10 +393,17 @@ describe("3. with the switch off a Fast pick is Quality in every byte", () => {
         expect(keysOf(ignored.done), where).toEqual(keysOf(none.done));
         expect(ignored.running, where).not.toHaveProperty("route");
         expect(ignored.done, where).not.toHaveProperty("route");
-        // It is the project's own picture (so the two are not both empty), and the same pick with the switch on is not ignored.
+        // It is the project's own picture (so the two are not both empty), and the same pick with the switch on is not ignored. The control is an export that
+        // really is different from the live pick: without a chip, the unpinned export (the processor, plain); with one, the person's own Full quality (the
+        // processor), because an unpinned export on a PC with a chip that passed is already on the chip, and where Fast leaves the picture as it is (480p24)
+        // the live pick's command can equal it.
         expect(ignored.output, where).toEqual(pic(canvas.w, canvas.h, canvas.fps));
         const on = await observe({ canvas, slot: FAST, chip });
-        expect(on.command, where).not.toEqual(none.command);
+        const control = chip ? await observe({ canvas, chip, mode: "quality" }) : none;
+        expect(control.codec, where).toBe("libx264");
+        expect(on.command, where).not.toEqual(control.command);
+        expect(on.codec, where).toBe(chip ? "h264_amf" : "libx264");
+        if (!chip) expect(after(on.command, "-preset"), where).toBe("veryfast");
       }
   });
 
@@ -462,9 +469,13 @@ describe("4. what Fast leaves on the record, in the assistant's list and in the 
     for (const chip of [false, true]) {
       const fast = await observe({ canvas: UHD60, slot: FAST, chip });
       const quality = await observe({ canvas: UHD60, chip });
-      // `encoder` is what any row says of an export that runs on a chip or on the faster setting, whoever asked for it (0.28.0's field).
-      expect(Object.keys(fast.row).filter((key) => !(key in quality.row))).toEqual(["encoder"]);
+      // `encoder` is what any row says of an export that runs on a chip or on the faster setting, whoever asked for it (0.28.0's field): on a PC with a chip
+      // Quality's row has it too (4K at 60 has a size class), without one only Fast's row does.
+      expect(Object.keys(fast.row).filter((key) => !(key in quality.row))).toEqual(
+        chip ? [] : ["encoder"],
+      );
       expect(Object.keys(quality.row).filter((key) => !(key in fast.row))).toEqual([]);
+      if (chip) expect(quality.row.encoder).toBe("graphics_chip");
       expect(fast.row.encoder).toBe(chip ? "graphics_chip" : "faster_setting");
       for (const word of ["route", "quick", "quick_offer", "mode", "setting"])
         expect(fast.row, word).not.toHaveProperty(word);

@@ -107,13 +107,15 @@ const MAKER_WORDS = { amd: "AMD", nvidia: "NVIDIA" } as const;
 export function chipAdvice(facts: ChipAdviceFacts): ChipAdvice | null {
   try {
     const adapters = Array.isArray(facts?.adapters) ? facts.adapters : [];
-    // An NVIDIA chip whose encode failed (a picture that came out wrong needs a driver that works, so it is not this) with a driver
-    // under the floor; the oldest of them is the one named.
+    // An NVIDIA chip whose encode failed (the catch-all, or the maker's own refusal of the driver; a picture that came out wrong needs a
+    // driver that works, so it is not this) with a driver under the floor; the oldest of them is the one named.
     const old = adapters
       .filter(
         (adapter) =>
           adapter?.maker === "nvidia" &&
-          (adapter.result === "encode_failed" || adapter.result === "cached_fail"),
+          (adapter.result === "encode_failed" ||
+            adapter.result === "driver_too_old" ||
+            adapter.result === "cached_fail"),
       )
       .map((adapter) => nvidiaDriverUnits(adapter.driver))
       .filter((units): units is number => units !== null && units < NVIDIA_MIN_DRIVER * 100);
