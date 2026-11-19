@@ -110,11 +110,15 @@ const withoutTimes = (t: ParsedTranscript): unknown => ({
 });
 
 describe("0.27.0 is what the parser makes of a file with the behaviour off, or of a run that made no dtw", () => {
-  it.each(REAL)("%s: off by name, it parses exactly as the frozen 0.27.0 parse", (name) => {
-    expect(parseWhisperCppJson(rawText(name), { wordTimes: false })).toStrictEqual(
-      frozen.real[name],
-    );
-  });
+  it.each(REAL)(
+    "%s: the shipped state, and off by name, parse exactly as the frozen 0.27.0 parse",
+    (name) => {
+      expect(parseWhisperCppJson(rawText(name))).toStrictEqual(frozen.real[name]);
+      expect(parseWhisperCppJson(rawText(name), { wordTimes: false })).toStrictEqual(
+        frozen.real[name],
+      );
+    },
+  );
 
   it.each(REAL)(
     "%s: with the behaviour ON, the same file from a run without -dtw (every t_dtw is -1) parses as it always did",
@@ -128,6 +132,7 @@ describe("0.27.0 is what the parser makes of a file with the behaviour off, or o
     (name) => {
       const { input, output } = frozen.synthetic[name];
       expect(off(input)).toStrictEqual(output);
+      expect(parseWhisperCppJson(JSON.stringify(input))).toStrictEqual(output);
       const without = JSON.parse(
         JSON.stringify(input, (key, value: unknown) => (key === "t_dtw" ? undefined : value)),
       ) as unknown;
@@ -496,6 +501,7 @@ describe("the parser for ANY file: the same words with the same times as 0.27.0 
     fc.assert(
       fc.property(anyDoc, (json) => {
         expect(off(json)).toStrictEqual(off(noDtw(json)));
+        expect(parseWhisperCppJson(JSON.stringify(json))).toStrictEqual(off(json));
       }),
       { numRuns: 250 },
     );
