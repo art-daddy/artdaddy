@@ -29,12 +29,17 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+/** How long an export that is to be an earlier one takes, in real time (many times a millisecond); see `takesMs` of `exportNineSeconds`. */
+const EARLIER_EXPORT_TAKES_MS = 30;
+
 /** Exports a 9 s timeline (270 frames at 30 fps); the end card measures 2.033 s. `door` is who asks: the Export menu (no origin), the in-app chat (a turn's origin) or an
- *  outside assistant over MCP. */
+ *  outside assistant over MCP. `takesMs` holds the encode for that long in real time: an export that settles in the same millisecond it was admitted has no time to measure, and
+ *  the app keeps no measurement of it (`calibration()` in src/store/exportJob.ts drops an `elapsedSeconds` of 0), so an export that is to be an earlier one takes some. */
 async function exportNineSeconds(o: {
   brandAssets: boolean;
   outputPath?: string;
   door?: "menu" | "chat" | "mcp";
+  takesMs?: number;
 }): Promise<Any> {
   const fs = new ExportMemFs();
   await fs.writeTextFile("C:/proj/a.mp4", "source video");
@@ -86,7 +91,10 @@ async function exportNineSeconds(o: {
           stderr: "",
         };
       }
-      if (program === "ffmpeg") await fs.writeTextFile(args[args.length - 1], "video");
+      if (program === "ffmpeg") {
+        if (o.takesMs) await new Promise((resolve) => setTimeout(resolve, o.takesMs));
+        await fs.writeTextFile(args[args.length - 1], "video");
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -207,11 +215,18 @@ describe("the export reply", () => {
     it.each(DOORS)(
       "is said in the card's words once this PC has exported the same project, next to what else the reply says (%s)",
       async (door) => {
-        const first = await exportNineSeconds({ brandAssets: true, door });
+        const first = await exportNineSeconds({
+          brandAssets: true,
+          door,
+          takesMs: EARLIER_EXPORT_TAKES_MS,
+        });
         expect(first.ok, JSON.stringify(first)).toBe(true);
         await whenExportsSettle();
         // The earlier export is this PC's own measurement. Its time is made one that needs no heads-up (inside twice the video's length).
-        expect(useExportJob.getState().calibrations.length).toBeGreaterThan(0);
+        expect(
+          useExportJob.getState().calibrations.length,
+          "the earlier export left a measurement",
+        ).toBeGreaterThan(0);
         useExportJob.setState((state) => ({
           calibrations: state.calibrations.map((c) => ({ ...c, elapsedSeconds: 12 })),
         }));
@@ -231,8 +246,16 @@ describe("the export reply", () => {
     );
 
     it("is said for an export to a path the caller chose, which has no destination note to put it after", async () => {
-      await exportNineSeconds({ brandAssets: false, outputPath: "D:/Videos/first.mp4" });
+      await exportNineSeconds({
+        brandAssets: false,
+        outputPath: "D:/Videos/first.mp4",
+        takesMs: EARLIER_EXPORT_TAKES_MS,
+      });
       await whenExportsSettle();
+      expect(
+        useExportJob.getState().calibrations.length,
+        "the earlier export left a measurement",
+      ).toBeGreaterThan(0);
       useExportJob.setState((state) => ({
         calibrations: state.calibrations.map((c) => ({ ...c, elapsedSeconds: 12 })),
       }));
