@@ -11,6 +11,7 @@ import {
   etaSeconds,
   formatEta,
   hhmmssToMs,
+  newestProgressBlock,
   parseProgressBlocks,
   progressFraction,
   type RenderProgress,
@@ -369,6 +370,114 @@ describe("an activity mark in the job's output", () => {
     expect(records).toEqual([]);
     feed(lf.slice(100));
     expect(records.map((record) => record.frame)).toEqual([30, 60, 90]);
+  });
+});
+
+// A page that takes an export over after a reload is handed what the app process kept of the job's output, up to 64 KiB (some 280 blocks), in one go. All it needs is where the render is now: the
+// newest whole block (a render made in parts also gets its step line from the caller). The streams are built from the real block text above, and every outcome is what a reader makes of the cut,
+// set against what the same reader makes of the whole output.
+describe("newestProgressBlock", () => {
+  const run = (count: number, crlf = false, first = 1): string => {
+    const text = Array.from({ length: count }, (_, index) => {
+      const n = first + index;
+      return block({ frame: n * 15, out_time_us: n * 500_000, speed: "1.0" });
+    }).join("");
+    return crlf ? text.replace(/\n/g, "\r\n") : text;
+  };
+  const readAll = (text: string): RenderProgress[] => {
+    const records: RenderProgress[] = [];
+    createProgressReader((record) => records.push(record))(text);
+    return records;
+  };
+
+  it("leaves a reader the newest block's record and no other, however long the output was (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 2, max: 300 }),
+        fc.integer({ min: 0, max: 150 }),
+        fc.boolean(),
+        fc.constantFrom("", "frame=7\nfps=30.00\n", "frame=7\nfps=30.00\nout_time_us=12"),
+        (count, cut, crlf, unfinished) => {
+          // `cut` starts the output inside its first block, as a tail cut at a byte count does.
+          const text = run(count, crlf).slice(cut) + unfinished;
+          const kept = newestProgressBlock(text);
+          expect(text.endsWith(kept)).toBe(true);
+          expect(kept.length).toBe(run(1, crlf, count).length + unfinished.length);
+          expect(readAll(kept)).toEqual(readAll(text).slice(-1));
+          expect(readAll(kept)).toHaveLength(1);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("returns the output as it is when it holds fewer than two whole blocks", () => {
+    const one = run(1);
+    for (const text of ["", "noise\n", one, one.slice(0, -1), one + "frame=9\n", "frame=9\n" + one])
+      expect(newestProgressBlock(text), JSON.stringify(text.slice(-30))).toBe(text);
+  });
+
+  it("does not take a line that only ends in 'progress' for the end of a block", () => {
+    const text = run(2) + "sub_progress=continue\n";
+    expect(readAll(newestProgressBlock(text))[0]).toEqual(readAll(run(2))[1]);
+  });
+
+  it("reads a render made in parts as the whole output read it: the newest record, in the part it belongs to (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 1, max: 5 }), { minLength: 2, maxLength: 5 }),
+        fc.boolean(),
+        (counts, crlf) => {
+          const eol = (text: string) => (crlf ? text.replace(/\n/g, "\r\n") : text);
+          // One block a second in each part, as `counts[step]` seconds long; the app process prints the step line itself.
+          const pieces = counts.flatMap((count, step) =>
+            Array.from({ length: count }, (_, index) => ({
+              step,
+              text:
+                (index === 0 ? `artdaddy_step=${step}\n` : "") +
+                eol(
+                  block(
+                    { frame: (index + 1) * 30, out_time_us: (index + 1) * 1_000_000 },
+                    index === count - 1,
+                  ),
+                ),
+            })),
+          );
+          const readParts = (chunks: readonly string[]): RenderProgress[] => {
+            const records: RenderProgress[] = [];
+            const feed = createSequenceProgressReader(counts, (record) => records.push(record));
+            for (const chunk of chunks) feed(chunk);
+            return records;
+          };
+          for (let upTo = 1; upTo <= pieces.length; upTo++) {
+            const text = pieces
+              .slice(0, upTo)
+              .map((piece) => piece.text)
+              .join("");
+            const joined = readParts([
+              `artdaddy_step=${pieces[upTo - 1].step}\n`,
+              newestProgressBlock(text),
+            ]);
+            expect(joined, `${upTo} blocks`).toEqual(readParts([text]).slice(-1));
+          }
+        },
+      ),
+      { numRuns: 60 },
+    );
+  });
+
+  it("still leaves the newest block's record when the app process's mark lands anywhere in the output, even inside a line", () => {
+    const mark = formatActivityMark({ cpuMs: 123_456, readBytes: 7_890_123 });
+    for (const crlf of [false, true]) {
+      const text = run(4, crlf);
+      const newest = readAll(text).at(-1);
+      for (let at = 0; at <= text.length; at++) {
+        const records = readAll(newestProgressBlock(text.slice(0, at) + mark + text.slice(at)));
+        expect(records.at(-1), `crlf ${crlf}, a mark in byte ${at}`).toEqual(newest);
+        // A mark inside the word `progress` hides one block's end, so one more block may come along; never the minutes before it.
+        expect(records.length).toBeLessThanOrEqual(2);
+      }
+    }
   });
 });
 
