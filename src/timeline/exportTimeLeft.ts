@@ -8,11 +8,18 @@
 // The rule, in the order it is applied to every report:
 //  - from 90 % done the answer is "finishing", for good: the last tenth is the end of the render and the file's write, and
 //    a number there is the least reliable one;
-//  - until the gate opens there is no answer at all: at least 20 s rendered and either 15 % made or 60 s rendered;
-//  - once it has opened there is always an answer, a figure from the pace of the last 20 s, kept on a rounding grid
+//  - until a pace can be read there is no answer at all. The pace is read from the pictures of the feed itself: the first
+//    picture starts a span, and once 5 s of pictures with some progress in them are behind it the first figure is said, however
+//    little is made by then and however long the render has been running. That first figure is rough; it is allowed to change;
+//  - once it has been said there is always an answer, a figure from the pace of the last 20 s, kept on a rounding grid
 //    (under a minute, whole minutes to 10, 5 minutes to an hour, quarter hours after) so it moves by steps and not by seconds;
-//  - when the average pace since the render began implies a total over 1.5 times the one it implied when the first figure
-//    was said, the answer is "longer", for good.
+//  - when the average pace since the render began implies a total over 1.5 times the one it implied at the alarm's reference
+//    point, the answer is "longer", for good. The reference point is the first moment the render has run 20 s and either made
+//    15 % or run 60 s, with a pace that can be read. It is not the first figure: one said a few seconds in is on average a
+//    little too short, and healthy renders pass 1.5 times a total taken from it. Replayed on the recorded runs, a reference taken
+//    there says "longer" on a healthy run and catches a 3 times slowdown in 41 of 53 runs instead of 48. A stall before the
+//    reference point is therefore met by no alarm: the figure grows while nothing is made, and the reader's own quiet rule ends
+//    it after 60 s.
 // A render made in parts says nothing until its final encode, which is the only part whose pace is the pace of what is left.
 
 /** What may be said about the time left of a running export. */
@@ -26,19 +33,19 @@ export const NO_TIME_LEFT: TimeLeft = Object.freeze({ kind: "none" as const });
 const FINISHING: TimeLeft = Object.freeze({ kind: "finishing" as const });
 const LONGER: TimeLeft = Object.freeze({ kind: "longer" as const });
 
-/** The gate: no answer until this much has been rendered ... */
-export const GATE_RENDERED_SECONDS = 20;
-/** ... and this much of the video is made ... */
-export const GATE_FRACTION = 0.15;
-/** ... or, failing that, this long has been rendered. */
-export const GATE_RENDERED_ALONE_SECONDS = 60;
 /** The pace is read over this much of the feed's own recent past. */
 export const PACE_WINDOW_SECONDS = 20;
-/** A pace is not read from less than this much of the feed: a figure from a second or two of pictures is noise. */
+/** A pace is not read from less than this much of the feed's pictures, counted from the first picture: this is how long the first figure waits. Less is noise. */
 export const PACE_MIN_SPAN_SECONDS = 5;
+/** The reference point of the "taking longer" alarm is the first moment the render has run this long ... */
+export const LONGER_REFERENCE_RENDERED_SECONDS = 20;
+/** ... and has made this share of the video ... */
+export const LONGER_REFERENCE_FRACTION = 0.15;
+/** ... or, failing that, has run this long (with a pace that can be read at that moment). */
+export const LONGER_REFERENCE_RENDERED_ALONE_SECONDS = 60;
 /** From this share made the answer is "finishing". */
 export const FINISHING_FROM = 0.9;
-/** The implied total must exceed this many times the first one for the answer to become "longer". */
+/** The implied total must exceed this many times the one at the reference point for the answer to become "longer". */
 export const LONGER_FACTOR = 1.5;
 /** A time left over this is not a time left. */
 export const IMPLAUSIBLE_SECONDS = 48 * 3600;
@@ -117,9 +124,9 @@ export interface PaceState {
   readonly last: number | null;
   /** The reports that made a picture, over the last window, with one at or before its start. */
   readonly samples: readonly Sample[];
-  readonly opened: boolean;
+  /** The grid figure being said, or null until the first figure has been said. */
   readonly shown: number | null;
-  /** The total the average pace implied when the first figure was said. */
+  /** The total the average pace implied at the alarm's reference point, or null until that point has been reached. */
   readonly base: number | null;
   readonly finishing: boolean;
   readonly longer: boolean;
@@ -133,7 +140,6 @@ const START: PaceState = Object.freeze({
   best: 0,
   last: null,
   samples: Object.freeze([]) as readonly Sample[],
-  opened: false,
   shown: null,
   base: null,
   finishing: false,
@@ -205,7 +211,7 @@ const figureOf = (previous: TimeLeft, seconds: number): TimeLeft =>
 function advance(state: PaceState, report: PaceReport): PaceState {
   if (!Number.isFinite(report.at) || !Number.isFinite(report.fraction)) return state;
   const part = partOf(report.step, report.steps);
-  // A new part starts a new clock and a new gate; what was made stays made.
+  // A new part starts a new clock and a new span of pictures; what was made stays made.
   const run: PaceState = sameParts(state.part, part)
     ? state
     : { ...START, part, best: state.best, last: state.last };
@@ -235,23 +241,21 @@ function advance(state: PaceState, report: PaceReport): PaceState {
   const total = made > 0 && rendered > 0 ? rendered / made : null;
   const raw = leftFromPace(samples, at, fraction);
 
-  if (!seen.opened) {
-    const open =
-      rendered >= GATE_RENDERED_SECONDS &&
-      (fraction >= GATE_FRACTION || rendered >= GATE_RENDERED_ALONE_SECONDS) &&
-      raw !== null &&
-      total !== null;
-    if (!open) return { ...seen, value: NO_TIME_LEFT };
-    const shown = roundTimeLeft(raw);
-    return { ...seen, opened: true, shown, base: total, value: figureOf(seen.value, shown) };
-  }
-
-  const shown = raw !== null && seen.shown !== null ? held(seen.shown, raw) : seen.shown;
+  const shown =
+    raw === null ? seen.shown : seen.shown === null ? roundTimeLeft(raw) : held(seen.shown, raw);
+  // The alarm's reference is taken once, and later than the first figure: a figure said a few seconds in is on average a little too short, and healthy renders pass 1.5 times a total taken from it.
+  const reference =
+    seen.base === null &&
+    total !== null &&
+    raw !== null &&
+    rendered >= LONGER_REFERENCE_RENDERED_SECONDS &&
+    (fraction >= LONGER_REFERENCE_FRACTION || rendered >= LONGER_REFERENCE_RENDERED_ALONE_SECONDS);
   const longer =
     seen.longer || (total !== null && seen.base !== null && total > LONGER_FACTOR * seen.base);
   return {
     ...seen,
     shown,
+    base: reference ? total : seen.base,
     longer,
     value: longer ? LONGER : shown === null ? NO_TIME_LEFT : figureOf(seen.value, shown),
   };

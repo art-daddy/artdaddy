@@ -73,16 +73,25 @@ above that row and records the time-left rule that runs beside it.
 ## Time left while an export runs
 
 One pure module (`src/timeline/exportTimeLeft.ts`) is the only place that decides what may be said; the chat card, the dialog's running
-view and the assistant's `time_left_s` read its answer. Nothing is said until 20 s have been rendered and either 15 % is made or 60 s have been rendered.
-Then a figure from the slope of the share made over the last 20 s, rounded to a grid ("under a minute left", "about 4 min left",
+view and the assistant's `time_left_s` read its answer. Nothing is said until a pace can be read: 5 s of pictures after the run's first picture
+(the first report that shows progress), with some progress in them, however little is made by then and however long the render has been
+running. Then a figure from the slope of the share made over the last 20 s, rounded to a grid ("under a minute left", "about 4 min left",
 "about 1 h 15 min left") and kept while the raw figure stays near its cell; from 90 % made "Finishing"; and "taking longer than
-expected" once the average pace implies more than 1.5 times the first total. A render made in parts says nothing until its final
+expected" once the average pace implies more than 1.5 times the total it implied at the alarm's reference point: the first moment the
+render has run 20 s and either made 15 % or run 60 s, with a pace that can be read (where the rule before this one said its first figure). The reference
+is not the first figure: one said a few seconds in is on average a little too short, and taken from it the alarm said "taking longer" on a
+healthy recorded run and caught a 3 times slowdown in 41 of 53 runs instead of 48. A render made in parts says nothing until its final
 encode. The card no longer prints a guessed "Expected" line and the dialog's running line still shows the speed multiple as 0.28.0
 did; the slow-export banner and the assistant's `projected_total_s` keep the raw pace on purpose (the new figure is rounded and
 sometimes absent). Replayed on 88 recorded exports (16,109 reports at their half-second cadence, 20 s to 6.5 minutes, one laptop):
-the first figure comes after a median 20 s of rendering (latest 48 s); at each checkpoint from 15 to 85 % done a figure is within 0.5
-to 1.5 times the real time left for 82 to 100 % of the runs that show one (89 of about 940 figures were wrong, 88 of them too long);
-no healthy run says "taking longer" (the closest reaches 1.48 of the 1.5 line).
+the first figure comes a median 5.2 s after the first picture (latest 5.3 s; the rule before this one: a median 20 s, latest 48 s), at a median 7 % made; it is rough (of the 83
+runs that get one, 78 are within 0.5 to 1.5 times the real time left, 81 within a factor of 2; the earlier rule's figure, said later, was within 0.5 to 1.5 times in 78 of 80), and from 10 to 60 s
+after the first picture 85 to 96 % of the runs show a figure within 0.5 to 1.5 times the real time left; at each checkpoint from 15 to 85 % done 83 to 98 %
+(131 of 1,208 figures were wrong, 128 of them too long). On the runs that show a figure under both rules, the early figure is slightly less often right at 20 to 45 s after the first picture
+(at 30 s, 66 of 74 against 69 of 74). The figure changes at most 3 times in a run's first minute after the first picture, 0.8 on average (the earlier rule: 2 and 0.4, because it said nothing for
+the first 20 s); no healthy run says "taking longer" (the closest reaches 1.48 of the 1.5 line). The same rule replayed on the 89 runs of the lab's report (one laptop, 25 reel,
+38 4K, 16 streamed HD, 3 plain, 3 talking head, 4 photo slides): the first figure within 0.5 to 1.5 times the real time left in 88 of 89 (the earlier rule: 83 of 87), at most 14 changes in the first
+minute (one wild 4K run, 13 before) and 1.7 on average (1.1 before), and the same 2 healthy 4K slide exports as before say "taking longer".
 
 ## Why Fast is a modest gain
 
@@ -157,7 +166,12 @@ chip, the 60 fps project at 1.9 to 2.1 and the slideshow at 1.05; with a chip no
   multiplied by about 20 / (20 - s). With a stall built into 53 real runs at 40 % made, 10 s raised it by a median 1.5 times (up to
   3), 15 s by 3 times, 19 s by 10; it falls back when the stall leaves the window, and neither the alarm (about 30 s on a 150 s
   render) nor the 60 s quiet rule hides it. Options: accept it; or keep the shown figure while the newest 3 s made no progress
-  (one function, `leftFromPace`).
+  (one function, `leftFromPace`). The first figure is now said before the alarm's reference point, where no alarm acts yet: a 70 s
+  stall built into each of the 88 and the 89 recorded runs at 2 to 12 % made left a figure on the card after 59 s of stall in about
+  nine runs of ten, a median 18 to 25 times the figure when the stall began, until the 60 s quiet rule hid it, and said nothing of taking
+  longer. The stall is built, not recorded; how often one falls in that stretch (a median 15 s long) is not known. The same option, tried
+  on a copy of the rule, held that inflation to a median 1.0 to 1.4 times (at most 2) and changed no alarm state in 708 replayed variants;
+  it is not applied, because it would change a behaviour accepted before this one (the figure grows while nothing is made).
 - **"taking longer than expected" trips on a short stall and never clears.** From 40 % made, a stall of 15 s trips it in 13 of 53
   real runs, 30 s in 39, 60 s in 51; a render 3 times slower for a while and then normal trips it in 42 of 53 and keeps it to the
   end; on healthy runs it never fired. Options: accept it (the export did take longer); or release it once the 20 s pace has been

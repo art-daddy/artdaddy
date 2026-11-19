@@ -4,13 +4,19 @@
 // The fixture (`__fixtures__/timeLeftRuns.json`) holds the ffmpeg progress positions of real runs kept by the export-timing
 // lab, with the time each report arrived. Every run is fed through the rule's public API, one report per sample, and what the
 // rule said at each report is checked against the accepted rule and against what the run really went on to take:
-//   C1  the gate: no figure before 20 s of rendering and (15 % made or 60 s of rendering); none at all for a run under 20 s;
+//   C1  the first figure: said at the first report that is 5 s after the run's first picture and has made progress since it, never before; none at all for a run
+//       whose pictures last under 5 s; no 15 % and no 20 s or 60 s clock stands in its way;
 //   C2  finishing: from 90 % made, and never before, and held;       C3  a figure never flickers back to nothing;
 //   C4  a figure is on the rounding grid;                             C5  the figures are right (see below);
 //   C6  "taking longer" is never the first thing said and is held (its false alarms on healthy runs are reported);
 //   C7  a shifted clock changes nothing and a coarser report cadence keeps C1 to C4;
 //   C8  slowdowns built from real feeds (the lab has no genuinely slow run): a 3 times slower tail is caught, a 1.2 times one is not;
-//   C9  the words do not flap: a figure that changes does not go back to the figure it left within a few reports.
+//   C9  the words do not flap: a figure that changes does not go back to the figure it left within a few reports;
+//   C10 the first figure comes within a second of the 5 s of pictures it needs, on every run that lasts that long;
+//   C11 "taking longer" is said at the very report the written reference rule says it (its reference point is where the render has run 20 s and made 15 %, or run 60 s, never
+//       the early figure): on the recorded runs and on the slowed ones;
+//   C12 the figure's changes in the first minute stay within the allowance, and the early figures are right at 10 to 60 s after the first picture;
+//   C13 a run that never reaches a readable pace (it ends, or stands still, within the span) is never given a figure.
 // Every oracle is computed here from the raw samples and the accepted rule's numbers, never from the rule's own constants or state: a
 // claim that read the rule's constant could not notice that the constant had been changed.
 //
@@ -33,15 +39,20 @@ import { roundTimeLeft, type TimeLeft } from "./exportTimeLeft";
 // ── the numbers of the claims ──────────────────────────────────────────────────────────────────────────────────────────
 
 // The accepted rule, written out again on purpose (see the header).
-const RULE_GATE_RENDERED_SECONDS = 20;
-const RULE_GATE_SHARE = 0.15;
-const RULE_GATE_RENDERED_ALONE_SECONDS = 60;
+/** The pictures a pace is read from: the first figure needs this much of them. */
+const RULE_PICTURE_SPAN_SECONDS = 5;
+/** Where "taking longer" takes its reference: the first moment the render has run this long ... */
+const RULE_REFERENCE_RENDERED_SECONDS = 20;
+/** ... and has made this much, or has run RULE_REFERENCE_RENDERED_ALONE_SECONDS, with a pace that can be read. */
+const RULE_REFERENCE_SHARE = 0.15;
+const RULE_REFERENCE_RENDERED_ALONE_SECONDS = 60;
+const RULE_LONGER_FACTOR = 1.5;
 const RULE_FINISHING_SHARE = 0.9;
 /** The figure that stands for the words "under a minute". */
 const UNDER_A_MINUTE_FIGURE = 30;
 const UNDER_A_MINUTE_REAL_SECONDS = 60;
 
-// C1c: the gate really opens (a rule that never said anything would pass every other claim).
+// C1c: figures really are said (a rule that never said anything would pass every other claim).
 const LIVE_CHECKPOINTS = [0.3, 0.5, 0.7];
 const LIVE_MIN_RENDERED_SECONDS = 25;
 const LIVE_MIN_POINTS = 30;
@@ -75,6 +86,24 @@ const C8_REPORTED_FACTORS = [1.5, 2, 5];
 // C9: the words do not flap.
 const FLAP_WINDOW_REPORTS = 5;
 
+// C10 to C12: the early figures, counted from the run's first picture (a report with a position above 0).
+/** The first figure comes within this many seconds of the span of pictures it needs (the report cadence is about half a second). */
+const FIRST_FIGURE_MAX_LATE_SECONDS = 1;
+/** Seconds after the first picture at which the figure is judged against what the run really took. */
+const EARLY_SECONDS = [10, 15, 20, 30, 45, 60];
+/** Of the runs still going 5 s or more at that moment and not yet "finishing", this share shows a figure (observed 100 %); of those, this share is within 50 % (observed 85 to 96 %) and this
+ *  share within a factor of 2 (observed 97 to 100 %). */
+const EARLY_MIN_SHARE_WITH_FIGURE = 0.98;
+const EARLY_MIN_WITHIN_HALF = 0.8;
+const EARLY_MIN_WITHIN_FACTOR_TWO = 0.95;
+/** The figure's changes in the first minute after the first picture: at most this many in any run (observed 3), this many on average (observed 0.79), and no step between
+ *  two figures larger than this multiple (observed 2). These are guards set at the measured values, not requirements: the figure is said earlier, in a rougher stretch of the
+ *  run, so more of its changes fall inside this minute than when it was said only after 15 % (observed 2 at most, 0.38 on average). */
+const FIRST_MINUTE_SECONDS = 60;
+const FIRST_MINUTE_MAX_CHANGES = 3;
+const FIRST_MINUTE_MAX_MEAN_CHANGES = 1;
+const FIRST_MINUTE_MAX_STEP = 2;
+
 // C6: on the real, healthy runs "taking longer" should never be said (observed: none of the 88).
 const C6_HEALTHY_MAX_FALSE_ALARMS = 0;
 
@@ -88,6 +117,8 @@ const STALL_MIN_RUNS_WITH_FIGURE_AT_ITS_END = 10;
 // The fixture itself.
 const LONG_RUN_MIN_RENDER_SECONDS = 25;
 const SHORT_RUN_MAX_RENDER_SECONDS = 20;
+/** The report's tables count a run as "in play" when it rendered this long in all (a shorter export needs no live time left). */
+const IN_PLAY_MIN_RENDER_SECONDS = 20;
 const FIXTURE_MIN_LONG_RUNS = 40;
 const FIXTURE_MIN_SHORT_RUNS = 5;
 const FIXTURE_MAX_BYTES = 1.5 * 1024 * 1024;
@@ -146,19 +177,39 @@ function onTheGrid(seconds: number): boolean {
 
 // ── the claims, as lists of violations (empty = true) ──────────────────────────────────────────────────────────────────
 
-/** C1: a figure ("left" or "longer") is never said before the gate. */
-function gateViolations(f: Facts): string[] {
-  const first = firstOf(f, (v) => v.kind === "left" || v.kind === "longer");
-  if (first < 0) return [];
-  const rendered = f.rendered[first];
-  const share = f.share[first];
-  const out: string[] = [];
-  if (rendered < RULE_GATE_RENDERED_SECONDS)
-    out.push(`${f.run.id}: a figure after only ${n1(rendered)} s of rendering`);
-  if (!(share >= RULE_GATE_SHARE || rendered >= RULE_GATE_RENDERED_ALONE_SECONDS)) {
-    out.push(`${f.run.id}: a figure at ${pct(share)} made and ${n1(rendered)} s of rendering`);
+/** The report at which a pace can first be read, from the raw samples alone: the first report that is RULE_PICTURE_SPAN_SECONDS after the run's first picture (a report
+ *  with a position above 0) and has made progress since it, while less than 90 % is made. -1 when there is none. (Every recorded run makes progress within the span of its
+ *  first picture: a test below checks it, so that this oracle is the whole of the condition on these runs.) */
+function readableAt(f: Facts): number {
+  const picture = f.run.samples.findIndex(([, out]) => out > 0);
+  if (picture < 0) return -1;
+  const t0 = f.run.samples[picture][0];
+  for (let i = picture + 1; i < f.recs.length; i++) {
+    if (f.share[i] >= RULE_FINISHING_SHARE) return -1;
+    if (
+      (f.run.samples[i][0] - t0) / 1000 >= RULE_PICTURE_SPAN_SECONDS &&
+      f.share[i] > f.share[picture]
+    )
+      return i;
   }
-  return out;
+  return -1;
+}
+
+/** Seconds from the run's first picture to a report. */
+const sinceFirstPicture = (f: Facts, i: number): number => {
+  const picture = f.run.samples.findIndex(([, out]) => out > 0);
+  return picture < 0 ? NaN : (f.run.samples[i][0] - f.run.samples[picture][0]) / 1000;
+};
+
+/** C1: the first figure is said at the report where a pace can first be read, and no figure is said before it; a run with no such report never gets one. */
+function firstFigureViolations(f: Facts): string[] {
+  const want = readableAt(f);
+  const first = firstOf(f, (v) => v.kind === "left" || v.kind === "longer");
+  return first === want
+    ? []
+    : [
+        `${f.run.id}: the first figure is at report ${first}, a pace can first be read at report ${want}`,
+      ];
 }
 
 /** C2: "finishing" from 90 % made and not before; once said, held. */
@@ -221,7 +272,7 @@ function longerViolations(f: Facts): string[] {
 }
 
 const basicViolations = (f: Facts): string[] => [
-  ...gateViolations(f),
+  ...firstFigureViolations(f),
   ...finishingViolations(f),
   ...flickerViolations(f),
   ...gridViolations(f),
@@ -242,19 +293,127 @@ function flapViolations(f: Facts): string[] {
   return out;
 }
 
-/** How close a run came to being called "taking longer": the highest the total implied by its average pace rose after its first
- *  figure, as a multiple of the total implied when that figure was shown (the alarm is meant to be at 1.5). Null without a figure. */
-function headroom(f: Facts): number | null {
-  const first = firstOf(f, isFigure);
-  if (first < 0) return null;
+/** The report at which "taking longer" takes its reference, from the raw samples alone: the first moment the render has run RULE_REFERENCE_RENDERED_SECONDS (counted from its
+ *  first report) and made RULE_REFERENCE_SHARE (or run RULE_REFERENCE_RENDERED_ALONE_SECONDS) with a pace that can be read, while less than 90 % is made. -1 when there is none.
+ *  The figure said as soon as a pace can be read is earlier than this and is not a reference. */
+function referenceAt(f: Facts): number {
+  const t0 = f.run.samples[0][0];
   const floor = f.share[0];
-  const total = (i: number): number => f.rendered[i] / (f.share[i] - floor);
-  const base = total(first);
+  for (let i = 0; i < f.recs.length; i++) {
+    if (f.share[i] >= RULE_FINISHING_SHARE) return -1;
+    const rendered = (f.run.samples[i][0] - t0) / 1000;
+    if (
+      rendered >= RULE_REFERENCE_RENDERED_SECONDS &&
+      (f.share[i] >= RULE_REFERENCE_SHARE || rendered >= RULE_REFERENCE_RENDERED_ALONE_SECONDS) &&
+      f.share[i] > floor &&
+      paceReadable(f, i)
+    )
+      return i;
+  }
+  return -1;
+}
+
+/** The total the average pace implies at report i: the time since the run's first report over the share made since it. Null before anything is made. */
+function totalAt(f: Facts, i: number): number | null {
+  const rendered = (f.run.samples[i][0] - f.run.samples[0][0]) / 1000;
+  const made = f.share[i] - f.share[0];
+  return made > 0 && rendered > 0 ? rendered / made : null;
+}
+
+/** How close a run came to being called "taking longer": the highest the total implied by its average pace rose after the alarm's reference point, as a multiple of the
+ *  total implied at it (the alarm is meant to be at 1.5). Null when the run never reached the reference point. */
+function headroom(f: Facts): number | null {
+  const ref = referenceAt(f);
+  const base = ref < 0 ? null : totalAt(f, ref);
+  if (ref < 0 || base === null) return null;
   let top = 0;
-  for (let i = first; i < f.recs.length && f.share[i] < RULE_FINISHING_SHARE; i++) {
-    if (f.share[i] > floor) top = Math.max(top, total(i) / base);
+  for (let i = ref; i < f.recs.length && f.share[i] < RULE_FINISHING_SHARE; i++) {
+    const total = totalAt(f, i);
+    if (total !== null) top = Math.max(top, total / base);
   }
   return top;
+}
+
+/** Whether a pace could be read at report i, from the raw samples alone: the reports that made a picture, one per instant; the 20 s before report i (from the picture on
+ *  either side of that moment, or the first picture when the run began inside it); at least 5 s of it, with progress in it. */
+function paceReadable(f: Facts, i: number): boolean {
+  if (f.share[i] <= 0) return false;
+  const pictures: Array<{ at: number; share: number }> = [];
+  for (let j = 0; j <= i; j++) {
+    if (f.share[j] <= 0) continue;
+    const at = f.run.samples[j][0];
+    const picture = { at, share: f.share[j] };
+    if (pictures.length > 0 && pictures[pictures.length - 1].at === at)
+      pictures[pictures.length - 1] = picture;
+    else pictures.push(picture);
+  }
+  const now = { at: f.run.samples[i][0], share: f.share[i] };
+  const start = now.at - 20_000;
+  let k = 0;
+  while (k + 1 < pictures.length && pictures[k + 1].at <= start) k++;
+  const oldest = pictures[k];
+  let from = oldest.at;
+  let made = oldest.share;
+  const next = pictures[k + 1];
+  if (oldest.at < start && next) {
+    from = start;
+    made =
+      oldest.share + ((next.share - oldest.share) * (start - oldest.at)) / (next.at - oldest.at);
+  }
+  return (now.at - from) / 1000 >= RULE_PICTURE_SPAN_SECONDS && now.share - made > 0;
+}
+
+/** The report at which "taking longer" should first be said, from the raw samples alone: the total the average pace implies passes RULE_LONGER_FACTOR times its value at the
+ *  reference point (see {@link referenceAt}). -1 when never, before 90 % is made. */
+function longerExpectedAt(f: Facts): number {
+  const ref = referenceAt(f);
+  const base = ref < 0 ? null : totalAt(f, ref);
+  if (ref < 0 || base === null) return -1;
+  for (let i = ref + 1; i < f.recs.length; i++) {
+    if (f.share[i] >= RULE_FINISHING_SHARE) return -1;
+    const total = totalAt(f, i);
+    if (total !== null && total > RULE_LONGER_FACTOR * base) return i;
+  }
+  return -1;
+}
+
+/** Is a figure within a factor of two of the real time left? "Under a minute" is right when less than a minute and a half is left (twice its band's top). */
+function withinFactorTwo(figure: number, real: number): boolean {
+  if (figure === UNDER_A_MINUTE_FIGURE) return real < 90;
+  const ratio = figure / real;
+  return ratio >= 0.5 && ratio <= 2;
+}
+
+/** What the rule said, and what the run really had left, at the last report at or before `seconds` after the run's first picture; null when the run was over by then. */
+function pointAfterPicture(
+  f: Facts,
+  seconds: number,
+): { readonly value: TimeLeft; readonly real: number } | null {
+  const picture = f.run.samples.findIndex(([, out]) => out > 0);
+  if (picture < 0) return null;
+  const until = f.run.samples[picture][0] + seconds * 1000;
+  if (f.run.endMs <= until) return null;
+  let at = -1;
+  for (let i = 0; i < f.recs.length && f.recs[i].atMs <= until; i++) at = i;
+  return at < 0 ? null : { value: f.recs[at].value, real: f.recs[at].realLeft };
+}
+
+/** The figure's changes in the first minute after the run's first picture: how many times it moved to another figure, and the largest step (a multiple) between two figures. */
+function firstMinuteChanges(f: Facts): { readonly changes: number; readonly step: number } {
+  let changes = 0;
+  let step = 1;
+  let previous: number | null = null;
+  for (let i = 0; i < f.recs.length; i++) {
+    if (sinceFirstPicture(f, i) > FIRST_MINUTE_SECONDS) break;
+    const v = f.recs[i].value;
+    if (!isFigure(v)) continue;
+    if (previous !== null && v.seconds !== previous) {
+      changes++;
+      step = Math.max(step, Math.max(v.seconds / previous, previous / v.seconds));
+    }
+    previous = v.seconds;
+  }
+  return { changes, step };
 }
 
 // ── the replay ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -309,7 +468,7 @@ function checkpointRow(facts: readonly Facts[], checkpoint: number): CheckpointR
   const right = shown.filter((p) => isRight(secondsOf(p), p.real, WITHIN_HALF));
   return {
     checkpoint,
-    inPlay: points.filter((p) => p.facts.totalRendered >= RULE_GATE_RENDERED_SECONDS).length,
+    inPlay: points.filter((p) => p.facts.totalRendered >= IN_PLAY_MIN_RENDER_SECONDS).length,
     shown,
     right,
     wrong: shown.filter((p) => !right.includes(p)),
@@ -421,7 +580,7 @@ function buildReport(): string {
   L.push("");
   const violations = (check: (f: Facts) => string[]): number => ALL.flatMap(check).length;
   L.push(
-    `- C1 gate: ${violations(gateViolations)} violations. C2 finishing: ${violations(finishingViolations)}. C3 flicker: ${violations(flickerViolations)}. C4 grid: ${violations(gridViolations)}. C6 longer (order and hold): ${violations(longerViolations)}. C9 flapping: ${violations(flapViolations)}.`,
+    `- C1 first figure: ${violations(firstFigureViolations)} violations. C2 finishing: ${violations(finishingViolations)}. C3 flicker: ${violations(flickerViolations)}. C4 grid: ${violations(gridViolations)}. C6 longer (order and hold): ${violations(longerViolations)}. C9 flapping: ${violations(flapViolations)}. C11 taking longer where the reference rule puts it: ${ALL.filter((f) => firstOf(f, (v) => v.kind === "longer") !== longerExpectedAt(f)).length} runs differ.`,
   );
   const fail = ROWS.filter(
     (r) =>
@@ -437,17 +596,53 @@ function buildReport(): string {
   );
   const firsts = LONG.map((f) => ({ f, at: firstOf(f, isFigure) })).filter((x) => x.at >= 0);
   const secs = firsts.map((x) => x.f.rendered[x.at]);
+  const afterPicture = firsts.map((x) => sinceFirstPicture(x.f, x.at));
   const shares = firsts.map((x) => x.f.share[x.at]);
   L.push(
-    `- First figure (${firsts.length} of ${LONG.length} long runs get one): after ${n1(median(secs) ?? 0)} s of rendering at the median (90th percentile ${n1(quantile(secs, 0.9) ?? 0)} s, latest ${n1(Math.max(...secs))} s), at ${pct0(median(shares) ?? 0)} made at the median (range ${pct0(Math.min(...shares))} to ${pct0(Math.max(...shares))}).`,
+    `- First figure (${firsts.length} of ${LONG.length} long runs get one): after ${n1(median(afterPicture) ?? 0)} s from the first picture at the median (90th percentile ${n1(quantile(afterPicture, 0.9) ?? 0)} s, latest ${n1(Math.max(...afterPicture))} s; from the first report: median ${n1(median(secs) ?? 0)} s), at ${pct0(median(shares) ?? 0)} made at the median (range ${pct0(Math.min(...shares))} to ${pct0(Math.max(...shares))}).`,
   );
   const rooms = ALL.map((f) => ({ id: f.run.id, room: headroom(f) })).filter(
     (x): x is { id: string; room: number } => x.room !== null,
   );
   const top = [...rooms].sort((a, b) => b.room - a.room)[0];
   L.push(
-    `- Headroom to the "taking longer" alarm (highest total implied by the average pace after the first figure, as a multiple of the first one; the alarm is at 1.5): median ${(median(rooms.map((x) => x.room)) ?? 0).toFixed(2)}, ${rooms.filter((x) => x.room >= 1.3).length} of ${rooms.length} runs reach 1.3 or more, ${rooms.filter((x) => x.room >= 1.4).length} reach 1.4 or more, the highest is ${top.room.toFixed(2)} (${top.id}).`,
+    `- Headroom to the "taking longer" alarm (highest total implied by the average pace after the alarm's reference point, as a multiple of the total at it; the alarm is at 1.5): median ${(median(rooms.map((x) => x.room)) ?? 0).toFixed(2)}, ${rooms.filter((x) => x.room >= 1.3).length} of ${rooms.length} runs reach 1.3 or more, ${rooms.filter((x) => x.room >= 1.4).length} reach 1.4 or more, the highest is ${top.room.toFixed(2)} (${top.id}).`,
   );
+  const minute = ALL.filter(
+    (f) =>
+      f.run.endMs - f.run.samples[f.run.samples.findIndex(([, o]) => o > 0)][0] >= 60_000 &&
+      firstOf(f, isFigure) >= 0,
+  ).map(firstMinuteChanges);
+  L.push(
+    `- The figure's changes in the first minute after the first picture (${minute.length} runs of a minute or more): ${n1(minute.reduce((n, m) => n + m.changes, 0) / Math.max(1, minute.length))} on average, at most ${Math.max(...minute.map((m) => m.changes))}; largest step between two figures ${Math.max(...minute.map((m) => m.step)).toFixed(2)} times.`,
+  );
+  L.push("");
+  L.push("## Early figures: seconds after the run's first picture");
+  L.push("");
+  L.push(
+    "Of the runs still going with 5 s or more really left: how many show a figure, and of those how many are within 50 % and within a factor of 2 of what was really left.",
+  );
+  L.push("");
+  L.push(
+    "| seconds after the first picture | runs in play | showing a figure | within 50 % | within a factor of 2 |",
+  );
+  L.push("|---:|---:|---:|---:|---:|");
+  for (const seconds of EARLY_SECONDS) {
+    const points = ALL.map((f) => pointAfterPicture(f, seconds)).filter(
+      (p): p is NonNullable<typeof p> =>
+        p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS && p.value.kind !== "finishing",
+    );
+    const shown = points.filter((p) => isFigure(p.value));
+    const half = shown.filter((p) =>
+      isRight((p.value as { seconds: number }).seconds, p.real, WITHIN_HALF),
+    );
+    const two = shown.filter((p) =>
+      withinFactorTwo((p.value as { seconds: number }).seconds, p.real),
+    );
+    L.push(
+      `| ${seconds} | ${points.length} | ${shown.length} | ${half.length} (${pct0(half.length / Math.max(1, shown.length))}) | ${two.length} (${pct0(two.length / Math.max(1, shown.length))}) |`,
+    );
+  }
   L.push("");
   L.push("## C5: are the figures right? (by how far the export has got)");
   L.push("");
@@ -490,10 +685,12 @@ function buildReport(): string {
   L.push("### Figures that were not right");
   L.push("");
   const wrongs = ROWS.flatMap((r) => r.wrong);
+  const figuresChecked = ROWS.reduce((n, r) => n + r.shown.length, 0);
+  const tooLong = wrongs.filter((p) => isFigure(p.value) && p.value.seconds / p.real > 1).length;
   L.push(
     wrongs.length === 0
       ? "None."
-      : `${wrongs.length} wrong figures over all checkpoints (figure in seconds, real time left in seconds, ratio figure / real):`,
+      : `${wrongs.length} wrong figures of the ${figuresChecked} checked over all checkpoints, ${tooLong} of them too long (figure in seconds, real time left in seconds, ratio figure / real):`,
   );
   L.push("");
   if (wrongs.length > 0) {
@@ -603,19 +800,42 @@ describe("the recorded runs", () => {
     expect(new Set(REPLAY_RUNS.map((r) => r.choice))).toEqual(new Set(["quality", "fast", null]));
   });
 
-  it("C1 gate: no figure before 20 s of rendering and (15 % made or 60 s of rendering)", () => {
-    expect(ALL.flatMap(gateViolations)).toEqual([]);
+  it("C1 first figure: said at the first report 5 s after the run's first picture that has made progress since it, and never before, on every recorded run", () => {
+    expect(ALL.flatMap(firstFigureViolations)).toEqual([]);
+    expect(
+      ALL.filter((f) => readableAt(f) >= 0).length,
+      "the claim has runs with a figure to judge",
+    ).toBeGreaterThanOrEqual(FIXTURE_MIN_LONG_RUNS);
   });
 
-  it("C1 gate: a run that renders for under 20 s never shows a figure", () => {
-    expect(SHORT.length).toBeGreaterThanOrEqual(FIXTURE_MIN_SHORT_RUNS);
-    const shown = SHORT.filter((f) =>
+  it("C1 first figure: a run that has under 5 s of pictures before it ends or is 90 % made never shows a figure", () => {
+    const unreadable = ALL.filter((f) => readableAt(f) < 0);
+    expect(unreadable.length, "the claim has runs to judge").toBeGreaterThanOrEqual(
+      FIXTURE_MIN_SHORT_RUNS,
+    );
+    const shown = unreadable.filter((f) =>
       f.recs.some((rec) => rec.value.kind === "left" || rec.value.kind === "longer"),
     );
     expect(shown.map((f) => f.run.id)).toEqual([]);
   });
 
-  it("C1 gate: it does open: after 25 s of rendering, a run still going shows a figure at 30 %, 50 % and 70 % made", () => {
+  it("every recorded run has made progress within 5 s of its first picture, so the oracle of C1 states the whole condition on these recordings", () => {
+    const stuck = ALL.filter((f) => {
+      const picture = f.run.samples.findIndex(([, out]) => out > 0);
+      if (picture < 0) return true;
+      let at = picture;
+      for (
+        let i = picture;
+        i < f.recs.length && sinceFirstPicture(f, i) <= RULE_PICTURE_SPAN_SECONDS;
+        i++
+      )
+        at = i;
+      return f.share[at] <= f.share[picture];
+    });
+    expect(stuck.map((f) => f.run.id)).toEqual([]);
+  });
+
+  it("C1 first figure: it does say one: after 25 s of rendering, a run still going shows a figure at 30 %, 50 % and 70 % made", () => {
     const points = LIVE_CHECKPOINTS.flatMap((c) => ALL.map((f) => pointAt(f, c)))
       .filter((p): p is Point => p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS)
       .filter((p) => p.facts.rendered[p.index] >= LIVE_MIN_RENDERED_SECONDS);
@@ -727,6 +947,118 @@ describe("the recorded runs", () => {
     );
     expect(slowed.flatMap(basicViolations)).toEqual([]);
     expect(slowed.flatMap(longerViolations)).toEqual([]);
+  });
+
+  it("C10 first figure: comes within a second of the 5 s of pictures it needs, on every recorded run that lasts that long", () => {
+    const off: string[] = [];
+    let judged = 0;
+    for (const f of ALL) {
+      const i = firstOf(f, isFigure);
+      if (i < 0) continue;
+      judged++;
+      const after = sinceFirstPicture(f, i);
+      if (
+        after < RULE_PICTURE_SPAN_SECONDS ||
+        after > RULE_PICTURE_SPAN_SECONDS + FIRST_FIGURE_MAX_LATE_SECONDS
+      )
+        off.push(`${f.run.id}: ${n1(after)} s after the first picture`);
+    }
+    expect(judged, "the claim has runs with a figure to judge").toBeGreaterThanOrEqual(80);
+    expect(off).toEqual([]);
+  });
+
+  it("C11 taking longer: said at the very report the written reference rule says it, on the recorded runs and on every slowed one (the early figure is no reference)", () => {
+    const bad: string[] = [];
+    let alarms = 0;
+    const compare = (f: Facts, what: string): void => {
+      const want = longerExpectedAt(f);
+      const got = firstOf(f, (v) => v.kind === "longer");
+      if (want >= 0) alarms++;
+      if (got !== want)
+        bad.push(
+          `${what} ${f.run.id}: "taking longer" at report ${got}, the reference rule says ${want}`,
+        );
+    };
+    for (const f of ALL) compare(f, "recorded");
+    for (const factor of [C8_HEALTHY_FACTOR, ...C8_REPORTED_FACTORS, C8_SLOW_FACTOR])
+      for (const f of ALL.filter((g) => g.run.endMs / 1000 >= C8_MIN_RENDER_SECONDS))
+        compare(factsOf(slowedFrom(f.run, C8_SLOW_FROM_SHARE, factor)), `${factor}x`);
+    expect(bad).toEqual([]);
+    expect(alarms, "the comparison had alarms to compare").toBeGreaterThanOrEqual(100);
+  });
+
+  it("C12 early figures: 10 to 60 s after the first picture a run still going shows a figure, within 50 % of what was left for 80 % of the runs and within a factor of 2 for 95 %", () => {
+    const failing: string[] = [];
+    for (const seconds of EARLY_SECONDS) {
+      const points = ALL.map((f) => pointAfterPicture(f, seconds)).filter(
+        (p): p is NonNullable<typeof p> =>
+          p !== null && p.real >= C5_MIN_REAL_LEFT_SECONDS && p.value.kind !== "finishing",
+      );
+      const shown = points.filter((p) => isFigure(p.value));
+      const figureOf = (p: NonNullable<ReturnType<typeof pointAfterPicture>>): number =>
+        (p.value as { seconds: number }).seconds;
+      const half = shown.filter((p) => isRight(figureOf(p), p.real, WITHIN_HALF));
+      const two = shown.filter((p) => withinFactorTwo(figureOf(p), p.real));
+      expect(points.length, `${seconds} s: runs in play`).toBeGreaterThanOrEqual(40);
+      const where = `${seconds} s: ${shown.length} of ${points.length} show a figure, ${half.length} within 50 %, ${two.length} within a factor of 2`;
+      if (shown.length / points.length < EARLY_MIN_SHARE_WITH_FIGURE) failing.push(where);
+      else if (half.length / shown.length < EARLY_MIN_WITHIN_HALF) failing.push(where);
+      else if (two.length / shown.length < EARLY_MIN_WITHIN_FACTOR_TWO) failing.push(where);
+    }
+    expect(failing).toEqual([]);
+  });
+
+  it("C12 flapping: the figure changes at most 3 times in a run's first minute after its first picture, at most once on average, and never by more than a factor of 2", () => {
+    const runs = ALL.filter((f) => {
+      const picture = f.run.samples.findIndex(([, out]) => out > 0);
+      return (
+        firstOf(f, isFigure) >= 0 &&
+        f.run.endMs - f.run.samples[picture][0] >= FIRST_MINUTE_SECONDS * 1000
+      );
+    });
+    const changes = runs.map(firstMinuteChanges);
+    expect(runs.length, "the claim has runs of a minute or more to judge").toBeGreaterThanOrEqual(
+      40,
+    );
+    expect(Math.max(...changes.map((c) => c.changes))).toBeLessThanOrEqual(
+      FIRST_MINUTE_MAX_CHANGES,
+    );
+    expect(changes.reduce((n, c) => n + c.changes, 0) / changes.length).toBeLessThanOrEqual(
+      FIRST_MINUTE_MAX_MEAN_CHANGES,
+    );
+    expect(Math.max(...changes.map((c) => c.step))).toBeLessThanOrEqual(
+      FIRST_MINUTE_MAX_STEP + 1e-9,
+    );
+  });
+
+  it("C13 a run that never reaches a readable pace is never given a figure: one cut 4.9 s after its first picture, and one that stands still at its first picture", () => {
+    const shown: string[] = [];
+    let judged = 0;
+    for (const { run } of LONG) {
+      const picture = run.samples.findIndex(([, out]) => out > 0);
+      const [t0, firstOut] = run.samples[picture];
+      const cutSamples = run.samples.filter(([at]) => at - t0 < 4900);
+      const cut: ReplayRun = {
+        ...run,
+        samples: cutSamples,
+        endMs: cutSamples[cutSamples.length - 1][0],
+      };
+      const still: ReplayRun = {
+        ...run,
+        samples: run.samples.map(([at, out], i) => [at, i >= picture ? firstOut : out] as const),
+      };
+      for (const [what, variant] of [
+        ["cut", cut],
+        ["standing still", still],
+      ] as const) {
+        judged++;
+        const f = factsOf(variant);
+        if (f.recs.some((rec) => rec.value.kind === "left" || rec.value.kind === "longer"))
+          shown.push(`${run.id} (${what})`);
+      }
+    }
+    expect(judged, "the claim has runs to judge").toBeGreaterThanOrEqual(2 * FIXTURE_MIN_LONG_RUNS);
+    expect(shown).toEqual([]);
   });
 
   it("writes the markdown report when REPLAY_REPORT names a file", () => {

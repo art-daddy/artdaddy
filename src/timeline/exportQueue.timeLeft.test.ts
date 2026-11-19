@@ -19,15 +19,7 @@ import {
 import { describeExportTime } from "./exportOptions";
 import { __resetFacts3c } from "./exportFacts3c";
 import { cancelExport, listExportOutcomes } from "./exportQueue";
-import {
-  cellOf,
-  FINISHING_FROM,
-  GATE_FRACTION,
-  GATE_RENDERED_ALONE_SECONDS,
-  GATE_RENDERED_SECONDS,
-  IMPLAUSIBLE_SECONDS,
-  roundTimeLeft,
-} from "./exportTimeLeft";
+import { cellOf, FINISHING_FROM, IMPLAUSIBLE_SECONDS, roundTimeLeft } from "./exportTimeLeft";
 import { describeLiveStatus, QUIET_SECONDS } from "./exportWords";
 
 vi.mock("../api/exportEvents", () => ({ reportExport: vi.fn(async () => undefined) }));
@@ -104,18 +96,11 @@ const RENDERING_KEYS = [
 const PREPARING_KEYS = ["elapsed_s", "expected_s", "filename", "job_id", "stage", "state"];
 const CHECKING_KEYS = PREPARING_KEYS;
 
-/** The rule, as the owner stated it, for a render that reports at second 1, 2, 3 ...: the card may say a time left once 20 s have been rendered (counted from the first report) and either
- *  15 % is made or 60 s have been rendered, and not once 90 % is made. */
-const mayHaveFigure = (t: number, share: number): boolean => {
-  const rendered = t - 1;
-  return (
-    rendered >= GATE_RENDERED_SECONDS &&
-    (share >= GATE_FRACTION || rendered >= GATE_RENDERED_ALONE_SECONDS) &&
-    share < FINISHING_FROM
-  );
-};
+/** The rule, for a render that reports at second 1, 2, 3 ...: the card may say a time left once 5 s of pictures are behind it (the first report, at second 1, is the first
+ *  picture) and not once 90 % is made. */
+const mayHaveFigure = (t: number, share: number): boolean => t - 1 >= 5 && share < FINISHING_FROM;
 
-describe("the gate: when a running export first has a time left to say", () => {
+describe("when a running export first has a time left to say", () => {
   /** A steady render of `total` seconds, a report every second, looked at after each. */
   async function played(total: number, until: number) {
     const run = await startRun({ history: total });
@@ -131,7 +116,7 @@ describe("the gate: when a running export first has a time left to say", () => {
     return seen;
   }
 
-  const expectGate = (seen: Awaited<ReturnType<typeof played>>, total: number) => {
+  const expectFigures = (seen: Awaited<ReturnType<typeof played>>, total: number) => {
     for (const { t, left, keys } of seen) {
       const present = mayHaveFigure(t, t / total);
       expect(left !== undefined, `${t} s into a render of ${total} s`).toBe(present);
@@ -142,29 +127,29 @@ describe("the gate: when a running export first has a time left to say", () => {
     }
   };
 
-  it("waits for 20 s of rendering even when a sixth of the video is made long before (a render of 100 s in all)", async () => {
+  it("says its first figure 5 s after the first picture, however little is made by then (a render of 100 s in all)", async () => {
     const seen = await played(100, 89);
-    expectGate(seen, 100);
-    // the first figure: 21 s in (20 s rendered, 21 % made), 79 s left at the pace of the last 20 s, and the nearest whole minute to that is 1 min = 60 s
-    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 21, left: 60 });
-    // 15 % was made by the 15th second, and the row still had nothing at the 20th
-    expect(seen.find((s) => s.t === 20)?.left).toBeUndefined();
+    expectFigures(seen, 100);
+    // the first figure: 6 s in (the first picture at 1 s, 5 s of pictures, 6 % made), 94 s left at the pace of those 5 s, and the nearest whole minute to that is 2 min = 120 s
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 120 });
+    // 4 s of pictures at 5 s: nothing
+    expect(seen.find((s) => s.t === 5)?.left).toBeUndefined();
   });
 
-  it("waits for a minute of rendering when less than 15 % is made (a render of 1000 s in all)", async () => {
+  it("does not wait for 15 % or for a minute (a render of 1000 s in all)", async () => {
     const seen = await played(1000, 300);
-    expectGate(seen, 1000);
-    // the first figure: 61 s in (60 s rendered, 6.1 % made), 939 s left; over 10 min the grid is 5 minutes, so the nearest is 15 min = 900 s
-    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 61, left: 900 });
-    // 20 s were rendered long before, with a share below 15 %: nothing
-    expect(seen.find((s) => s.t === 40)?.left).toBeUndefined();
+    expectFigures(seen, 1000);
+    // the first figure: 6 s in (0.6 % made), 994 s left; over 10 min the grid is 5 minutes, so the nearest is 15 min = 900 s
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 900 });
+    // 4 % is made at 40 s and the figure has been said since 6 s
+    expect(seen.find((s) => s.t === 40)?.left).toBeDefined();
   });
 
-  it("needs the 20 s as well as the share: a fifth of a short render made in 10 s says nothing yet (a render of 50 s in all)", async () => {
+  it("says its figure in a short render too: a fifth of a render of 50 s made in 10 s, and 'under a minute' from the 6th second", async () => {
     const seen = await played(50, 44);
-    expectGate(seen, 50);
-    expect(seen.find((s) => s.t === 10)?.left).toBeUndefined(); // 20 % made, 9 s rendered
-    expect(seen.find((s) => s.left !== undefined)?.t).toBe(21);
+    expectFigures(seen, 50);
+    expect(seen.find((s) => s.t === 5)?.left).toBeUndefined(); // 4 s of pictures
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 30 }); // 44 s left: the figure 30 is "under a minute"
   });
 });
 
@@ -230,7 +215,7 @@ describe("what the row and the card say stand together", () => {
     expect(rowOf(run.id)).not.toHaveProperty("time_left_s");
   });
 
-  it("says nothing at a part before the last of a render made in parts, and a figure at the final encode once its own 20 s have passed", async () => {
+  it("says nothing at a part before the last of a render made in parts, and a figure at the final encode once 5 s of its own pictures have passed", async () => {
     const run = await startRun();
     const feed = feedOf(run);
     // two parts of 30 % each, then the final encode from 60 % at a fifth of a percent a second (each part's own clock starts with its first report)
@@ -247,16 +232,16 @@ describe("what the row and the card say stand together", () => {
       seen.push({ t, left, card });
     }
     // 120 s of rendering and half the video made in the two parts: no figure
-    expect(seen.filter((s) => s.t <= 140 && s.left !== undefined)).toEqual([]);
+    expect(seen.filter((s) => s.t <= 125 && s.left !== undefined)).toEqual([]);
     expect(seen.find((s) => s.t === 100)?.card).toMatch(/Rendering part 2 of 2 · /);
-    // the final encode starts at 121 s; its own 20 s pass at 141 s, with 64.2 % made and 0.002 a second: 0.358 / 0.002 = 179 s left, which is 3 min on the grid
+    // the final encode starts at 121 s; its own 5 s of pictures pass at 126 s, with 61.2 % made and 0.002 a second: 0.388 / 0.002 = 194 s left, which is 3 min on the grid
     expect(seen.find((s) => s.t === 130)?.card).toMatch(/Encoding · /);
-    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 141, left: 180 });
-    expect(seen.filter((s) => s.t >= 141).every((s) => s.left !== undefined)).toBe(true);
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 126, left: 180 });
+    expect(seen.filter((s) => s.t >= 126).every((s) => s.left !== undefined)).toBe(true);
     await run.end("finish");
   });
 
-  it("says 'taking longer than expected' and no number from the moment the average pace has fallen past one and a half times the first, for good", async () => {
+  it("says 'taking longer than expected' and no number from the moment the average pace has fallen past one and a half times the one at its reference point, for good", async () => {
     const run = await startRun();
     const feed = feedOf(run);
     // a render of 100 s that slows to a fifth of its pace at 30 s, and speeds up again at 80 s
@@ -273,9 +258,9 @@ describe("what the row and the card say stand together", () => {
       if (first !== null) {
         expect(longer, `${t} s: once said, said for good`).toBe(true);
         expect(left, `${t} s`).toBeUndefined();
-      } else if (t >= 21) expect(left, `${t} s, before the slow-down is felt`).toBeDefined();
+      } else if (t >= 6) expect(left, `${t} s, before the slow-down is felt`).toBeDefined();
     }
-    // the first figure was said at 21 s with 20 s rendered and a fifth made (a total of 100 s); the average pace passes 150 s at 51 s: 50 s over the 33.2 % made
+    // the alarm took its reference at 21 s with 20 s rendered and a fifth made (a total of 100 s, though a figure had been said since 6 s); the average pace passes 150 s at 51 s: 50 s over the 33.2 % made
     expect(first).toBe(51);
     await run.end("finish");
   });
@@ -341,7 +326,7 @@ describe("an export the app starts again", () => {
       expect(look(first.id).left).toBeUndefined();
       expect(look(first.id).card).not.toMatch(ended);
 
-      // a render of 310 s in all: its own gate opens at 47 s (46 s rendered, 15.2 % made), 263 s left, which is 4 min on the grid
+      // a render of 310 s in all: its first figure at 6 s (5 s of pictures, 1.9 % made), 304 s left, which is 5 min on the grid
       const two = feedOf(second);
       const seen: Array<{ t: number; left: number | undefined }> = [];
       for (let t = 1; t <= 100; t++) {
@@ -350,9 +335,9 @@ describe("an export the app starts again", () => {
         expect(card, `${t} s into the new attempt`).not.toMatch(/Finishing$|taking longer/);
         seen.push({ t, left });
       }
-      expect(seen.filter((s) => s.t <= 46 && s.left !== undefined)).toEqual([]);
-      expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 47, left: 240 });
-      expect(seen.filter((s) => s.t >= 47).every((s) => s.left !== undefined)).toBe(true);
+      expect(seen.filter((s) => s.t <= 5 && s.left !== undefined)).toEqual([]);
+      expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 300 });
+      expect(seen.filter((s) => s.t >= 6).every((s) => s.left !== undefined)).toBe(true);
       expect(rowOf(first.id)).toMatchObject({ attempt: 2 });
       await second.end("finish");
     },
@@ -371,7 +356,7 @@ describe("the export that begins while the previous one is still being checked",
     await vi.waitFor(() => expect(first.jobs.started).toContain(secondId));
     await vi.waitFor(() => expect(rowOf(first.id)?.stage).toBe("checking"));
 
-    // a render of 310 s in all: its own gate opens at 47 s (46 s rendered, 15.2 % made), 263 s left, which is 4 min on the grid
+    // a render of 310 s in all: its first figure at 6 s (5 s of pictures, 1.9 % made), 304 s left, which is 5 min on the grid
     const two = feedOf({ id: secondId, jobs: first.jobs });
     const seen: Array<{ t: number; left: number | undefined }> = [];
     for (let t = 1; t <= 60; t++) {
@@ -381,8 +366,8 @@ describe("the export that begins while the previous one is still being checked",
       expect(look(first.id).left, "the export still being checked").toBeUndefined();
       seen.push({ t, left });
     }
-    expect(seen.filter((s) => s.t <= 46 && s.left !== undefined)).toEqual([]);
-    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 47, left: 240 });
+    expect(seen.filter((s) => s.t <= 5 && s.left !== undefined)).toEqual([]);
+    expect(seen.find((s) => s.left !== undefined)).toMatchObject({ t: 6, left: 300 });
     // `end` waits for every export to settle, and the second one only ends when it is cancelled
     cancelExport(secondId, "assistant");
     release();

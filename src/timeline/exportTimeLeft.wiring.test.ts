@@ -6,7 +6,7 @@
 // store reads `Date.now()` for each report), and the three readers are called at every report, exactly as the card and the dialog call them.
 //
 // The rule's answer is the oracle in ONE test (the equivalence: the store feeds the rule the report's own clock and share and nothing else).
-// Every other claim is stated from what the consumers say and from the raw samples alone (the gate from the exported constants, the grid, the
+// Every other claim is stated from what the consumers say and from the raw samples alone (the 5 s of pictures a pace needs, written out here; the grid; the
 // words), so a rule that changed, or a consumer that stopped reading it, cannot pass by agreeing with itself.
 //
 // The recorded feeds carry no `step`/`steps` (no run was made in parts): the parts rule is proven here on synthetic relabelled feeds only.
@@ -20,15 +20,7 @@ import { liveFeedOf, useExportJob, type ExportLive } from "../store/exportJob";
 import { coarser, replayRun, shifted, slowedFrom } from "./__fixtures__/replay";
 import { REPLAY_RUNS, fractionOf, type ReplayRun } from "./__fixtures__/timeLeftRuns";
 import { describeExportTime } from "./exportOptions";
-import {
-  GATE_FRACTION,
-  GATE_RENDERED_ALONE_SECONDS,
-  GATE_RENDERED_SECONDS,
-  notePace,
-  roundTimeLeft,
-  startPace,
-  type TimeLeft,
-} from "./exportTimeLeft";
+import { notePace, roundTimeLeft, startPace, type TimeLeft } from "./exportTimeLeft";
 import {
   QUIET_SECONDS,
   describeDialogProgress,
@@ -49,6 +41,10 @@ const FIGURE_WORDS = /^(under a minute|about \d+ min|about \d+ h(?: \d+ min)?) l
 const isFigureWords = (words: string): boolean => FIGURE_WORDS.test(words);
 /** The share made from which the answer is "Finishing": the accepted rule's number, written out on purpose. */
 const FINISHING_SHARE = 0.9;
+/** The pictures a pace is read from: the first figure needs this much of them (counted from the first picture). The accepted rule's number, written out on purpose. */
+const PICTURE_SPAN_SECONDS = 5;
+/** Where the "taking longer" alarm takes its reference: 20 s rendered (from the first report) and 15 % made. The accepted rule's numbers, written out on purpose. */
+const REFERENCE_RENDERED_SECONDS = 20;
 /** The fake clock's second 0 (the moment the export's turn begins). */
 const START = 1_700_000_000_000;
 const FPS = 30;
@@ -90,6 +86,8 @@ interface Beat extends Reading {
   readonly share: number;
   /** Seconds since the feed's first report. */
   readonly rendered: number;
+  /** Seconds since the run's first picture (a report with a position above 0), or -1 before one. */
+  readonly pictured: number;
   /** The part of a render made in parts that the report named. */
   readonly step: number | null;
 }
@@ -176,6 +174,7 @@ function player(run: ReplayRun, options: PlayOptions = {}): (index: number) => B
   const id = options.id ?? "run";
   const start = options.start ?? START;
   const first = run.samples[0][0];
+  const picture = run.samples.find(([, out]) => out > 0);
   let best = 0;
   return (index) => {
     const [atMs, outMs] = run.samples[index];
@@ -198,6 +197,7 @@ function player(run: ReplayRun, options: PlayOptions = {}): (index: number) => B
       fraction,
       share: best,
       rendered: (atMs - first) / 1000,
+      pictured: picture && atMs >= picture[0] ? (atMs - picture[0]) / 1000 : -1,
       step: part ? part.step : null,
       ...read(id),
     };
@@ -244,10 +244,8 @@ const PLAYED = memo<Played[]>(() =>
 const label = (run: { readonly id: string }, b: Beat): string =>
   `${run.id} report ${b.index} (${(b.atMs / 1000).toFixed(1)} s, ${Math.round(b.share * 100)} % made)`;
 
-/** The gate, from the rule's exported constants and the feed's own clock (it starts at the first report): 20 s rendered and (15 % made or 60 s rendered). */
-const gateOpen = (b: Beat): boolean =>
-  b.rendered >= GATE_RENDERED_SECONDS &&
-  (b.share >= GATE_FRACTION || b.rendered >= GATE_RENDERED_ALONE_SECONDS);
+/** The first moment a pace can be read, from the raw samples and the written 5 s: 5 s of pictures behind the report (every recorded run makes progress in them: see the replay test). */
+const paceReadable = (b: Beat): boolean => b.pictured >= PICTURE_SPAN_SECONDS;
 
 /** When each report's predecessors last moved the render (the share made changed): what the card's "No progress" counts from. */
 function lastMovedAts(run: ReplayRun): number[] {
@@ -307,14 +305,14 @@ function agreementViolations(run: { readonly id: string }, beats: readonly Beat[
   return out;
 }
 
-/** Nothing before the gate (except "Finishing" from 90 %), and the first thing said is a figure or "Finishing", never "taking longer". */
-function gateViolations(run: { readonly id: string }, beats: readonly Beat[]): string[] {
+/** Nothing before a pace can be read (except "Finishing" from 90 %), and the first thing said is a figure or "Finishing", never "taking longer". */
+function earlyViolations(run: { readonly id: string }, beats: readonly Beat[]): string[] {
   const out: string[] = [];
   for (const b of beats) {
-    if (gateOpen(b) || b.share >= FINISHING_SHARE) continue;
+    if (paceReadable(b) || b.share >= FINISHING_SHARE) continue;
     if (b.said !== "" || b.shown !== null || b.panel.timeLeft !== "" || b.jobSaid !== "")
       out.push(
-        `${label(run, b)}: "${b.said}" said before the gate (${b.rendered.toFixed(1)} s rendered)`,
+        `${label(run, b)}: "${b.said}" said before a pace could be read (${b.pictured.toFixed(1)} s of pictures)`,
       );
   }
   const first = beats.find((b) => b.said !== "");
@@ -379,7 +377,7 @@ function longerViolations(run: { readonly id: string }, beats: readonly Beat[]):
 
 const everyRule = (run: { readonly id: string }, beats: readonly Beat[]): string[] => [
   ...agreementViolations(run, beats),
-  ...gateViolations(run, beats),
+  ...earlyViolations(run, beats),
   ...gridViolations(run, beats),
   ...finishingViolations(run, beats),
   ...flickerViolations(run, beats),
@@ -462,10 +460,10 @@ describe("the words the card and the dialog say, at every report of 88 real runs
     expectNone(PLAYED().flatMap(({ run, beats }) => agreementViolations(run, beats)));
   });
 
-  it("3 nothing is said before the gate, and the first thing said is a figure (or Finishing for a run that was 90 % made before the gate)", () => {
+  it("3 nothing is said before 5 s of pictures, and the first thing said is a figure (or Finishing for a run that was 90 % made before them)", () => {
     const played = PLAYED();
-    expectNone(played.flatMap(({ run, beats }) => gateViolations(run, beats)));
-    // The gate really opens: a run that was past it before 90 % made says a figure; one that never was says nothing but "Finishing".
+    expectNone(played.flatMap(({ run, beats }) => earlyViolations(run, beats)));
+    // A pace really is read: a run with 5 s of pictures before 90 % made says a figure; one that never had says nothing but "Finishing".
     const noFigure: string[] = [];
     const startsWith = { figure: 0, finishing: 0, nothing: 0 };
     const firstFigure: Array<{
@@ -474,13 +472,14 @@ describe("the words the card and the dialog say, at every report of 88 real runs
       fromPictureSeconds: number;
     }> = [];
     for (const { run, beats } of played) {
-      const pastGate = beats.some((b) => gateOpen(b) && b.share < FINISHING_SHARE);
+      const pastSpan = beats.some((b) => paceReadable(b) && b.share < FINISHING_SHARE);
       const figureAt = beats.findIndex((b) => isFigureWords(b.said));
       const first = beats.find((b) => b.said !== "");
       startsWith[first ? (kindOf(first.said) === "figure" ? "figure" : "finishing") : "nothing"]++;
-      if (pastGate && figureAt < 0) noFigure.push(`${run.id}: past the gate and never a figure`);
-      if (!pastGate && figureAt >= 0)
-        noFigure.push(`${run.id}: a figure although the gate never opened`);
+      if (pastSpan && figureAt < 0)
+        noFigure.push(`${run.id}: 5 s of pictures before 90 % and never a figure`);
+      if (!pastSpan && figureAt >= 0)
+        noFigure.push(`${run.id}: a figure although no pace could be read`);
       if (figureAt >= 0) {
         const b = beats[figureAt];
         const picture = run.samples.find((sample) => sample[1] > 0);
@@ -497,13 +496,17 @@ describe("the words the card and the dialog say, at every report of 88 real runs
       medianSecondsAfterFirstReport: median(firstFigure.map((f) => f.renderedSeconds)),
       maxSecondsAfterFirstReport: Math.max(...firstFigure.map((f) => f.renderedSeconds)),
       medianShare: median(firstFigure.map((f) => f.share)),
-      runsWithFigureUnder20sAfterFirstPicture: firstFigure.filter((f) => f.fromPictureSeconds < 20)
-        .length,
+      maxSecondsAfterFirstPicture: Math.max(...firstFigure.map((f) => f.fromPictureSeconds)),
       minSecondsAfterFirstPicture: Math.min(...firstFigure.map((f) => f.fromPictureSeconds)),
     };
     expect(noFigure).toEqual([]);
     expect(startsWith.nothing, "every run says something at the end of it").toBe(0);
-    expect(startsWith.figure, "most runs begin with a figure").toBeGreaterThan(60);
+    expect(startsWith.figure, "most runs begin with a figure").toBeGreaterThan(75);
+    // What a person reads comes within a second of the 5 s of pictures, on every run that has them.
+    expect(
+      firstFigure.filter((f) => f.fromPictureSeconds < 5 || f.fromPictureSeconds > 6),
+      "runs whose card said its first time outside 5 to 6 s after the first picture",
+    ).toEqual([]);
   });
 
   it("4 every figure said is on the rounding grid, and its words are describeExportTime(figure) + ' left'", () => {
@@ -609,7 +612,7 @@ describe("the words the card and the dialog say, at every report of 88 real runs
 // ── a render made in parts (synthetic: the recordings have none) ───────────────────────────────────────────────────────
 
 describe("a render made in 4 parts, the last being the final encode (a real run's reports relabelled)", () => {
-  it("9 the card and the dialog say nothing at all while a part before the last is reported, and a figure or Finishing at the final encode once its own gate has passed", () => {
+  it("9 the card and the dialog say nothing at all while a part before the last is reported, and a figure or Finishing at the final encode once 5 s of its own pictures have passed", () => {
     const bad: string[] = [];
     let runsWithFigureInFinalEncode = 0;
     let longEnough = 0;
@@ -640,9 +643,9 @@ describe("a render made in 4 parts, the last being the final encode (a real run'
           bad.push(
             `${label(run, b)}: card "${b.said}", dialog "${b.panel.timeLeft}", job "${b.jobSaid}", the rule says "${answer}"`,
           );
-        // From the raw reports: the final encode has its own clock and gate; its share is far past 15 %, so 20 s of it open the gate.
+        // From the raw reports: the final encode has its own clock and span of pictures, and its share is far past 0: 5 s of it are enough for a pace.
         const own = finalStart ? (b.atMs - finalStart.atMs) / 1000 : 0;
-        if (own < GATE_RENDERED_SECONDS && b.share < FINISHING_SHARE && b.said !== "")
+        if (own < PICTURE_SPAN_SECONDS && b.share < FINISHING_SHARE && b.said !== "")
           bad.push(`${label(run, b)}: "${b.said}" ${own.toFixed(1)} s into the final encode`);
         if (b.share >= FINISHING_SHARE && b.said !== FINISHING_WORDS)
           bad.push(`${label(run, b)}: "${b.said}" at ${Math.round(b.share * 100)} % made`);
@@ -652,7 +655,7 @@ describe("a render made in 4 parts, the last being the final encode (a real run'
       const final = beats.filter((b) => b.step === PARTS - 1 && b.share < FINISHING_SHARE);
       if (
         finalStart &&
-        final.some((b) => (b.atMs - finalStart.atMs) / 1000 >= GATE_RENDERED_SECONDS + 5)
+        final.some((b) => (b.atMs - finalStart.atMs) / 1000 >= PICTURE_SPAN_SECONDS + 5)
       ) {
         longEnough++;
         const said = final.find((b) => b.said !== "");
@@ -660,22 +663,22 @@ describe("a render made in 4 parts, the last being the final encode (a real run'
           runsWithFigureInFinalEncode++;
           kinds[kindOf(said.said) === "longer" ? "longer" : "figure"]++;
         } else
-          bad.push(`${run.id}: a final encode of 25 s or more before 90 % never said a figure`);
+          bad.push(`${run.id}: a final encode of 10 s or more before 90 % never said a figure`);
       }
     }
     OBSERVED.parts = {
       earlierBeats,
-      runsWhoseFinalEncodeLastedOver25s: longEnough,
+      runsWhoseFinalEncodeLastedOver10s: longEnough,
       runsWithFigureInFinalEncode,
       firstSaidKinds: kinds,
     };
     expectNone(bad);
     expect(earlierBeats, "the relabelled feeds have parts before the last").toBeGreaterThan(3000);
-    // A final encode is a quarter of the run: only the longest recorded runs leave it 25 s before 90 % (9 of 88 observed).
+    // A final encode is a quarter of the run: the runs that leave it 10 s before 90 % made are the longer ones.
     expect(
       longEnough,
-      "enough runs have a final encode long enough to open its gate",
-    ).toBeGreaterThanOrEqual(5);
+      "enough runs have a final encode long enough for a pace to be read",
+    ).toBeGreaterThanOrEqual(20);
   });
 
   it("9b at a part before the last nothing is said even when a figure is stored for the feed, and at the final encode the stored figure is said again", () => {
@@ -837,7 +840,7 @@ describe("a frozen export: every report stops for 70 s while a figure is on scre
 // ── a restart ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 describe("a restart: a new attempt starts the rule afresh, and the old attempt keeps its own words", () => {
-  it("11 attempt 1 says 'Finishing' at 95 %; attempt 2 never says it before 90 % of its own and says a figure after its own gate; the old attempt is untouched", () => {
+  it("11 attempt 1 says 'Finishing' at 95 %; attempt 2 never says it before 90 % of its own and says a figure after its own 5 s of pictures; the old attempt is untouched", () => {
     const bad: string[] = [];
     let attempts = 0;
     for (const { run, pure } of PLAYED()) {
@@ -925,12 +928,16 @@ const SLOWED = memo(
 describe("a slow-down built from a real run: 'taking longer than expected'", () => {
   it("12 three times slower from 40 % says 'taking longer than expected' and then never a figure again until Finishing; a healthy run never does", () => {
     const base = PLAYED();
-    // A run that was already told a figure when it slowed down is the one a slow-down can be told about.
+    // A run whose alarm had its reference point (20 s rendered, 15 % made) and was already told a figure when it slowed down is the one a slow-down can be told about.
     const eligible = new Set(
       base
         .filter(({ beats }) => {
           const pivot = beats.findIndex((b) => b.share >= SLOW_FROM);
-          return pivot >= 0 && isFigureWords(beats[pivot].said);
+          return (
+            pivot >= 0 &&
+            isFigureWords(beats[pivot].said) &&
+            beats[pivot].rendered >= REFERENCE_RENDERED_SECONDS
+          );
         })
         .map(({ run }) => run.id),
     );
@@ -1026,8 +1033,12 @@ describe("the same real feed in another clock and at another cadence", () => {
         bad.push(`${label(run, finishing)}: the first report at 90 % says "${finishing.said}"`);
       const a = beats.find((b) => b.shown !== null);
       const c = coarse.find((b) => b.shown !== null);
-      if (!a !== !c) bad.push(`${run.id}: a figure in one feed and none in the other`);
-      else if (a && c && a.shown !== null && c.shown !== null) {
+      // A run that is 90 % made within a second of its 5 s of pictures can be told a figure by one feed and "Finishing" by the other: the report that reaches 90 % may be one of the dropped.
+      const to90 = beats.find((b) => b.share >= FINISHING_SHARE);
+      const borderline = to90 !== undefined && to90.pictured < PICTURE_SPAN_SECONDS + 1;
+      if (!borderline && !a !== !c) {
+        bad.push(`${run.id}: a figure in one feed and none in the other`);
+      } else if (!borderline && a && c && a.shown !== null && c.shown !== null) {
         const apart = Math.abs(gridRank(a.shown) - gridRank(c.shown));
         if (apart <= 1) withinOne++;
         if (apart === 0) sameFirst++;
@@ -1118,7 +1129,7 @@ describe("random feeds: shares that go backwards or repeat, random gaps, garbage
       fc.property(
         fc.oneof(
           fc.array(reportOf(withParts), { minLength: 1, maxLength: 8 }),
-          // Long feeds, so that the rule's gate opens and its figures, "Finishing" and the silence are all reached.
+          // Long feeds, so that the rule's first figure, its figures, "Finishing" and the silence are all reached.
           fc.array(reportOf(withParts), { minLength: 40, maxLength: 70, size: "max" }),
         ),
         (reports) => {

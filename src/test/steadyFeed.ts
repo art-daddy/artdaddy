@@ -1,6 +1,6 @@
 // A render that makes the same share every second, played to the app's progress feed on a fake clock: what a test uses when it needs the live time-left rule
-// (timeline/exportTimeLeft.ts) to have something to say. The rule says nothing until at least 20 s have been rendered and either 15 % is made or 60 s have
-// passed, and reads the pace of the last 20 s, so one report is never enough: a test that wants "about 2 min left" plays a render long enough, and the
+// (timeline/exportTimeLeft.ts) to have something to say. The rule says nothing until 5 s of pictures are behind it (the first picture is the first report with a
+// share above 0) and reads the pace of the last 20 s, so one report is never enough: a test that wants "about 2 min left" plays a render long enough, and the
 // figure it expects follows from the pace (a render of `total` seconds that is `t` seconds in has `total - t` seconds left).
 import { vi } from "vitest";
 

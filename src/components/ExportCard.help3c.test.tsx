@@ -434,8 +434,8 @@ describe("the switch for the help (S2)", () => {
     play(0, 120, 1170);
     expect(banner()).toBeNull();
     expect(screen.queryByText(KEPT)).toBeNull();
-    // 0.27.0 said "about 18 min left" here from the raw pace (1,170 s in all, 120 s in). The rule's own reading: the render made 5 s of its 1,170 s every 5 s,
-    // so the gate opened at 60 s rendered (a share under 15 %) with 1,105 s left, which is 20 min on the 5-minute grid; 1,050 s left at the last report is
+    // 0.27.0 said "about 18 min left" here from the raw pace (1,170 s in all, 120 s in). The rule's own reading: the render made 5 s of its 1,170 s every 5 s, so the
+    // first figure, 5 s of pictures after the first picture (10 s in), is 1,160 s left, which is 20 min on the 5-minute grid; 1,050 s left at the last report is
     // still inside that figure's cell widened by a quarter, so the figure holds.
     expect(status()).toBe(
       "Still working · 2 min in · Rendering and encoding · 10% · about 20 min left",
