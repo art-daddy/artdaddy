@@ -1044,9 +1044,14 @@ describe.skipIf(!FF || !FP)(
       __setJobSupervisor(jobs);
       engineBefore = useExportJob.getState().engine;
       useExportJob.getState().setEngine("partition-pipes-v1");
-      // The native program waits two minutes for a render by default; a project of three seconds that takes a minute and a half is stuck, and the diagnosis is worth more than the last half minute.
+      // The native program waits for a render to END, at most this long in all and whatever progress it shows (`recv_timeout` in jobs.rs: it then kills the job and prints where the render had
+      // got to; it accepts nothing above two minutes, which is also its default). This file takes 109 s of test time when it runs on its own and 302 s inside the whole smoke run, where about
+      // twenty files and cargo builds run at once: the encode of the same three-second project then slowed from 0.59x to 0.23x of real time and was cut off at 90 s with its frames still coming
+      // (frame 98 at 30 fps; speeds 0.59x, 0.43x, 0.38x ... 0.23x in the whole-suite run of 20 Nov 2026), and the file passed when it ran on its own. 90 s was too tight, so the wait is the whole two
+      // minutes the program allows: a render that is really stuck is still diagnosed there, with its last progress line, and not at the test's own timeout, which has to cover the three renders
+      // of this describe one after the other.
       waitBefore = process.env.ARTDADDY_QA_RENDER_WAIT_MS;
-      process.env.ARTDADDY_QA_RENDER_WAIT_MS = "90000";
+      process.env.ARTDADDY_QA_RENDER_WAIT_MS = "120000";
     }, 120_000);
     afterAll(async () => {
       await whenExportsSettle();
@@ -1107,7 +1112,7 @@ describe.skipIf(!FF || !FP)(
       await expectEncoder(off, { fast: true, chipOff: true });
       expect(optionOf(q.x264!, "crf"), "Quality: Medium").toBe("23.0");
       expect(optionOf(off.x264!, "crf"), "Fast: Medium").toBe("23.0");
-    }, 400_000);
+    }, 600_000); // three renders one after the other, each waited for at most two minutes
 
     it("H2. the crossfade, the caption and the sound are in the delivered files at both sizes", async () => {
       // The two artifacts for each instant: a frame of Quality's file and the frame of each Fast file at the same time, each brought to one 320x180 raster (so a 1280x720 file and an 854x480 one are
@@ -1163,6 +1168,6 @@ describe.skipIf(!FF || !FP)(
           `${made.name}: second half`,
         ).toBeGreaterThan(-40);
       }
-    }, 400_000);
+    }, 600_000); // the same three renders when it runs on its own
   },
 );
