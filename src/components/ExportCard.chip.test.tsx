@@ -1,4 +1,4 @@
-// What the person reads on the chat card about the graphics chip: the quiet Turn off, and the words of a chip that stopped an export and was
+// What the person reads on the chat card about the graphics chip: its line (with no switch of its own), and the words of a chip that stopped an export and was
 // started again on the processor by the app. Driven through the real export tool and queue over FakeJobs, like the card's other journeys.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
@@ -27,9 +27,7 @@ import { findChip, markChipSuspect } from "../timeline/chipTest";
 import {
   __resetExportQueue,
   cancelExport,
-  listExportRecords,
   listExports,
-  whenExportEnds,
   whenExportsSettle,
 } from "../timeline/exportQueue";
 import ExportCard from "./ExportCard";
@@ -100,45 +98,56 @@ const settle = () =>
     await flush(40);
   });
 
-describe("the card's quiet Turn off on a chip export", () => {
-  it("turns the chip off for the next exports and leaves the running one alone, and says so", async () => {
+describe("the card says what the chip is doing and offers no way to switch it", () => {
+  /** What a link or a button that switches the chip would be called. The sentence about a chip that was turned off in the dialog says "turned off" and is no such name. */
+  const SWITCH = /turn (it )?(off|on)|switch (it )?(off|on)/i;
+  const controls = () => screen.queryAllByRole("button");
+  const names = () => controls().map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
+  const nothingSwitchesIt = () => {
+    expect(screen.queryByRole("button", { name: SWITCH })).toBeNull();
+    expect(screen.queryByRole("link", { name: SWITCH })).toBeNull();
+    expect(controls().filter((b) => SWITCH.test(b.textContent ?? ""))).toEqual([]);
+  };
+
+  it("shows the chip's line with no link beside it: the only control on a running chip export is Cancel, and pressing it writes no switch", async () => {
     const t = await longProject();
-    const started = await t.exportNow("long");
+    await t.exportNow("long");
     await flush();
     render(createElement(ExportCard));
     expect(screen.getByText(CHIP_LINE)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "turn off the graphics chip" }));
-    expect(localStorage.getItem(CHIP_PREF_KEY)).toBe("off");
-    expect(screen.getByTestId("export-card-chip-off")).toHaveTextContent(CHIP_TURNED_OFF_LINE);
-    expect(screen.queryByRole("button", { name: "turn off the graphics chip" })).toBeNull();
-    // the export that is running keeps going, on the chip it started on
-    expect(screen.getByText(CHIP_LINE)).toBeVisible();
-    expect(listExportRecords().find((r) => r.job_id === started.job_id)).toMatchObject({
-      state: "running",
-    });
-    expect(t.jobs.killed).toEqual([]);
-    t.jobs.exit(started.job_id, 0);
-    expect((await whenExportEnds(started.job_id))?.state).toBe("done");
+    nothingSwitchesIt();
+    expect(names()).toEqual(["cancel long.mp4"]);
+    expect(screen.queryByTestId("export-card-chip-off")).toBeNull();
+    // nothing on the card can change the person's switch for the next exports
+    for (const control of controls()) fireEvent.click(control);
+    await settle();
+    expect(localStorage.getItem(CHIP_PREF_KEY)).toBeNull();
   });
 
-  it("says it was turned off when the person did that in the dialog, and offers nothing more", async () => {
+  it("says it was turned off when the person did that in the dialog, and offers nothing: no link, and the stored switch is as the dialog left it", async () => {
     const t = await longProject();
     await t.exportNow("long");
     await flush();
     localStorage.setItem(CHIP_PREF_KEY, "off");
     render(createElement(ExportCard));
     expect(screen.getByTestId("export-card-chip-off")).toHaveTextContent(CHIP_TURNED_OFF_LINE);
-    expect(screen.queryByRole("button", { name: "turn off the graphics chip" })).toBeNull();
+    // the export that is running keeps going, on the chip it started on, and its line stays
+    expect(screen.getByText(CHIP_LINE)).toBeVisible();
+    nothingSwitchesIt();
+    expect(names()).toEqual(["cancel long.mp4"]);
+    for (const control of controls()) fireEvent.click(control);
+    expect(localStorage.getItem(CHIP_PREF_KEY)).toBe("off");
   });
 
-  it("is not there with the server's switch for Quick export off: the card says what it said", async () => {
+  it("is not there with the server's switch for Quick export off: the card says what it said, and the dialog's Off is not announced", async () => {
     __setExportFlag("quick_export", false);
     const t = await longProject();
     await t.exportNow("long");
     await flush();
+    localStorage.setItem(CHIP_PREF_KEY, "off");
     render(createElement(ExportCard));
     expect(screen.getByText(CHIP_LINE)).toBeVisible();
-    expect(screen.queryByRole("button", { name: "turn off the graphics chip" })).toBeNull();
+    nothingSwitchesIt();
     expect(screen.queryByTestId("export-card-chip-off")).toBeNull();
   });
 
@@ -148,7 +157,36 @@ describe("the card's quiet Turn off on a chip export", () => {
     await flush();
     render(createElement(ExportCard));
     expect(screen.queryByText(/graphics chip/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "turn off the graphics chip" })).toBeNull();
+    nothingSwitchesIt();
+  });
+
+  // The card's other states, each reached through the real queue: waiting behind the chip export, ended on the chip's own failure with Try again, finished.
+  it("offers no switch while another export waits behind the chip's, when the chip stopped one for good (Try again), and when one has finished", async () => {
+    __setExportFlag("chip_restart", false); // the chip's failure is then shown as a failure, with its own sentence and Try again
+    const t = await longProject();
+    const first = await t.exportNow("long");
+    await t.exportNow("later");
+    await flush();
+    render(createElement(ExportCard));
+    expect(screen.getByText(CHIP_LINE)).toBeVisible();
+    expect(screen.getByText(/Waiting · 1st in line/)).toBeVisible();
+    nothingSwitchesIt();
+
+    t.jobs.exit(first.job_id, -1, DRIVER_ERROR);
+    await settle();
+    expect(screen.getByText("Export stopped")).toBeVisible();
+    expect(screen.getByText(OLD_END)).toBeVisible();
+    expect(screen.getByRole("button", { name: "try again long.mp4" })).toBeVisible();
+    nothingSwitchesIt();
+
+    t.jobs.exit(t.jobs.submitted.at(-1)!.id, 0);
+    await settle();
+    expect(screen.getByText("Exported “later.mp4”")).toBeVisible();
+    nothingSwitchesIt();
+    // pressing everything the card has, in this state too, never writes the person's switch
+    for (const control of controls()) fireEvent.click(control);
+    await settle();
+    expect(localStorage.getItem(CHIP_PREF_KEY)).toBeNull();
   });
 });
 
@@ -173,12 +211,12 @@ describe("what the card says when the graphics chip stops an export", () => {
     expect(screen.getByText("Exporting “long.mp4” · attempt 2")).toBeVisible();
     expect(screen.getByTestId("export-card-restarted").textContent).toBe(AFTER);
     expect(screen.queryByText("Export stopped")).toBeNull();
-    // the second try is on the processor: the chip's line and its Turn off are gone
+    // the second try is on the processor: the chip's line is gone, and in every state the card has had nothing offered a switch
     expect(screen.queryByText(CHIP_LINE)).toBeNull();
-    expect(screen.queryByRole("button", { name: "turn off the graphics chip" })).toBeNull();
-    // nothing on the card promises the picture or a speed
+    expect(screen.queryByRole("button", { name: /turn (it )?(off|on)/i })).toBeNull();
+    // nothing on the card promises the picture or a speed, and none says the picture differs
     expect(document.body.textContent).not.toMatch(
-      /same quality|identical|pixel|lossless|times (faster|longer)/i,
+      /same quality|identical|pixel|lossless|times (faster|longer)|differ|softer|slightly/i,
     );
 
     t.jobs.exit(t.jobs.submitted.at(-1)!.id, 0);

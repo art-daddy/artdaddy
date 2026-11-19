@@ -265,6 +265,9 @@ describe("ExportCard", () => {
       await start("one.mp4", g.wait, { encoder, reason });
       render(<ExportCard />);
       expect(screen.getByText(line)).toBeVisible();
+      // the line is all the card says: no link to switch the chip (or light compression) off
+      expect(screen.queryByRole("button", { name: /turn (it )?(off|on)/i })).toBeNull();
+      expect(screen.queryByText(/^turn (it )?(off|on)$/i)).toBeNull();
       // the cost the card names is the file's size; it never says the picture differs or is softer
       expect(document.body.textContent).not.toMatch(/differ|softer|slightly/i);
       g.open();

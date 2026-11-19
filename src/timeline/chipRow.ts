@@ -6,9 +6,9 @@ import type { ChipPref } from "./chipPref";
 export type ChipRowState =
   "none" | "checking" | "auto_passed" | "auto_not_passed" | "set_aside" | "off";
 
-/** The link the row offers in its state, if any: switching the chip off (the card's quiet "Turn off"), switching it back to
- *  Auto, or trying a chip that stopped an export again before its day is up. */
-export type ChipRowAction = "turn_off" | "turn_on" | "try_again_now";
+/** The link the row offers in its state, if any: switching it back to Auto, or trying a chip that stopped an export again before its
+ *  day is up. The row never offers to switch the chip off: that is the radio's Off, in the dialog. */
+export type ChipRowAction = "turn_on" | "try_again_now";
 
 export interface ChipRowInput {
   /** The app found a chip of a known maker on this PC. */
@@ -53,7 +53,7 @@ export const CHIP_ROW_NOTES: Readonly<Record<Exclude<ChipRowState, "none">, stri
 
 const ACTIONS: Readonly<Record<Exclude<ChipRowState, "none">, ChipRowAction | null>> = {
   checking: null,
-  auto_passed: "turn_off",
+  auto_passed: null,
   auto_not_passed: null,
   set_aside: "try_again_now",
   off: "turn_on",

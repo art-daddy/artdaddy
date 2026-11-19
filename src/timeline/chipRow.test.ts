@@ -52,7 +52,7 @@ const STATES: ChipRowState[] = [
   "set_aside",
   "off",
 ];
-const ACTIONS: (ChipRowAction | null)[] = ["turn_off", "turn_on", "try_again_now", null];
+const ACTIONS: (ChipRowAction | null)[] = ["turn_on", "try_again_now", null];
 
 describe("the graphics-chip row: the states the mockups draw", () => {
   it("checking: a chip is found and nothing is known yet, or its test is running", () => {
@@ -72,7 +72,7 @@ describe("the graphics-chip row: the states the mockups draw", () => {
       state: "auto_passed",
       visible: true,
       note: "Auto: used on this PC. The file is usually larger. It passed ArtDaddy's test on this PC.",
-      action: "turn_off",
+      action: null,
     });
   });
 
@@ -238,13 +238,16 @@ describe("the graphics-chip row: every combination of its inputs (a conformance 
     }
   });
 
-  it("offers a link only where it makes sense: Turn off where the chip is in use, Try again where it was set aside", () => {
+  it("offers a link only where it makes sense: the way back to Auto where the chip is Off, Try again where it was set aside, and never one that switches the chip off", () => {
     for (const input of all) {
       const row = chipRowModel(input);
       expect(row.action === "try_again_now").toBe(row.state === "set_aside");
-      expect(row.action === "turn_off").toBe(row.state === "auto_passed");
       expect(row.action === "turn_on").toBe(row.state === "off");
     }
+    // over every input the links are exactly these two (and none): the chip is switched off in the Export dialog's row alone
+    expect(new Set(all.map((input) => chipRowModel(input).action))).toEqual(
+      new Set([null, "turn_on", "try_again_now"]),
+    );
   });
 
   it("reaches every state the mockups draw, and no state the mockups do not", () => {
@@ -311,7 +314,7 @@ describe("the graphics-chip row: hostile input", () => {
     first.note = "changed";
     first.action = null;
     expect(model({ verdict: "passed" }).note).toBe(CHIP_ROW_NOTES.auto_passed);
-    expect(model({ verdict: "passed" }).action).toBe("turn_off");
+    expect(model({ verdict: "passed" }).action).toBeNull();
     const none = model({ found: false });
     none.visible = true;
     expect(model({ found: false }).visible).toBe(false);

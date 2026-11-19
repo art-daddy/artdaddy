@@ -103,8 +103,8 @@
 //               faster setting (off: 0.28.0: the Export dialog has no Fast choice, and an export that asks for Fast
 //               runs as Quality)
 //
-// `quick_export` and `quick_route` are independent. In 0.28.0 `quick_export` only decides whether the Graphics chip row is drawn (ChipRow.tsx, chipRow.ts) and whether the chat card's chip line offers
-// "Turn off" (ChipLine.tsx); nothing reads it for a Fast export, which is `quick_route`. A name that has shipped is never renamed or dropped, so its entry above is kept as it was.
+// `quick_export` and `quick_route` are independent. `quick_export` only decides whether the Graphics chip row is drawn (ChipRow.tsx, chipRow.ts) and whether the chat card's chip line says that the person switched
+// the chip off in the dialog (ChipLine.tsx; the card has no switch of its own); nothing reads it for a Fast export, which is `quick_route`. A name that has shipped is never renamed or dropped, so its entry above is kept as it was.
 //
 // THIS BUILD SHIPS `estimate_v2` AND `pc_check` OFF (OFF_IN_THIS_BUILD below), whatever the server says: the honest estimate did not meet the bar it was built against (E1, lane L11's
 // fit n1-202611170115: 24 % of the judged cells within 2 times against 90 %, 0 of 11 weak-profile cells, 85 % of the measured times inside the shown range against 90 %, five cells 4 times or
