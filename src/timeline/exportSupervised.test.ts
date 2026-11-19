@@ -1985,7 +1985,7 @@ describe("an export outlives a crash of the page", () => {
     expect(useExportJob.getState().live).toBeNull();
   });
 
-  it("one taken over mid-render, handed the 64 KiB the app process kept, joins where the render is: no false taking longer, a figure 20 s after the join, and time_left_s for the assistant", async () => {
+  it("one taken over mid-render, handed the 64 KiB the app process kept, joins where the render is: no false taking longer, a figure 5 s after the join, and time_left_s for the assistant", async () => {
     // Only the clock is the test's: the queue's own waits stay real.
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
@@ -2032,14 +2032,14 @@ describe("an export outlives a crash of the page", () => {
         });
       }
       expect(seen.filter((s) => s.words.includes("taking longer")).map((s) => s.after)).toEqual([]);
-      // Nothing is said until the rule has seen 20 s of the render, counted from the join; then the truth (130 s left is about 2 min), on the grid.
+      // Nothing is said until the rule has 5 s of the live render to read a pace from, counted from the join; then the truth (145 s left is about 2 min), on the grid.
       expect(
-        seen.filter((s) => s.after < 20 && (s.left !== undefined || s.words.includes(" left"))),
+        seen.filter((s) => s.after < 5 && (s.left !== undefined || s.words.includes(" left"))),
       ).toEqual([]);
-      expect(seen.find((s) => s.left !== undefined)?.after).toBe(20);
-      expect(seen.find((s) => s.after === 20)).toMatchObject({ left: 120 });
-      expect(seen.find((s) => s.after === 20)!.words).toContain("about 2 min left");
-      for (const s of seen.filter((r) => r.after >= 20)) {
+      expect(seen.find((s) => s.left !== undefined)?.after).toBe(5);
+      expect(seen.find((s) => s.after === 5)).toMatchObject({ left: 120 });
+      expect(seen.find((s) => s.after === 5)!.words).toContain("about 2 min left");
+      for (const s of seen.filter((r) => r.after >= 5)) {
         expect(typeof s.left, `${s.after} s after the join`).toBe("number");
         expect(
           Math.abs((s.left as number) - (150 - s.after)),

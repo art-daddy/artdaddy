@@ -1,9 +1,9 @@
 // What a person is told about the time left of a running export, read where it is said: the chat card's line and the Export dialog's right side, drawn side by side
 // from the real queue, the real live feed and the real components on a fake clock. Every feed is played the way the producers report it (a report a second) and
 // carries the raw guess they publish held at a constant 90 s, which nothing on screen may follow. Every expected word is worked out by hand from the rule
-// (timeline/exportTimeLeft.ts): nothing until 20 s have been rendered and either 15 % is made or 60 s have passed; then the pace of the last 20 s on a rounding grid
+// (timeline/exportTimeLeft.ts): nothing until 5 s of pictures are behind it (the first picture is the first report with a share above 0); then the pace of the last 20 s on a rounding grid
 // (the nearest minute to 10 min, the nearest 5 minutes to an hour), kept while the raw time stays inside its cell widened by a quarter; "Finishing" from 90 %;
-// "taking longer than expected" once the average pace implies a total over one and a half times the first figure's.
+// "taking longer than expected" once the average pace implies a total over one and a half times the one at the alarm's reference point (20 s rendered and 15 % made, or 60 s).
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -226,15 +226,15 @@ describe("the speed on the Export dialog's right side", () => {
   it("is printed alone, exactly as 0.28.0 printed it, until the rule has a time to say, and is followed by the time when it has", async () => {
     const run = await watched();
     toStage(run.sub.job_id, "rendering");
-    // A render of 200 s in all, a report every second. Before the gate (15 % made and 20 s rendered: second 30 here) there is no time to say: just the speed.
-    for (let t = 1; t <= 29; t++) {
+    // A render of 200 s in all, a report every second. Until 5 s of pictures are behind it (the first picture is second 1: second 6 here) there is no time to say: just the speed.
+    for (let t = 1; t <= 5; t++) {
       reportAt(t, t / 200);
       expect(dialogPace()).toBe("2.0×");
     }
-    // Second 30: 15 % made, 29 s rendered, 170 s left at the pace of the last 20 s: the nearest minute is 3.
-    reportAt(30, 30 / 200);
+    // Second 6: 3 % made, 194 s left at the pace of those 5 s: the nearest minute is 3.
+    reportAt(6, 6 / 200);
     expect(dialogPace()).toBe("2.0× · about 3 min left");
-    expect(cardLine()).toMatch(/ · 15% · about 3 min left$/);
+    expect(cardLine()).toMatch(/ · 3% · about 3 min left$/);
     // The conditions are the same as ever: during the render only. When the render is over (the file is checked, then saved) neither the speed nor the time is said.
     toStage(run.sub.job_id, "checking");
     expect(dialogPace()).toBe("");
@@ -284,17 +284,17 @@ describe("the same words on the card, in the dialog and in the assistant's list"
   // One feed, three moments of it that matter: a steady render of 200 s in all for the first minute, then a pace a tenth as fast.
   const fractionAt = (t: number) => (t <= 60 ? t / 200 : 0.3 + 0.0005 * (t - 60));
 
-  it("says nothing before the gate, a figure after it, and, when the pace falls well away from it, that it is taking longer, then Finishing from 90 %", async () => {
+  it("says nothing before a pace can be read, a figure after it, and, when the pace falls well away from it, that it is taking longer, then Finishing from 90 %", async () => {
     const run = await watched();
     toStage(run.sub.job_id, "rendering");
     for (let t = 1; t <= 100; t++) {
       reportAt(t, fractionAt(t));
-      if (t === 10 || t === 29) expectSaid(""); // 28 s rendered but 14.5 % made: the gate is shut
-      // 30 s in: 15 % made, 29 s rendered, 170 s left (the nearest minute: 3 min). 45 s in: 155 s left, still inside the figure's cell widened by a quarter.
-      if (t === 30 || t === 45) expectSaid("about 3 min left", 180);
+      if (t === 3 || t === 5) expectSaid(""); // 2 and 4 s of pictures: no pace to read yet
+      // 6 s in: 3 % made, 194 s left at the pace of the 5 s of pictures (the nearest minute: 3 min). 30 s in: 170 s left; 45 s in: 155 s left, still inside the figure's cell widened by a quarter.
+      if (t === 6 || t === 30 || t === 45) expectSaid("about 3 min left", 180);
       // 80 s in: the last 20 s made 0.01 of the render, so 0.69 / 0.0005 = 1,380 s are left: the nearest 5 minutes is 25 min. 90 s in: 1,370 s, inside that cell's margin.
       if (t === 80 || t === 90) expectSaid("about 25 min left", 1500);
-      // 100 s in: 99 s rendered for 0.315 made implies a total of 314 s, over one and a half times the 200 s the first figure implied: from second 95 on.
+      // 100 s in: 99 s rendered for 0.315 made implies a total of 314 s, over one and a half times the 200 s at the alarm's reference point (30 s in): from second 95 on.
       if (t === 100) expectSaid("taking longer than expected");
     }
     // The render then comes on in a rush: 92 % made. "Finishing" replaces it, in all three places.
@@ -326,7 +326,7 @@ describe("after Finishing", () => {
   it("never says a number again, on either surface, even when the feed goes backwards, restarts from a small share or settles into a clean pace", async () => {
     const run = await watched();
     toStage(run.sub.job_id, "rendering");
-    // A render of 200 s in all: the gate opens at 30 s, 90 % is made at 180 s.
+    // A render of 200 s in all: the first figure at 6 s, 90 % is made at 180 s.
     for (let t = 1; t <= 180; t++) reportAt(t, t / 200);
     expectSaid("Finishing");
     // The feed goes backwards, to a fifth ...
@@ -345,7 +345,7 @@ describe("after Finishing", () => {
 });
 
 describe("a render that makes no report", () => {
-  // A render of 1,000 s in all: 15 % made at 150 s, so the gate opens there with 850 s left (the nearest 5 minutes is 15 min).
+  // A render of 1,000 s in all: the first figure at 6 s with 994 s left (the nearest 5 minutes is 15 min), and still 840 s left at 160 s.
   it("says no time, on either surface, once a minute has passed without one, and the figure is back when the render moves again", async () => {
     const run = await watched();
     toStage(run.sub.job_id, "rendering");
@@ -457,19 +457,19 @@ describe("an export the app starts again", () => {
     });
     expect(screen.getByText("Exporting “film.mp4” · attempt 2")).toBeVisible();
     toStage(second.sub.job_id, "rendering");
-    // Attempt 2 is a render of 200 s in all, reported from 100 s on the clock. Until its own gate (15 % made and 20 s rendered: its 30th second) it says nothing, and
-    // never Finishing; then its own figure (170 s left: the nearest minute is 3).
-    for (let u = 1; u <= 29; u++) {
+    // Attempt 2 is a render of 200 s in all, reported from 100 s on the clock. Until 5 s of its own pictures (its 6th second) it says nothing, and
+    // never Finishing; then its own figure (194 s left: the nearest minute is 3).
+    for (let u = 1; u <= 5; u++) {
       reportAt(100 + u, u / 200);
       expect(dialogWords(), `dialog ${u} s into attempt 2`).toBe("");
       expect(cardWords(), `card ${u} s into attempt 2`).toBe("");
     }
-    reportAt(130, 30 / 200);
+    reportAt(106, 6 / 200);
     expect(cardWords()).toBe("about 3 min left");
     expect(dialogWords()).toBe("about 3 min left");
     expect(dialogPace()).toBe("2.0× · about 3 min left");
     // It does make it to 90 %: its own Finishing.
-    for (let u = 31; u <= 180; u++) reportAt(100 + u, u / 200);
+    for (let u = 7; u <= 180; u++) reportAt(100 + u, u / 200);
     expectSaid("Finishing");
   });
 });
@@ -481,24 +481,25 @@ describe("a render made in parts", () => {
     t <= 60 ? 0.005 * t : t <= 120 ? 0.3 + 0.005 * (t - 60) : 0.6 + 0.002 * (t - 120);
   const stepAt = (t: number) => (t <= 60 ? 0 : t <= 120 ? 1 : 2);
 
-  it("says no time at any part before the last, on either surface, and a figure at the final encode once its own gate has passed", async () => {
+  it("says no time at any part before the last, on either surface, and a figure at the final encode once 5 s of its own pictures have passed", async () => {
     const run = await watched();
     toStage(run.sub.job_id, "rendering");
-    for (let t = 1; t <= 140; t++) {
+    for (let t = 1; t <= 125; t++) {
       reportAt(t, fractionAt(t), { step: stepAt(t), steps: STEPS });
-      // 60 s of the first part at a pace that would have said a figure, then a whole second part: nothing; and nothing in the first 19 s of the encode either.
+      // 60 s of the first part at a pace that would have said a figure, then a whole second part: nothing; and nothing in the first 4 s of the encode either.
       expectSaid("");
       if (t === 60) {
         expect(cardLine()).toMatch(/Rendering part 1 of 2 · 30%$/);
         expect(dialogStatus()).toMatch(/Rendering part 1 of 2 · 30%$/);
       }
       if (t === 120) expect(cardLine()).toMatch(/Rendering part 2 of 2 · 60%$/);
-      if (t === 140) expect(cardLine()).toMatch(/Encoding · 64%$/);
     }
-    // 141 s: 20 s of the encode have been rendered and 64.2 % is made, at 0.002 a second: 358 s / 2 = 179 s left, the nearest minute is 3. Its own gate, not the parts'.
-    reportAt(141, fractionAt(141), { step: 2, steps: STEPS });
+    // 126 s: 5 s of the encode (which began at 121 s) and 61.2 % is made, at 0.002 a second: 388 s / 2 = 194 s left, the nearest minute is 3. Its own pictures, not the parts'.
+    reportAt(126, fractionAt(126), { step: 2, steps: STEPS });
     expectSaid("about 3 min left", 180);
     expect(dialogPace()).toBe("2.0× · about 3 min left");
+    for (let t = 127; t <= 140; t++) reportAt(t, fractionAt(t), { step: 2, steps: STEPS });
+    expect(cardLine()).toMatch(/Encoding · 64% · about 3 min left$/);
   });
 
   // The words check the part themselves: a figure the store holds is not said for a feed that is at a part before the last, whatever put it there.
