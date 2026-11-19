@@ -39,7 +39,8 @@ export interface ExportSettingsViewProps {
   onCancel: () => void;
   /** Export: the settings the person chose, handed over exactly as ExportDialog's own button hands them in 0.28.0 (Fast adds the `route`). */
   onStart: (settings: ExportSettings) => void;
-  /** Whether the Quality | Fast row and the line under the door are drawn (`FAST_CHOICE_OFFERED`). False: Quality alone, the view as it was before Fast was wired. */
+  /** Whether the Quality | Fast row and the line under the door are drawn (`FAST_CHOICE_OFFERED`). False: Quality alone, the view as it was before Fast was wired, except the D8 sentence (the line
+   *  behind the door for the lighter setting still says "light compression"). */
   fastChoice?: boolean;
 }
 

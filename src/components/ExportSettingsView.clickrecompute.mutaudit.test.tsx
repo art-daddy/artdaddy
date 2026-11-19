@@ -21,7 +21,7 @@ import ExportSettingsView from "./ExportSettingsView";
 // only the view's own call (its effect) goes through this export: `resolveChoice` inside the module calls its own clamp
 vi.mock("../timeline/exportChoiceView", async (importOriginal) => {
   const real = await importOriginal<typeof import("../timeline/exportChoiceView")>();
-  return { ...real, clampOverrides: vi.fn(real.clampOverrides) };
+  return { ...real, clampOverrides: vi.fn(real.clampOverrides), FAST_CHOICE_OFFERED: true };
 });
 vi.mock("../timeline/exportChoice", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../timeline/exportChoice")>()),

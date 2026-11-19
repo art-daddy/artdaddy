@@ -33,7 +33,8 @@ export { describeFigure } from "./exportChoiceWords";
 export type Choice = "quality" | "fast";
 
 /** Whether the dialog draws the Quality | Fast row and the line under the door. The one switch for it: false is the dialog without a choice (the settings view as it was before Fast was wired: Quality
- *  alone, no line under the door), and nothing else in the dialog changes. */
+ *  alone, no line under the door), and nothing else in the dialog changes except the D8 sentence: the line behind the door for the lighter setting still says "light compression" (decision D8),
+ *  where the view before Fast used the 0.28.0 wording. */
 export const FAST_CHOICE_OFFERED: boolean = true;
 
 /** The three values the settings carry: the Resolution list's, the Frame rate list's (`null` is the project's own rate) and the Quality list's. */

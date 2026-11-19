@@ -26,6 +26,7 @@ import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
 import { amd, harness } from "../test/chipHarness";
 import { __resetChipTests } from "../timeline/chipTest";
+import * as chipTest from "../timeline/chipTest";
 import * as exportAsk from "../timeline/exportAsk";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { emptyTimeline } from "../timeline/model";
@@ -84,7 +85,16 @@ function pcWith(adapters: GraphicsAdapter[]): void {
   vi.mocked(processorName).mockResolvedValue(null);
 }
 
+// The real hold lets go after 30 s: in a long file that would end the hold of a later test under it. Every hold the view makes is let go at the end of its own test.
+const realHold = exportAsk.holdExportAsk;
+const holds: (() => void)[] = [];
+
 beforeEach(() => {
+  vi.spyOn(exportAsk, "holdExportAsk").mockImplementation((ms) => {
+    const release = realHold(ms);
+    holds.push(release);
+    return release;
+  });
   localStorage.clear();
   __resetChipTests();
   __setExportFlag("quick_export", true);
@@ -97,6 +107,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  for (const release of holds.splice(0)) release();
   exportAsk.__resetExportAsk();
   __resetExportFlags();
   useEditor.setState({ timeline: null });
@@ -278,7 +289,7 @@ function mount(shape: Shape, options: { workload?: boolean; fastChoice?: boolean
       }
       onCancel={onCancel}
       onStart={onStart}
-      fastChoice={options.fastChoice}
+      fastChoice={options.fastChoice ?? true}
     />,
   );
   return { ...view, onStart, onCancel, user };
@@ -396,7 +407,7 @@ describe("(a) the row at mount and in every state", () => {
   });
 
   it("is there for a project that cannot be read too (no canvas, no snapshot): Quality checked, nothing described", async () => {
-    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} />);
+    render(<ExportSettingsView workload={null} onCancel={vi.fn()} onStart={vi.fn()} fastChoice />);
     await settle();
     expectRow("quality");
   });
@@ -1023,6 +1034,46 @@ describe("(h) the Graphics chip row stays mounted behind the closed door, in bot
     await view.user.click(radio("Quality"));
     await settle();
     expect(chipGroup()).toBeNull();
+  });
+
+  it("is told the SHOWN size, not the project's: Quality on 4K at 60 has no row (no class holds that picture), picking 1080p brings it back (1080p at 60 is class hd), and the project's own size takes it away again", async () => {
+    pcWith([amd]);
+    const view = mount(UHD60);
+    await openDoor(view);
+    await settle();
+    expect(chipGroup()).toBeNull();
+    await pickWords(view, "resolution", "1080p");
+    await waitFor(() => expect(chipGroup()).not.toBeNull());
+    await pickWords(view, "resolution", "Same as project (3840 x 2160)");
+    await waitFor(() => expect(chipGroup()).toBeNull());
+  });
+
+  it("asks the chip's test about the class of the SHOWN picture: 4K at 30 under Quality is uhd, Fast on it (1080p at 30) is hd, and Fast with the project's own size picked is uhd again", async () => {
+    pcWith([amd]);
+    const asked = vi.spyOn(chipTest, "findChip");
+    const classesAsked = () => [...new Set(asked.mock.calls.map((call) => call[0]))].sort();
+    const UHD30: Shape = {
+      name: "3840 x 2160 at 30",
+      width: 3840,
+      height: 2160,
+      fps: 30,
+      own: { resolution: "1080p", fps: null },
+      sizes: null,
+      rates: null,
+      size: null,
+      rate: null,
+    };
+    const view = mount(UHD30);
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd"]);
+    asked.mockClear();
+    await view.user.click(radio("Fast"));
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["hd"]);
+    asked.mockClear();
+    await pickWords(view, "resolution", "Same as project (3840 x 2160)");
+    await waitFor(() => expect(asked).toHaveBeenCalled());
+    expect(classesAsked()).toEqual(["uhd"]);
   });
 });
 

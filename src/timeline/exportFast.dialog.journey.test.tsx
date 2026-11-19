@@ -8,6 +8,12 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// These tests are about the Quality | Fast row, so they hold the choice offered whatever the constant says (the real dialog without it is held by ExportDialog.noChoiceConstant.test.tsx).
+vi.mock("./exportChoiceView", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./exportChoiceView")>()),
+  FAST_CHOICE_OFFERED: true,
+}));
+
 import ExportSettingsView from "../components/ExportSettingsView";
 import type { ExportSettings } from "../components/ExportDialog";
 import { processorName, resolveExportResources, runCapabilityProbe } from "../platform/host";

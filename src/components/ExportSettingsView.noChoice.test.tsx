@@ -1,4 +1,5 @@
-// The settings view without the choice row (`fastChoice` false): the Quality-only screen as it was before Fast was wired. It must stay as it was, so it stays tested on its own:
+// The settings view without the choice row (`fastChoice` false): the Quality-only screen as it was before Fast was wired, except the D8 sentence (the line behind the door for the lighter setting says
+// "light compression"). It must stay as it was, so it stays tested on its own:
 //  - no group "export choice", no radio, no line under the door, whatever the project, the door or the picks;
 //  - the Resolution row and the door are as before;
 //  - the object handed to `onStart` has no route key whatever is picked, and equals, key for key, what the 0.28.0 dialog hands over for the same picks, the same PC and the same answer of the app.

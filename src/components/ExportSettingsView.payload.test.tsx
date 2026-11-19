@@ -81,7 +81,16 @@ function pcWith(adapters: (typeof amd)[]) {
   vi.mocked(processorName).mockResolvedValue(null);
 }
 
+// The real hold lets go after 30 s: in a long file that would end the hold of a later test under it. Every hold the view makes is let go at the end of its own test.
+const realHold = exportAsk.holdExportAsk;
+const holds: (() => void)[] = [];
+
 beforeEach(() => {
+  vi.spyOn(exportAsk, "holdExportAsk").mockImplementation((ms) => {
+    const release = realHold(ms);
+    holds.push(release);
+    return release;
+  });
   localStorage.clear();
   __resetChipTests();
   __setExportFlag("quick_export", true);
@@ -94,6 +103,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  for (const release of holds.splice(0)) release();
   exportAsk.__resetExportAsk();
   __resetExportFlags();
   useEditor.setState({ timeline: null });

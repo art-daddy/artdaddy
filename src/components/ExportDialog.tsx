@@ -286,6 +286,12 @@ export default function ExportDialog({
         role="dialog"
         aria-modal="false"
         aria-label="export video"
+        // The editor behind the dialog listens on the window for its shortcuts and acts on a key that comes from a control in here: an arrow key steps the playhead and is cancelled (so the
+        // browser never moves the radio), Space plays, Delete removes the clip selected behind the dialog. A key pressed in this dialog is the dialog's and does not leave it; stopping the event
+        // leaves the browser's own action for the key alone (the radio moves, a button is pressed, a select opens). Escape has its own capture handler above.
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") e.stopPropagation();
+        }}
         className="w-[560px] max-w-[92vw] rounded-lg border border-edge bg-panel p-4 text-neutral-100 shadow-2xl"
       >
         <h2 className="text-sm font-semibold tracking-tight">Export video</h2>
