@@ -66,7 +66,8 @@ const hidden = (): ChipRowModel => ({ state: "none", visible: false, note: null,
 export const CHIP_OFF_COST = "Without the graphics chip, exports are usually slower.";
 
 /** Whether the chip, left on Auto, would be used for this picture on this PC: it passed its test, nothing has set it aside, the server allows it and the picture is in a size class it serves. Switching
- *  Off costs speed exactly there; where the chip would not have been used anyway, the Off note says nothing of speed. */
+ *  Off costs speed exactly there; where the chip would not have been used anyway, the Off note says nothing of speed. (The row's status never reports a pass together with a chip set aside; the model is a
+ *  pure function of whatever inputs it is handed, so it holds that leg itself.) */
 function wouldBeUsed(input: Partial<Record<keyof ChipRowInput, unknown>>): boolean {
   return (
     input.verdict === "passed" &&

@@ -15,7 +15,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { EXPORT_ENCODERS, EXPORT_MODE_REASONS } from "../api/exportVocabulary";
-import { claimsIn, retiredIn } from "../test/retiredNames";
+import {
+  LOOSE_CLAIMS,
+  PICTURE_CLAIMS,
+  claimsIn,
+  pictureClaimsIn,
+  retiredIn,
+} from "../test/retiredNames";
+import { chipAdvice } from "./chipAdvice";
+import { CHIP_RESTART_ROW } from "./chipRestart";
 import { CHIP_ROW_NOTES, chipRowModel, type ChipRowInput } from "./chipRow";
 import { D2_WORDS, RESOLUTION_WORDS, QUALITY_WORDS } from "./exportChoiceWords";
 import { exportHelp, type HelpInput } from "./exportHelp";
@@ -705,10 +713,11 @@ describe("the guard fails only on the old names, wherever new words are added", 
 // ---------------------------------------------------------------------------------------------------------------------
 // The claims: nothing a person can read says that the graphics chip or light compression changes the picture
 // ---------------------------------------------------------------------------------------------------------------------
-// The owner took that claim out of everything a person reads on 19 Nov 2026 ("the picture can differ slightly", "the picture may be slightly softer", and every wording of them: the dialog, the chat card, the
+// The claim was taken out of everything a person reads (2026-11-19: "the picture can differ slightly", "the picture may be slightly softer", and every wording of them: the dialog, the chat card, the
 // assistant's text). The scan above already finds a claim in a string that something reaches (a claim is a retired name). The checks here are stricter, because a claim that nothing reaches today is one wiring
-// away from a person: no string of any shipped file may carry it, reached or not, nor a sentence that a `+` joins out of literals, nor a comment that quotes it; and the real words functions are run over every
-// input they take, so a sentence made by code is held as well as one that is written out.
+// away from a person: no string of any shipped file may carry it, reached or not, nor a sentence that a `+` or a `.join` assembles out of literals, nor a comment that quotes it, nor the assistant's tool text; and the
+// real words functions are run over every input they take, so a sentence made by code is held as well as one that is written out. The patterns come in two tiers (src/test/retiredNames.ts): the strings a person
+// reads are held to both, a comment and the tool text only to the forms that name the picture, so that ordinary English elsewhere ("a softer tone") is never taken for the claim.
 
 const BREAK = "\u0001";
 
@@ -719,7 +728,16 @@ interface Assembled {
   pieces: string[];
 }
 
-/** The sentences that a chain of `+` joins out of literals ("the picture " + "may differ"), read whole. A part that is not a literal reads as a break, so the words on either side of it never join. */
+/** The array a `.join` is called on: `["the picture", "may differ"].join(" ")` is read like a chain of `+` with the separator between the parts. */
+const joinedArray = (node: ts.Node): ts.ArrayLiteralExpression | null =>
+  ts.isCallExpression(node) &&
+  ts.isPropertyAccessExpression(node.expression) &&
+  node.expression.name.text === "join" &&
+  ts.isArrayLiteralExpression(node.expression.expression)
+    ? node.expression.expression
+    : null;
+
+/** The sentences that a chain of `+`, or a `.join` of literals, assembles ("the picture " + "may differ"), read whole. A part that is not a literal reads as a break, so the words on either side of it never join. */
 function assembledOf(facts: Facts): Assembled[] {
   const found: Assembled[] = [];
   const inChain = new Set<ts.Node>();
@@ -740,15 +758,33 @@ function assembledOf(facts: Facts): Assembled[] {
     }
     return [BREAK];
   };
+  const add = (node: ts.Node, pieces: string[]): void => {
+    found.push({
+      line: facts.source.getLineAndCharacterOfPosition(node.getStart(facts.source)).line + 1,
+      decl: enclosingDeclaration(node),
+      text: pieces.join(""),
+      pieces,
+    });
+  };
   const visit = (node: ts.Node): void => {
-    if (isPlus(node) && !inChain.has(node)) {
-      const pieces = piecesOf(node);
-      found.push({
-        line: facts.source.getLineAndCharacterOfPosition(node.getStart(facts.source)).line + 1,
-        decl: enclosingDeclaration(node),
-        text: pieces.join(""),
-        pieces,
-      });
+    const array = joinedArray(node);
+    if (array !== null && ts.isCallExpression(node)) {
+      const first = node.arguments[0];
+      const separator =
+        first === undefined
+          ? ","
+          : ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first)
+            ? first.text
+            : BREAK;
+      add(
+        node,
+        array.elements.flatMap((element, index) => [
+          ...(index > 0 ? [separator] : []),
+          ...piecesOf(element),
+        ]),
+      );
+    } else if (isPlus(node) && !inChain.has(node)) {
+      add(node, piecesOf(node));
     }
     ts.forEachChild(node, visit);
   };
@@ -756,10 +792,13 @@ function assembledOf(facts: Facts): Assembled[] {
   return found;
 }
 
-/** The joined sentences that carry a claim no single piece of them carries: the ones the scan of single literals cannot see. */
+/** The joined sentences that carry a claim no single piece of them carries: the ones the scan of single literals cannot see. Each stretch between two breaks is read on its own, so words a variable keeps apart never join. */
 const assembledClaims = (facts: Facts): Assembled[] =>
   assembledOf(facts).filter(({ text, pieces }) =>
-    claimsIn(text).some((name) => !pieces.some((piece) => claimsIn(piece).includes(name))),
+    text
+      .split(BREAK)
+      .flatMap(claimsIn)
+      .some((name) => !pieces.some((piece) => claimsIn(piece).includes(name))),
   );
 
 describe("no claim that the picture differs is made anywhere in the shipped build", () => {
@@ -780,10 +819,12 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
         [
           'export const plain = "The picture can differ slightly.";',
           'export const joined = "The file is larger and the picture " + "may be " + "different.";',
+          'export const arrayJoined = ["The file is larger and the picture", "may be", "different."].join(" ");',
           "export const template = `Using ${what} · the file is larger and the picture can look slightly softer`;",
           'const hidden = "the picture can differ";',
           "export const holder = (): string => hidden;",
           'export const apart = "the picture " + word + " may differ";',
+          'export const apartJoined = ["the picture", word, "may differ"].join(" ");',
           'export const fine = "The picture is smaller (720p), and " + "the file is usually larger.";',
         ].join("\n"),
       ],
@@ -808,8 +849,10 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
         .sort(),
     ).toEqual(["View", "hidden", "nobody", "plain", "template"]);
     expect(
-      [...result.facts.values()].flatMap((facts) => assembledClaims(facts).map((a) => a.decl)),
-    ).toEqual(["joined"]);
+      [...result.facts.values()]
+        .flatMap((facts) => assembledClaims(facts).map((a) => a.decl))
+        .sort(),
+    ).toEqual(["arrayJoined", "joined"]);
     // reached or not is told apart (the scan above lists the reached ones), yet both are found
     const lives = Object.fromEntries(
       result.findings.filter((f) => claimsIn(f.text).length > 0).map((f) => [f.decl, f.live]),
@@ -830,11 +873,63 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
     ).toEqual([]);
   });
 
-  it("finds none in any comment either: a comment that quotes the claim is a second copy of it", () => {
-    const found = [...realSources()]
-      .map(([file, text]) => ({ file, claims: claimsIn(normalised(text)) }))
-      .filter(({ claims }) => claims.length > 0);
-    expect(found).toEqual([]);
+  /** Where a text says one of the claims that name the picture, as file:line and the words on that line. A line is read without its comment marks, and with the next one, so that a claim broken over two lines is found (at its first line). */
+  const quotedClaims = (sources: ReadonlyMap<string, string>): string[] =>
+    [...sources].flatMap(([file, text]) => {
+      const lines = text
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s*(?:\/\*+|\*+\/?|\/\/+)\s?/, ""));
+      const claimAt = (words: string): boolean => pictureClaimsIn(normalised(words)).length > 0;
+      const hits: string[] = [];
+      lines.forEach((line, index) => {
+        const next = lines[index + 1] ?? "";
+        if (claimAt(line) || (!claimAt(next) && claimAt(`${line} ${next}`)))
+          hits.push(`${file}:${index + 1} ${JSON.stringify(normalised(line).slice(0, 120))}`);
+      });
+      return hits;
+    });
+
+  it("finds none in any comment either: a comment that quotes the claim is a second copy of it, and ordinary English that only shares a word with it is left alone", () => {
+    expect(
+      quotedClaims(realSources()),
+      "a comment quotes the claim that the picture differs or is softer: reword it",
+    ).toEqual([]);
+    // what is read in a comment is narrow: the forms that name the picture, not "a softer tone" or "the thumb looks a little wider"
+    expect(
+      quotedClaims(
+        new Map([
+          ["a.ts", "// A softer tone of the accent is used for hover states.\nexport const a = 1;"],
+          ["b.ts", "/** at the lowest zoom the thumb looks a little wider than its track */"],
+          ["c.ts", "// the picture may be slightly softer\nconst c = 1;"],
+          ["d.ts", "/** the picture\n *  can differ slightly */"],
+        ]),
+      ).map((hit) => hit.split(" ")[0]),
+    ).toEqual(["c.ts:1", "d.ts:1"]);
+  });
+
+  // The assistant's and the MCP's tool text is the JSON of `contract` (the catalog, the schema and the retained snapshot of an earlier release): read as the strings a person reads are, but only for the forms that name the picture.
+  it("finds none in the assistant's tool text: no string of the catalog, the schema or the retained snapshot says the picture differs", () => {
+    const files = walk(path.join(SRC, "contract")).filter((file) => file.endsWith(".json"));
+    expect(files.map((file) => path.basename(file))).toEqual(
+      expect.arrayContaining(["catalog.json", "timeline.schema.json", "0.21.5.json"]),
+    );
+    const strings = (value: unknown, where: string): { where: string; text: string }[] =>
+      typeof value === "string"
+        ? [{ where, text: value }]
+        : value !== null && typeof value === "object"
+          ? Object.entries(value).flatMap(([key, inner]) => strings(inner, `${where}/${key}`))
+          : [];
+    const texts = files.flatMap((file) =>
+      strings(JSON.parse(readFileSync(file, "utf8")), rel(file)),
+    );
+    // the walk reads the real text: hundreds of strings, among them the export tool's
+    expect(texts.length).toBeGreaterThan(500);
+    expect(texts.some(({ text }) => /\bexport\b/i.test(text))).toBe(true);
+    expect(
+      texts
+        .filter(({ text }) => pictureClaimsIn(normalised(text)).length > 0)
+        .map(({ where }) => where),
+    ).toEqual([]);
   });
 
   it("finds a claim added to the real sources: in a string that something reaches, in one nothing reaches, and in one joined from pieces", () => {
@@ -870,6 +965,21 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
     "the picture will differ slightly",
     "the picture looks different",
     "the picture might be a little softer",
+    // the same claim in other words
+    "The quality may be slightly lower.",
+    "Slightly lower quality than the processor.",
+    "Fast softens the picture.",
+    "The image can look different.",
+    "The video may look different from Quality.",
+    "Not identical to the processor's picture.",
+    "A little different from what the processor makes.",
+    "Some detail may be lost.",
+    "The picture is not exactly the same.",
+    "The result may not be pixel for pixel identical.",
+    "The output is less crisp.",
+    "The result looks blurrier.",
+    "Quality can differ a little.",
+    "Small differences in the picture are possible.",
   ];
   const PLAIN = [
     "Quality",
@@ -887,12 +997,21 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
     "Switch to another project",
     "the file is usually larger",
     "Cancel",
+    "One size smaller, up to 30 frames a second, Low quality.",
+    "Typical speed-up; your PC may differ.",
+    "Choose a lower quality for a smaller file.",
+    "Small file, visible compression",
   ];
-  const plain = fc
-    .array(fc.constantFrom(...PLAIN), { maxLength: 6 })
-    .map((words) => words.join(" "));
+  // Ordinary English that shares a word with the claim: the tier a comment and the tool text are read with leaves it alone, the loose tier of the strings a person reads does not (it would be given a row).
+  const ORDINARY = [
+    "A softer tone of the accent is used for hover states.",
+    "the thumb looks a little wider than its track",
+  ];
+  const wordsOf = (items: readonly string[]) =>
+    fc.array(fc.constantFrom(...items), { maxLength: 6 }).map((words) => words.join(". "));
 
   it("reads every wording of the claim inside any text made of plain words, and nothing plain as a claim", () => {
+    const plain = wordsOf(PLAIN);
     fc.assert(
       fc.property(
         plain,
@@ -902,7 +1021,55 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
       ),
     );
     fc.assert(fc.property(plain, (words) => claimsIn(words).length === 0));
+    // what a comment and the tool text are read with does not take ordinary English for the claim, and does take the forms that name the picture
+    fc.assert(
+      fc.property(wordsOf([...PLAIN, ...ORDINARY]), (words) => pictureClaimsIn(words).length === 0),
+    );
+    for (const claim of [
+      "the picture can differ slightly",
+      "The picture may be slightly softer",
+      "The picture can look slightly softer.",
+      "the picture is smaller and may look slightly softer",
+      "the picture looks different",
+      "The image can look different.",
+    ])
+      expect(pictureClaimsIn(claim), claim).not.toEqual([]);
   });
+
+  // A pattern that matched nothing any more would leave its words unread without a test going red: each pattern of a tier is held to a sample that it alone catches in that tier.
+  const ALONE: Record<string, string> = {
+    "the picture can differ": "The video may be worse.",
+    "the picture looks different": "The image looks different.",
+    "slightly softer": "Fast is slightly softer.",
+    "the picture differs": "The picture differs.",
+    softer: "It is softer.",
+    "differs slightly": "It differs slightly.",
+    "looks slightly different": "It looks a little odd.",
+    "softens or blurs": "The result is less crisp.",
+    "lower quality": "Quality can differ.",
+    "detail is lost": "Some detail may be lost.",
+    "differences in the picture": "Small differences in the picture are possible.",
+    "not the same picture": "The output is not exactly the same.",
+  };
+  it.each([
+    ["that name the picture", PICTURE_CLAIMS],
+    ["of the looser tier", LOOSE_CLAIMS],
+  ] as const)(
+    "holds each of the patterns %s to a sample that only it catches in its tier",
+    (_tier, patterns) => {
+      for (const { name, pattern } of patterns) {
+        const sample = ALONE[name];
+        expect(sample, `a sample for "${name}"`).toBeDefined();
+        expect(pattern.test(sample), `"${name}" reads its own sample`).toBe(true);
+        for (const other of patterns)
+          if (other.name !== name)
+            expect(
+              other.pattern.test(sample),
+              `"${other.name}" reads the sample of "${name}"`,
+            ).toBe(false);
+      }
+    },
+  );
 
   function* chipInputs(): Generator<ChipRowInput> {
     for (const found of [false, true])
@@ -1039,6 +1206,28 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
       has: "Using light compression to save time",
     },
     {
+      name: "the chip's restart words (on the card and to the assistant)",
+      texts: () =>
+        Object.values(CHIP_RESTART_ROW.words).filter(
+          (words): words is string => typeof words === "string",
+        ),
+      has: "Started again on the processor",
+    },
+    {
+      name: "the hints under the Graphics chip row (an old NVIDIA driver, Intel graphics that may be switched off)",
+      texts: () => [
+        chipAdvice({
+          adapters: [{ maker: "nvidia", driver: "32.0.15.6094", result: "encode_failed" }],
+          processor: null,
+        })?.text ?? "",
+        chipAdvice({
+          adapters: [{ maker: "nvidia", driver: "32.0.16.1012", result: "passed" }],
+          processor: "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz",
+        })?.text ?? "",
+      ],
+      has: "graphics driver",
+    },
+    {
       name: "the held Quick route's words, over every route, encoder, size change and PC class",
       texts: heldRouteWords,
       has: "Quick export",
@@ -1047,7 +1236,7 @@ describe("no claim that the picture differs is made anywhere in the shipped buil
 
   it.each(SURFACES)("$name: no sentence says the picture differs", ({ texts, has }) => {
     const all = texts();
-    expect(all.length).toBeGreaterThan(3);
+    expect(all.length).toBeGreaterThanOrEqual(2);
     expect(
       all.some((text) => text.includes(has)),
       `the list holds "${has}"`,

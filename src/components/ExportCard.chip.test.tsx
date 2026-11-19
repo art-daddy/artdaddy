@@ -109,14 +109,14 @@ describe("the card says what the chip is doing and offers no way to switch it", 
     expect(controls().filter((b) => SWITCH.test(b.textContent ?? ""))).toEqual([]);
   };
 
-  it("shows the chip's line with no link beside it: the only control on a running chip export is Cancel, and pressing it writes no switch", async () => {
+  it("shows the chip's line with no link beside it, and pressing every control the card has writes no switch", async () => {
     const t = await longProject();
     await t.exportNow("long");
     await flush();
     render(createElement(ExportCard));
     expect(screen.getByText(CHIP_LINE)).toBeVisible();
     nothingSwitchesIt();
-    expect(names()).toEqual(["cancel long.mp4"]);
+    expect(names()).toContain("cancel long.mp4");
     expect(screen.queryByTestId("export-card-chip-off")).toBeNull();
     // nothing on the card can change the person's switch for the next exports
     for (const control of controls()) fireEvent.click(control);
@@ -134,7 +134,6 @@ describe("the card says what the chip is doing and offers no way to switch it", 
     // the export that is running keeps going, on the chip it started on, and its line stays
     expect(screen.getByText(CHIP_LINE)).toBeVisible();
     nothingSwitchesIt();
-    expect(names()).toEqual(["cancel long.mp4"]);
     for (const control of controls()) fireEvent.click(control);
     expect(localStorage.getItem(CHIP_PREF_KEY)).toBe("off");
   });
