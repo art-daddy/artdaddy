@@ -60,3 +60,18 @@ export function audioMovedFor(
   if (found.phase === "waiting") return null;
   return found.phase === "running";
 }
+
+/** Is a run going that reads this stretch of the file (source seconds; null is the whole file)? Whoever started it:
+ *  the indexer, a look, a request for captions. A job that only waits for an export is not going. */
+export function runIsGoing(
+  jobs: readonly SpeechJob[],
+  path: string,
+  window: { start?: number | null; end?: number | null } | null,
+): boolean {
+  const wanted: SpanWindow | null = window
+    ? { start: window.start ?? 0, end: window.end ?? Infinity }
+    : null;
+  return jobs.some(
+    (j) => (j.phase === "running" || j.phase === "starting") && runReads(j, path, wanted),
+  );
+}

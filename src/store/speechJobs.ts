@@ -1,4 +1,4 @@
-// The speech jobs this app is running, has queued or has just stopped, as the top-bar chip shows them
+// The speech jobs this app is running, has queued or has just stopped, as the status-bar chip shows them
 // (S2-04 = D). The engine side (transcribe.ts, indexCoordinator.ts, the monitor) writes; the chip
 // (SpeechChip.tsx) reads. LOCAL ONLY: nothing in here is sent anywhere (T1-10 = C: the client sends no
 // new fact), and nothing is stored on disk.

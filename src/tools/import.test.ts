@@ -10,7 +10,9 @@ import {
   readMediaTool,
   registerLibraryClip,
   registerPendingClip,
+  transcriptionLine,
 } from "./import";
+import { registerBackgroundTranscriber, type QueueStatus } from "./transcriptQueue";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "./store";
 import { ClientToolRegistry } from "./registry";
 import { endProjectSession } from "./coordinator";
@@ -987,5 +989,136 @@ describe("registerLibraryClip announces the change", () => {
     } finally {
       h.stop();
     }
+  });
+});
+
+// The agent's import says, in one line, what is happening to the words of what it imported (the owner's decision of
+// 20 Nov 2026). Only this door says it: it is the agent's tool, and a file imported by hand is the editor's own.
+describe("what an agent's import says about the words", () => {
+  const indexed: string[] = [];
+  let standing: (source: string) => QueueStatus | null = () => null;
+  let off: (() => void) | null = null;
+  const register = (): void => {
+    off = registerBackgroundTranscriber(DIR, {
+      prioritize: () => true,
+      loudness: () => null,
+      index: (source) => void indexed.push(source),
+      status: (source) => standing(source),
+    });
+  };
+  beforeEach(() => {
+    indexed.length = 0;
+    standing = () => null;
+  });
+  afterEach(() => {
+    off?.();
+    off = null;
+  });
+
+  it("says a file that waits is queued and behind how many, and hands it to the index to be queued at all", async () => {
+    register();
+    standing = () => ({ state: "queued", ahead: 2 });
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("sound") }, name: "talk.mp3" },
+      ctxWith(),
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r.transcription).toBe(
+      "Transcription of this file is queued in the background, 2 ahead of it.",
+    );
+    expect(indexed).toHaveLength(1);
+    expect(indexed[0]).toMatch(/talk\.mp3$/);
+  });
+
+  it("says it has started when nothing is ahead of it and nothing holds it back", async () => {
+    register();
+    standing = () => ({ state: "queued", ahead: 0 });
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("sound") }, name: "talk.mp3" },
+      ctxWith(),
+    )) as Any;
+    expect(r.transcription).toBe("Transcription of this file has started in the background.");
+  });
+
+  it("says nothing for a picture, and does not hand it to the index as speech", async () => {
+    register();
+    standing = () => ({ state: "running" });
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("pixels") }, name: "photo.png" },
+      ctxWith(),
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty("transcription");
+    expect(indexed).toEqual([]);
+  });
+
+  it("says nothing where there is no index to ask, and the import is the same without the line", async () => {
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("sound") }, name: "talk.mp3" },
+      ctxWith(),
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty("transcription");
+    expect(r.media_ref).toMatch(/^media_/);
+  });
+
+  it("says nothing for a file the index knows nothing of (it was done before)", async () => {
+    register();
+    standing = () => null;
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("sound") }, name: "talk.mp3" },
+      ctxWith(),
+    )) as Any;
+    expect(r).not.toHaveProperty("transcription");
+  });
+
+  it("gives one line for a folder: how many of its audio and video files started and how many wait", async () => {
+    register();
+    let n = 0;
+    standing = () => (n++ === 0 ? { state: "running" } : { state: "queued", ahead: n });
+    const fs = new MockFs();
+    fs.bytes.set(joinPath("D:/clips/a.mp3"), new Uint8Array([1]));
+    fs.bytes.set(joinPath("D:/clips/b.mp3"), new Uint8Array([2]));
+    fs.bytes.set(joinPath("D:/clips/c.png"), new Uint8Array([3]));
+    const r = (await importMediaTool({ source: { path: "D:/clips" } }, ctxWith(fs))) as Any;
+    expect(r.count).toBe(3);
+    expect(indexed).toHaveLength(2);
+    expect(r.transcription).toBe(
+      "Transcription in the background, for 2 audio and video files: 1 started, 1 queued.",
+    );
+  });
+
+  it("never fails the import for want of the line", async () => {
+    off = registerBackgroundTranscriber(DIR, {
+      prioritize: () => true,
+      loudness: () => null,
+      index: () => {
+        throw new Error("the index is closing");
+      },
+    });
+    const r = (await importMediaTool(
+      { source: { bytes: btoa("sound") }, name: "talk.mp3" },
+      ctxWith(),
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty("transcription");
+  });
+
+  // The rule that survives any rewrite of the words: "started" is only ever said of a file that is running, or is
+  // queued with nothing ahead and nothing holding it back, and a file that waits is never said to have started.
+  it("never says started of a file that waits", () => {
+    const waiting: QueueStatus[] = [
+      { state: "queued", ahead: 1 },
+      { state: "queued", ahead: 7 },
+      { state: "queued", ahead: 0, held_by: "export" },
+      { state: "queued", ahead: 0, held_by: "look" },
+      { state: "left_for_later" },
+      { state: "unavailable" },
+    ];
+    for (const s of waiting)
+      expect(transcriptionLine([s]), JSON.stringify(s)).not.toMatch(/has started/);
+    for (const s of [{ state: "running" }, { state: "queued", ahead: 0 }] as QueueStatus[])
+      expect(transcriptionLine([s]), JSON.stringify(s)).toMatch(/has started/);
+    expect(transcriptionLine([])).toBeUndefined();
   });
 });

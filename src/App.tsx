@@ -7,6 +7,7 @@ import CloseFailedDialog from "./components/CloseFailedDialog";
 import ExportQuestionDialog from "./components/ExportQuestionDialog";
 import MenuBar from "./components/MenuBar";
 import Shell from "./components/Shell";
+import StatusBar from "./components/StatusBar";
 import CompatibilityGate from "./components/CompatibilityGate";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { startOsDropRouter, webOwnsFileDrops } from "./lib/osDrop";
@@ -216,6 +217,7 @@ export default function App() {
               <Route path="/p/:projectId" element={<ShellRoute />} />
             </Routes>
           </div>
+          <StatusBar />
         </div>
       </CompatibilityGate>
       <CloseFailedDialog />

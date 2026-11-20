@@ -1,20 +1,11 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { startDesktopSignIn } from "../api/desktopAuth";
 import type { ApprovalMode, Attachment, FileNode, SessionState } from "../api/types";
-import { creditsTitle, formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/usage";
+import { refreshUsage } from "../api/usage";
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
-import { openDiscord } from "../lib/community";
-import { CREDITS_PAUSED, isOutOfCredits } from "../lib/outOfCredits";
+import { isOutOfCredits } from "../lib/outOfCredits";
 import DiscordCreditsCta from "./DiscordCreditsCta";
 import { listProjectFiles } from "../lib/files";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
@@ -1000,8 +991,8 @@ function ContextMeter({
   const used = session?.context_tokens ?? 0;
   const max = contextWindow(model);
   const pct = max > 0 ? Math.min(100, Math.round((used / max) * 100)) : 0;
-  const usage = useSyncExternalStore(subscribeUsage, getUsage);
-  // Refresh the credit balance on mount and after each turn (cost changes).
+  // The credits are on the status bar now, which reads the balance when it appears; a turn changes it, so it is read
+  // again after each one, here, where the turn's cost is known.
   useEffect(() => {
     void refreshUsage();
   }, [session?.cost_usd]);
@@ -1032,27 +1023,6 @@ function ContextMeter({
           Start a new chat
         </button>
       )}
-      {usage.metered &&
-        (usage.globalPaused ? (
-          <span className="tabular-nums text-amber-400" title={CREDITS_PAUSED}>
-            AI paused - {formatCredits(Math.max(0, usage.remaining))} cr left
-          </span>
-        ) : usage.over ? (
-          // At zero the number is the least useful thing we can show: it states the dead end
-          // without the way out, which is the one thing someone stuck here needs.
-          <button
-            type="button"
-            onClick={() => void openDiscord()}
-            title={creditsTitle(usage)}
-            className="whitespace-nowrap font-medium text-red-400 underline underline-offset-2 hover:text-red-300"
-          >
-            0 cr — Join our Discord to get more
-          </button>
-        ) : (
-          <span className="tabular-nums text-neutral-400" title={creditsTitle(usage)}>
-            {formatCredits(Math.max(0, usage.remaining))} cr left
-          </span>
-        ))}
     </div>
   );
 }

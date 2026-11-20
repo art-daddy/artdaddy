@@ -36,7 +36,6 @@ import { NewProjectDialog, OpenProjectDialog } from "./ProjectDialogs";
 import { ShortcutSheet } from "./ShortcutSheet";
 import { shortcutLabel as sc } from "../timeline/shortcuts";
 import ReportProblemDialog from "./ReportProblemDialog";
-import SpeechChip from "./SpeechChip";
 import { Button, cn, Overlay } from "./ui";
 
 type Item = "sep" | { label: string; shortcut?: string; onClick: () => void; disabled?: boolean };
@@ -617,7 +616,6 @@ export default function MenuBar() {
         </button>
         <div className="ml-auto flex min-w-0 items-center gap-1 [&>*]:shrink-0">
           <ExportBadge onClick={() => openExport()} />
-          <SpeechChip />
           {hasProject && (
             <button
               onClick={openRecorder}
@@ -707,7 +705,7 @@ export default function MenuBar() {
       {notice && (
         <div
           role="status"
-          className="fixed bottom-16 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-3 rounded-md border border-amber-700/60 bg-amber-950/90 px-4 py-2 text-xs text-amber-100 shadow-xl"
+          className="fixed bottom-[4.5rem] left-1/2 z-[60] flex -translate-x-1/2 items-center gap-3 rounded-md border border-amber-700/60 bg-amber-950/90 px-4 py-2 text-xs text-amber-100 shadow-xl"
         >
           {notice}
           <button className="text-amber-300 hover:text-white" onClick={() => clearNotice()}>
@@ -716,7 +714,7 @@ export default function MenuBar() {
         </div>
       )}
       {toast && (
-        <div className="fixed bottom-4 left-1/2 z-[60] -translate-x-1/2 rounded-md border border-edge bg-neutral-900 px-4 py-2 text-xs text-neutral-200 shadow-xl">
+        <div className="fixed bottom-9 left-1/2 z-[60] -translate-x-1/2 rounded-md border border-edge bg-neutral-900 px-4 py-2 text-xs text-neutral-200 shadow-xl">
           {toast}
         </div>
       )}

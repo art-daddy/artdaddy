@@ -68,6 +68,11 @@ export function exportsBusyNow(): boolean {
   return exportsBusy;
 }
 
+/** Is a look's whisper running or waiting right now? Read-only: while one is, no background whisper starts. */
+export function lookActiveNow(): boolean {
+  return looks > 0;
+}
+
 /** Hear when an export starts or ends. Returns the way to stop listening. */
 export function onExportsBusy(listener: (busy: boolean) => void): () => void {
   busyListeners.add(listener);

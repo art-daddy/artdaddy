@@ -267,62 +267,12 @@ describe("ChatView", () => {
     expect(state.send).not.toHaveBeenCalled();
   });
 
-  it("shows the remaining balance while there is one", () => {
-    render(<ChatView />);
-    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
-  });
-
-  it("shows real fractional headroom without floating-point noise", () => {
-    usageMock.remaining = 100 - 99.999;
-    render(<ChatView />);
-    expect(screen.getByText("0.001 cr left")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
-  });
-
-  it("says in the tooltip how much of what is used is reserved for generations in progress", () => {
-    Object.assign(usageMock, { used: 96, limit: 150, remaining: 54, held: 96 });
-    render(<ChatView />);
-    expect(screen.getByText("54 cr left")).toHaveAttribute(
-      "title",
-      "96 / 150 credits used (96 reserved for generations in progress)",
-    );
-  });
-
-  it("leaves the tooltip as it was when nothing is held", () => {
-    render(<ChatView />);
-    expect(screen.getByText(/cr left/)).toHaveAttribute("title", "10 / 100 credits used");
-  });
-
-  it("carries the same tooltip on the way out once the balance is spent", () => {
-    Object.assign(usageMock, { over: true, used: 150, limit: 150, remaining: 0, held: 30 });
-    render(<ChatView />);
-    expect(screen.getByRole("button", { name: /join our discord/i })).toHaveAttribute(
-      "title",
-      "150 / 150 credits used (30 reserved for generations in progress)",
-    );
-  });
-
-  it("shows the shared pause without pretending the user's remaining credit is zero", () => {
-    usageMock.over = true;
-    usageMock.globalPaused = true;
-    usageMock.remaining = 97;
-    render(<ChatView />);
-    expect(screen.getByText("AI paused - 97 cr left")).toBeInTheDocument();
-    expect(screen.queryByText(/0 cr/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
-  });
-
-  // A bare "0" states the dead end and withholds the only way out of it. Asserted by
-  // clicking through to the open, not by reading the label.
-  it("turns the credit chip into a way out once the balance is spent", async () => {
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
+  // The credits moved to the status bar at the bottom of the window (20 Nov 2026); StatusBar.test.tsx has their cases.
+  it("leaves the credits to the status bar: this footer line carries the context meter only", () => {
     usageMock.over = true;
     render(<ChatView />);
-    fireEvent.click(screen.getByRole("button", { name: /join our discord/i }));
-    await waitFor(() =>
-      expect(open).toHaveBeenCalledWith(DISCORD_URL, "_blank", "noopener,noreferrer"),
-    );
-    open.mockRestore();
+    expect(screen.queryByText(/cr left/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 });
 
@@ -922,14 +872,6 @@ describe("ChatView", () => {
     await waitFor(() =>
       expect(screen.getByTitle("Attach images, video, or audio")).not.toBeDisabled(),
     );
-  });
-
-  it("shows the credit balance whenever the server reports the round is metered", () => {
-    // Keyed on usage.metered, not on which model is selected — the gemini id this used to name
-    // was incidental, and the app no longer offers one.
-    state.model = "gpt-6.1-sol";
-    render(<ChatView />);
-    expect(screen.getByText(/cr left/)).toBeInTheDocument();
   });
 
   describe("starter prompts", () => {

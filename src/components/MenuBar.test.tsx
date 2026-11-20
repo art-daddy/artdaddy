@@ -137,9 +137,8 @@ describe("MenuBar", () => {
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
   });
 
-  // S2-04 = D: one chip in the right cluster, after the Export badge and before Record, like the picture.
-  it("shows a speech job as a chip between the Export badge and Record, in the right cluster", () => {
-    useExportJob.setState({ phase: "rendering", fraction: 0.37 });
+  // The chip moved from this bar to the status bar at the bottom (20 Nov 2026): what it showed is StatusBar.test.tsx's.
+  it("does not draw the speech chip: the status bar at the bottom does", () => {
     useSpeechJobs.getState().add({
       id: "a",
       purpose: "index",
@@ -164,19 +163,6 @@ describe("MenuBar", () => {
         exportsBusy: true,
       },
     });
-    renderBar("/p/test");
-    const exporting = screen.getByLabelText("export progress");
-    const speech = screen.getByTestId("speech-chip");
-    const record = screen.getByRole("button", { name: "Record video" });
-    expect(speech).toHaveTextContent("Transcribing 48% · slow: about 35 min left");
-    expect(
-      exporting.compareDocumentPosition(speech) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(speech.compareDocumentPosition(record) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(speech.closest(".ml-auto")).toBe(record.parentElement);
-  });
-
-  it("draws no speech chip while no speech job is going", () => {
     renderBar("/p/test");
     expect(screen.queryByTestId("speech-chip")).not.toBeInTheDocument();
   });

@@ -71,7 +71,8 @@ import {
 } from "./speechWordTimes";
 import { exportFlag, speechModelSources } from "../api/exportFlags";
 import { joinPath } from "./store";
-import { prioritizeTranscript } from "./transcriptQueue";
+import { prioritizeTranscript, transcriptQueueStatus, type QueueStatus } from "./transcriptQueue";
+import { runIsGoing } from "./speechJobMatch";
 import { whisperCode } from "./whisperLanguages";
 import { whisperRunFacts } from "./whisperFacts";
 import { adoptTurn, lookWhisper } from "./workGate";
@@ -82,7 +83,7 @@ import { settledWithin } from "../lib/settledWithin";
 import { stoppedAnswer } from "../lib/stopped";
 import { trackSpeechWait } from "../store/liveWait";
 import { refreshExportFlags } from "../api/exportFlags";
-import type { SpeechPurpose } from "../store/speechJobs";
+import { useSpeechJobs, type SpeechPurpose } from "../store/speechJobs";
 import {
   clearModelDownload,
   megabytes,
@@ -2013,7 +2014,7 @@ async function outputState(
  *  ONCE with it off (-ng): when that works, this machine stays off it for a while, and when it crashes too
  *  the GPU was not the cause and nothing is remembered.
  *
- *  Each launch is its own job with its own abort, registered with the top-bar chip's store (S2-05): Cancel
+ *  Each launch is its own job with its own abort, registered with the status-bar chip's store (S2-05): Cancel
  *  stops THAT run and no other, whoever else is running. The caller's own signal (Stop) ends it too. A run
  *  stopped either way exits non-zero, and that is not a crash of the chip: it is not retried, and it is
  *  answered as what it was. `info` says what the run is for, so the chip can title it. */
@@ -3075,7 +3076,23 @@ export async function getTranscriptTool(
   }
 
   const clipsOut: Array<Record<string, unknown>> = [];
-  const pending: Array<{ clip_id: string; track_id: string }> = [];
+  const pending: Array<{ clip_id: string; track_id: string; queue?: QueueStatus }> = [];
+  /** Where the words of a clip not ready stand, for the assistant: the run that was going when the time ran out is
+   *  running once the engine has begun it; a file handed to the project's transcriber is where that queue says. A
+   *  clip nobody has started says nothing: the next call starts it. */
+  const queueOf = (job: SpanJob): QueueStatus | undefined => {
+    try {
+      if (job === overdue)
+        return runIsGoing(useSpeechJobs.getState().jobs, job.src, job.window)
+          ? { state: "running" }
+          : undefined;
+      if (handedJobs.has(job))
+        return transcriptQueueStatus(ctx.store.projectDir, job.src, "", job.window) ?? undefined;
+    } catch {
+      // The place in the queue is extra: an answer is never lost for want of it.
+    }
+    return undefined;
+  };
   let idx = 0;
   let truncated = false;
   for (const use of uses) {
@@ -3087,7 +3104,12 @@ export async function getTranscriptTool(
       continue;
     }
     if (!job.words) {
-      pending.push({ clip_id: String(clip.id), track_id: track });
+      const queue = queueOf(job);
+      pending.push({
+        clip_id: String(clip.id),
+        track_id: track,
+        ...(queue ? { queue } : {}),
+      });
       continue;
     }
     if (truncated) continue;

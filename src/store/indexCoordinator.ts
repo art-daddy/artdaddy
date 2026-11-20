@@ -39,7 +39,7 @@ import {
   noteAudioLength,
   wasCancelledByPerson,
 } from "../tools/speechAdmission";
-import { isSpeechCancelled } from "../tools/speechFailure";
+import { classifyTranscriptFailure, isSpeechCancelled } from "../tools/speechFailure";
 import { cpuOnlyNow } from "../tools/speechBackend";
 import { readPace } from "../tools/speechPace";
 import type { ProjectStoreAccess } from "../tools/store";
@@ -51,18 +51,30 @@ import {
   pickBatch,
   type BatchFlags,
 } from "../tools/transcribeBatch";
-import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
-import { backgroundTurn, exportsBusyNow, onExportsBusy } from "../tools/workGate";
+import {
+  registerBackgroundTranscriber,
+  type BackgroundLoudness,
+  type QueueStatus,
+} from "../tools/transcriptQueue";
+import { backgroundTurn, exportsBusyNow, lookActiveNow, onExportsBusy } from "../tools/workGate";
 import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
 import { useSpeechJobs } from "./speechJobs";
+import {
+  ENGINE_FAILURE_ID,
+  registerSpeechRetrier,
+  useSpeechFailures,
+  type SpeechFailure,
+} from "./speechFailures";
 import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import { useProxyJobs } from "./proxyJobs";
 import { focusRef, frameAt } from "./proxyOrder";
 
 /** Names the entries this indexer shows the chip while an export holds its turn back. */
 let queuedSeq = 0;
+/** Tells one indexer's failures from another's, even of the same project reopened before the old one finished closing. */
+let ownerSeq = 0;
 
 // Media imported BY REFERENCE lives wherever the user keeps it, so neither pass may require
 // a path inside the project. Requiring `library/` here is why an externally-referenced clip
@@ -74,6 +86,8 @@ const isIndexable = (p: string): boolean => {
   const k = kindOf(p);
   return k === "video" || k === "audio";
 };
+/** What the person calls a file: the last part of its path. */
+const fileNameOf = (p: string): string => p.replace(/\\/g, "/").split("/").pop() || p;
 
 type Pass = "proxy" | "transcript" | "loudness";
 
@@ -171,6 +185,13 @@ export class IndexCoordinator {
   private readonly attempts = new Map<string, number>();
   private engineAttempts = 0;
   private engineDown = false;
+  /** The transcript jobs on the status bar's list of failures, by {@link txKey}: what Retry puts back. */
+  private readonly failedTx = new Map<string, TxJob>();
+  /** The jobs that the failure to start the speech engine took out of a run or out of the queue: Retry puts them back. */
+  private readonly droppedByEngine: TxJob[] = [];
+  /** What the last sweep read, so that Retry on the engine can look again for the files the failure kept out. */
+  private lastTimeline: Timeline | null = null;
+  private lastPlayhead = 0;
   private readyOnce: Promise<Ready | null> | null = null;
   private proxyRunning = false;
   private txRunning = false;
@@ -182,6 +203,9 @@ export class IndexCoordinator {
   // cache, and nothing after it starts.
   private readonly ac = new AbortController();
   private readonly unregister: () => void;
+  private readonly unregisterRetry: () => void;
+  /** This indexer, as the status bar's list of failures names it. */
+  private readonly owner = `${++ownerSeq}`;
 
   constructor(
     private readonly store: ProjectStoreAccess,
@@ -195,7 +219,12 @@ export class IndexCoordinator {
     this.unregister = registerBackgroundTranscriber(store.projectDir, {
       prioritize: (source, language, window) => this.prioritizeTranscript(source, language, window),
       loudness: (source, start, end) => this.measureSoon(source, start, end),
+      status: (source, language, window) => this.transcriptStatus(source, language, window),
+      index: (source) => this.indexSource(source),
     });
+    this.unregisterRetry = registerSpeechRetrier(this.owner, (failure) =>
+      this.retryFailure(failure),
+    );
   }
 
   /** Scan the timeline + library catalog and enqueue any not-yet-seen work. Cheap
@@ -204,6 +233,8 @@ export class IndexCoordinator {
    *  the timeline) is built before the others that are still waiting (UJ-091). */
   async sweep(timeline: Timeline | null, playheadSeconds = 0): Promise<void> {
     if (this.disposed) return;
+    this.lastTimeline = timeline;
+    this.lastPlayhead = playheadSeconds;
     // A clip's media_ref is a bare library id, which carries no extension — and both
     // passes are gated on one. Map ids to their catalog path FIRST so placed clips
     // still enqueue; without it every timeline clip silently fell through and no
@@ -314,6 +345,11 @@ export class IndexCoordinator {
     this.loudQ.length = 0;
     this.settleLooks({ error: "the project was closed before its loudness was measured" });
     this.unregister();
+    this.unregisterRetry();
+    // Nothing of a closed project can be retried, so nothing of it stays on the status bar.
+    this.failedTx.clear();
+    this.droppedByEngine.length = 0;
+    useSpeechFailures.getState().clearOwner(this.owner);
     this.ac.abort();
     // A closing project leaves no "preparing" row behind on the next project's screen.
     for (const s of this.rows) useProxyJobs.getState().finish(s);
@@ -342,6 +378,30 @@ export class IndexCoordinator {
     this.txQ.unshift(job);
     if (!this.txRunning) void this.drainTranscripts();
     return true;
+  }
+
+  /** Where `source`'s transcription stands in this queue, for a tool to tell the assistant: running now, queued
+   *  behind how many (and held by an export, if one is), or left for the parts a request uses; unavailable when the
+   *  engine cannot start on this PC. Null when it is not here: not asked for, or already done. */
+  transcriptStatus(
+    source: string,
+    language: string,
+    window?: TranscribeWindow | null,
+  ): QueueStatus | null {
+    if (this.disposed) return null;
+    const key = txKey({ source, language, window: window ?? null });
+    if (this.txCurrent.has(key)) return { state: "running" };
+    const at = this.txQ.findIndex((j) => txKey(j) === key);
+    if (at >= 0) {
+      const heldBy = exportsBusyNow() ? "export" : lookActiveNow() ? "look" : null;
+      return {
+        state: "queued",
+        ahead: this.txCurrent.size + at,
+        ...(heldBy ? { held_by: heldBy } : {}),
+      };
+    }
+    if (this.deferredQ.some((j) => txKey(j) === key)) return { state: "left_for_later" };
+    return this.engineDown ? { state: "unavailable" } : null;
   }
 
   /** Measure `source` over [start, end) NEXT, for a look that does not wait for it. A look that
@@ -390,13 +450,77 @@ export class IndexCoordinator {
   }
   /** A failed job is REPORTED, not swallowed, and retried a bounded number of times.
    *  Silence here is indistinguishable from footage with no speech — which is exactly how a
-   *  broken transcriber stayed invisible until a user's first caption request timed out. */
-  private onJobFailed(pass: Pass, key: string, err: unknown): void {
+   *  broken transcriber stayed invisible until a user's first caption request timed out. A failed
+   *  transcript (`job` given) is also put on the status bar, so the person is told as well as we are. */
+  private onJobFailed(pass: Pass, key: string, err: unknown, job?: TxJob): void {
     if (this.disposed) return; // our own cancellation; nothing failed
     const tried = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, tried);
     if (tried < MAX_ATTEMPTS) this.seen.delete(key); // a later sweep may try again
     reportAppError(`index ${pass} failed (attempt ${tried}): ${String(err).slice(-160)}`);
+    if (pass === "transcript" && job) this.showFailure(key, job, err, tried);
+  }
+
+  /** Put a failed transcript on the status bar. The list is the person's: nothing here may break the drain. */
+  private showFailure(key: string, job: TxJob, err: unknown, tried: number): void {
+    try {
+      this.failedTx.set(key, job);
+      const { reason, message } = classifyTranscriptFailure(err);
+      useSpeechFailures.getState().record({
+        id: key,
+        owner: this.owner,
+        label: this.nameByPath.get(job.source) ?? fileNameOf(job.source),
+        reason,
+        message,
+        at: Date.now(),
+        attempts: tried,
+        willRetry: tried < MAX_ATTEMPTS,
+      });
+    } catch {
+      /* the status bar's list: nothing in the queue depends on it */
+    }
+  }
+
+  /** The work succeeded, or is being started again: its failure is no longer true. */
+  private clearFailure(key: string): void {
+    this.failedTx.delete(key);
+    useSpeechFailures.getState().clear(this.owner, key);
+  }
+
+  /** The person pressed Retry on the status bar: put back what failed. The failure leaves the list as the work is
+   *  started again; one that fails again is written again, with its attempts counted on. */
+  private retryFailure(failure: SpeechFailure): void {
+    if (this.disposed) return;
+    if (failure.id === ENGINE_FAILURE_ID) {
+      this.retryEngine();
+      return;
+    }
+    const job = this.failedTx.get(failure.id);
+    this.clearFailure(failure.id);
+    if (!job) return;
+    // It was asked for by the person, so it goes first, as any request for it does. When nothing can transcribe it
+    // (the engine is down and this was pressed alone), the failure stays where it was.
+    if (!this.prioritizeTranscript(job.source, job.language, job.window)) {
+      this.failedTx.set(failure.id, job);
+      useSpeechFailures.getState().record(failure);
+    }
+  }
+
+  /** The speech engine could not start three times, and the queue was dropped: give it another chance. What was
+   *  dropped is put back, and a sweep finds the files that were never queued because the engine was down. */
+  private retryEngine(): void {
+    useSpeechFailures.getState().clear(this.owner, ENGINE_FAILURE_ID);
+    if (!this.engineDown) return;
+    this.engineDown = false;
+    this.engineAttempts = 0;
+    const queued = new Set(this.txQ.map(txKey));
+    for (const job of this.droppedByEngine.splice(0)) {
+      if (queued.has(txKey(job))) continue;
+      queued.add(txKey(job));
+      this.txQ.push(job);
+    }
+    void this.sweep(this.lastTimeline, this.lastPlayhead);
+    if (this.txQ.length > 0 && !this.txRunning) void this.drainTranscripts();
   }
 
   /** A linked file the user moved or deleted is OFFLINE, not failing (UJ-014): the library panel
@@ -601,7 +725,7 @@ export class IndexCoordinator {
     if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();
   }
 
-  /** While an EXPORT holds the turn back, tell the top-bar chip so: a transcription waiting for the export is
+  /** While an EXPORT holds the turn back, tell the status-bar chip so: a transcription waiting for the export is
    *  not a slow one (S2-04). Only for that reason: a wait for a look, or for another transcription, is not
    *  shown. Local, never sent. Returns how to take the entry away, which is also done when the export ends. */
   private showWaiting(): () => void {
@@ -808,9 +932,13 @@ export class IndexCoordinator {
       outcomes = live.map(() => ({ ok: false, error }));
     }
     let engineError: { error: unknown } | null = null;
+    const engineHit: TxJob[] = [];
     for (const [i, job] of live.entries()) {
       const outcome = outcomes[i] ?? { ok: false, error: new Error("transcription did not run") };
-      if (outcome.ok) continue;
+      if (outcome.ok) {
+        this.clearFailure(txKey(job)); // it failed before, and is done now
+        continue;
+      }
       // Not a failure of the file or of the engine, and nothing to report: a file left for the parts a
       // request uses (the cap, at the boundary or by the live check), or one the person stopped.
       if (isSpeechDeferred(outcome.error)) {
@@ -822,12 +950,15 @@ export class IndexCoordinator {
         markCancelledByPerson(txKey(job));
         continue;
       }
-      if (mods.isSpeechEngineUnavailable(outcome.error)) engineError ??= { error: outcome.error };
+      if (mods.isSpeechEngineUnavailable(outcome.error)) {
+        engineError ??= { error: outcome.error };
+        engineHit.push(job);
+      }
       // Gone between the check and the run: the same fact, found later.
       else if (!(await this.parkedOffline(txKey(job), job.source)))
-        this.onJobFailed("transcript", txKey(job), outcome.error);
+        this.onJobFailed("transcript", txKey(job), outcome.error, job);
     }
-    if (engineError) this.onEngineUnavailable(engineError.error);
+    if (engineError) this.onEngineUnavailable(engineError.error, engineHit);
   }
 
   /** ONE at a time, on its own drain: a whole file's decode, which a poster must not queue behind,
@@ -913,13 +1044,34 @@ export class IndexCoordinator {
   }
 
   /** The engine could not START. That is the machine's state, not this asset's, so retrying the
-   *  next file repeats it exactly — stop the pass and say so ONCE instead of once per asset. */
-  private onEngineUnavailable(err: unknown): void {
+   *  next file repeats it exactly — stop the pass and say so ONCE instead of once per asset. The files it
+   *  kept from running are remembered, so that Retry on the status bar can put them back. */
+  private onEngineUnavailable(err: unknown, hit: readonly TxJob[]): void {
     if (this.disposed || this.engineDown) return;
+    this.droppedByEngine.push(...hit);
     this.engineAttempts += 1;
     if (this.engineAttempts < MAX_ENGINE_ATTEMPTS) return;
     this.engineDown = true;
-    this.txQ.length = 0;
+    this.droppedByEngine.push(...this.txQ.splice(0));
     reportAppError(`speech engine unavailable, transcription disabled: ${String(err).slice(-160)}`);
+    this.showEngineFailure(err);
+  }
+
+  private showEngineFailure(err: unknown): void {
+    try {
+      const { reason, message } = classifyTranscriptFailure(err);
+      useSpeechFailures.getState().record({
+        id: ENGINE_FAILURE_ID,
+        owner: this.owner,
+        label: null,
+        reason,
+        message,
+        at: Date.now(),
+        attempts: this.engineAttempts,
+        willRetry: false,
+      });
+    } catch {
+      /* the status bar's list: nothing in the queue depends on it */
+    }
   }
 }

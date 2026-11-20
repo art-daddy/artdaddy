@@ -11,13 +11,15 @@ import { trackSpeechWait } from "../store/liveWait";
 import { downloadEtaSeconds, percent, useModelDownload } from "../store/modelDownload";
 import { registerPendingWords, type WakeTarget } from "../store/speechWakeHost";
 import { useSpeechJobs } from "../store/speechJobs";
-import { audioMovedFor } from "./speechJobMatch";
+import { audioMovedFor, runIsGoing } from "./speechJobMatch";
 import {
   classifyTranscriptFailure,
   FAILURE_ADVICE,
   type TranscriptFailureReason,
 } from "./speechFailure";
 import { estimateTranscribeSeconds, readPace, type PaceSample } from "./speechPace";
+import type { TranscribeWindow } from "./transcribe";
+import { transcriptQueueStatus, type QueueStatus } from "./transcriptQueue";
 import { renderNotReady } from "./transcriptWords";
 
 /** How long a look waits for what is not ready, when the caller does not say. */
@@ -47,6 +49,10 @@ export interface InProgressTranscript {
   /** The download that is pending is a second model file, not this PC's first: it is not called the one-time
    *  download of the first start. Present only when true. */
   again?: boolean;
+  /** Where the work stands, while it is transcribing and that is known: running now, or queued behind the work
+   *  ahead of it. Absent when it is not known (a look that is first in line and has not begun, an outside
+   *  agent's file the app cannot match to a run). The model can tell a file that waits from one that runs. */
+  queue?: QueueStatus;
   note: string;
 }
 
@@ -105,10 +111,24 @@ export interface WaitRequest<T> {
    *  makes it. Null where no one can be promised a wake (an outside agent, the indexer, the switch off): a
    *  caller that passes null says why where it does. Required, so that a new caller must decide. */
   wake: WakeTarget | null;
+  /** Where the file is, so that the answer can say whether its transcription runs or waits (`queue`). Absent: no
+   *  place is told, which is what an answer said before it could. */
+  where?: WaitPlace;
   progress?: () => DownloadProgress | null;
   now?: () => number;
   samples?: readonly PaceSample[];
   os?: HostOs;
+}
+
+/** The file a wait is about, as the project's queue names it. */
+export interface WaitPlace {
+  projectDir: string;
+  /** The file's path, as the queue has it. */
+  path: string;
+  /** The language as `normLanguage` makes it: "" is the default. */
+  language: string;
+  /** The stretch of it, in source seconds; null is the whole file. */
+  window: TranscribeWindow | null;
 }
 
 /** Transcriptions being waited on, in the order they were asked for. A look's engine runs one look
@@ -136,6 +156,27 @@ function queuedWork(
 }
 
 const clampEta = (s: number): number => Math.min(MAX_ETA_S, Math.max(1, Math.round(s)));
+
+/** Where the work stands, for the assistant. A run reading the file that has begun is running, whoever started it;
+ *  the project's queue says what it knows of the rest (waiting, behind how many, held for an export); a look that waits
+ *  for the look before it is queued behind those. Absent when none of that is known: a look first in line that has not
+ *  begun is preparing, and is not called queued. */
+function queueOf<T>(req: WaitRequest<T>): QueueStatus | undefined {
+  try {
+    const at = req.where;
+    if (at) {
+      if (runIsGoing(useSpeechJobs.getState().jobs, at.path, at.window))
+        return { state: "running" };
+      const known = transcriptQueueStatus(at.projectDir, at.path, at.language, at.window);
+      if (known) return known;
+    }
+    const ahead = [...looks.keys()].indexOf(req.key);
+    return ahead > 0 ? { state: "queued", ahead } : undefined;
+  } catch {
+    // The place in the queue is extra: an answer is never lost for want of it.
+    return undefined;
+  }
+}
 
 function inProgressNote(
   stage: InProgressTranscript["stage"],
@@ -186,6 +227,8 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
     } else if (download.etaS !== null) eta = clampEta(download.etaS + queued.work);
   }
   const stage = download ? "downloading_speech_model" : "transcribing";
+  // While the model downloads every file waits for it, and `stage` already says so: no place in a queue is told.
+  const queue = stage === "transcribing" ? queueOf(req) : undefined;
   // No time before audio moves: a run that was launched and has said no word yet has no pace, and the card says so.
   // The same goes for what the assistant is told. Only a run found for this file is asked; a caller that cannot be
   // matched to one (an outside agent) keeps the estimate it always had.
@@ -203,6 +246,7 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
       ...(eta === undefined ? {} : { eta_s: eta }),
       ...(download ? { progress_pct: download.pct } : {}),
       ...(download?.again === true ? { again: true } : {}),
+      ...(queue ? { queue } : {}),
       note: inProgressNote(stage, eta, download?.pct),
     },
   };

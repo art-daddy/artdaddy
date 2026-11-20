@@ -20,6 +20,7 @@ import { reportMediaImport } from "../api/appEvents";
 import { recordImport } from "../api/editorEvents";
 import { projectIdOfDir } from "./dataRoot";
 import { writeLibraryCatalog } from "./libraryCatalog";
+import { indexImportedSource, transcriptQueueStatus, type QueueStatus } from "./transcriptQueue";
 import {
   acceptedMediaSummary,
   AUDIO_EXTS,
@@ -178,6 +179,74 @@ interface LibEntry {
   filename: string;
   kind: string;
   existed: boolean;
+}
+
+/** What a file's place in the queue comes to for the one line. A queued file with nothing ahead of it and nothing
+ *  holding it back is taken by the engine at once, so it is said to have started. */
+type Standing = "started" | "queued" | "later" | "unavailable";
+
+function standing(s: QueueStatus): Standing {
+  if (s.state === "running") return "started";
+  if (s.state === "queued") return !s.held_by && (s.ahead ?? 0) === 0 ? "started" : "queued";
+  return s.state === "left_for_later" ? "later" : "unavailable";
+}
+
+/** One line for the assistant on what is happening to the words of the audio and video it has just imported (the
+ *  owner's decision of 20 Nov 2026). Nothing in it asks the assistant to do anything. */
+export function transcriptionLine(statuses: readonly QueueStatus[]): string | undefined {
+  if (statuses.length === 0) return undefined;
+  if (statuses.length > 1) {
+    const count = (what: Standing): number => statuses.filter((s) => standing(s) === what).length;
+    const parts = (
+      [
+        ["started", "started"],
+        ["queued", "queued"],
+        ["later", "left for later"],
+        ["unavailable", "not available on this PC"],
+      ] as const
+    )
+      .filter(([what]) => count(what) > 0)
+      .map(([what, words]) => `${count(what)} ${words}`);
+    return `Transcription in the background, for ${statuses.length} audio and video files: ${parts.join(", ")}.`;
+  }
+  const [s] = statuses;
+  switch (standing(s)) {
+    case "started":
+      return "Transcription of this file has started in the background.";
+    case "queued":
+      if (s.held_by === "export")
+        return "Transcription of this file is queued behind the export that is running, and starts when it ends.";
+      if (s.held_by === "look")
+        return "Transcription of this file is queued behind a transcription that was asked for, and starts when it ends.";
+      return `Transcription of this file is queued in the background, ${s.ahead ?? 0} ahead of it.`;
+    case "later":
+      return "Transcription of this file is not started by itself: this PC would need more than 10 minutes for all of it. The parts a tool asks for are transcribed when asked.";
+    case "unavailable":
+      return "Transcription is not available on this PC: the speech engine cannot start.";
+  }
+}
+
+/** The `transcription` field of an agent's import: its files are handed to the project's index now, as the editor's
+ *  own door does for a file the person imports (a source indexed before is not queued again), so the line is about the
+ *  queue as it is and not as the next sweep will make it. Empty when nothing is known: no index to ask, no sound to
+ *  transcribe, or a file that was imported before and is done. Never throws. */
+async function transcriptionField(
+  store: ProjectStoreAccess,
+  entries: readonly LibEntry[],
+): Promise<{ transcription?: string }> {
+  try {
+    const statuses: QueueStatus[] = [];
+    for (const entry of entries) {
+      if (entry.kind !== "video" && entry.kind !== "audio") continue;
+      if (!indexImportedSource(store.projectDir, entry.path)) return {};
+      const status = transcriptQueueStatus(store.projectDir, entry.path, "", null);
+      if (status) statuses.push(status);
+    }
+    const line = transcriptionLine(statuses);
+    return line ? { transcription: line } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** A file ALREADY ON DISK, described without loading it. `arrayBuffer()` on a 1 GB
@@ -741,6 +810,7 @@ async function importFromPath(
       existed: entry.existed,
       external: true,
       ...(note ? { note } : {}),
+      ...(await transcriptionField(store, [entry])),
     };
   }
 
@@ -759,6 +829,7 @@ async function importFromPath(
     };
   }
   const imported: Result[] = [];
+  const libEntries: LibEntry[] = [];
   const failed: { filename: string; error: string }[] = [];
   for (const e of mediaFiles) {
     const child = joinExternal(path, e.name);
@@ -770,6 +841,7 @@ async function importFromPath(
       }
       const kind = kindOf(extOf(e.name))!;
       const entry = await registerLibraryClip(store, bytes, e.name, kind, provenance, child, opts);
+      libEntries.push(entry);
       imported.push({
         media_ref: entry.id,
         filename: entry.filename,
@@ -794,6 +866,7 @@ async function importFromPath(
     external: true,
     ...(failed.length ? { failed } : {}),
     ...(note ? { note } : {}),
+    ...(await transcriptionField(store, libEntries)),
   };
 }
 
@@ -959,6 +1032,7 @@ export async function importMediaTool(args: Args, ctx: ClientToolContext | null)
     kind: entry.kind,
     existed: entry.existed,
     ...(importNote ? { note: importNote } : {}),
+    ...(await transcriptionField(ctx.store, [entry])),
   };
 }
 

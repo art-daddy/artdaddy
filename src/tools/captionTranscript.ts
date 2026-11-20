@@ -8,7 +8,12 @@
 import type { ClientToolContext } from "./context";
 import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
-import { ensureTranscript, transcribeSpan, type ParsedTranscript } from "./transcribe";
+import {
+  ensureTranscript,
+  normLanguage,
+  transcribeSpan,
+  type ParsedTranscript,
+} from "./transcribe";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { waitForRun, type InProgressTranscript } from "./transcriptWait";
 import { formatDuration } from "./transcriptWords";
@@ -54,6 +59,16 @@ export async function captionWords(
     boundMs: Math.max(CACHE_READ_FLOOR_MS, deadline - Date.now()),
     signal: ctx.signal,
     wake: wakeTargetOf(ctx, ref, ref, bySpan ? window : null, path),
+    ...(path === null
+      ? {}
+      : {
+          where: {
+            projectDir: ctx.store.projectDir,
+            path,
+            language: normLanguage(language),
+            window: bySpan ? window : null,
+          },
+        }),
   });
   switch (outcome.kind) {
     case "done":
@@ -99,6 +114,7 @@ export function pendingCaptionsResult(
     stage: status.stage,
     ...(status.progress_pct === undefined ? {} : { progress_pct: status.progress_pct }),
     ...(status.eta_s === undefined ? {} : { eta_s: status.eta_s }),
+    ...(status.queue === undefined ? {} : { queue: status.queue }),
     in_progress: waiting,
     error:
       `Captions were NOT added: the speech in ${waiting.length} audio clip(s) is still being ` +

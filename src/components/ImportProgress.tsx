@@ -49,7 +49,7 @@ export default function ImportProgress(): JSX.Element | null {
             ? "speech model download failed"
             : "downloading speech model"
       }
-      className="pointer-events-none fixed bottom-4 left-4 z-[70] w-72 space-y-2"
+      className="pointer-events-none fixed bottom-9 left-4 z-[70] w-72 space-y-2"
     >
       {failed !== null && (
         <div

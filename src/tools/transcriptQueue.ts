@@ -17,6 +17,21 @@ export interface BackgroundLoudness {
   result: Promise<Loudness | { error: string }>;
 }
 
+/** Where one transcription stands, as the assistant is told: it can tell a file that waits from one that is
+ *  being transcribed (the owner's decision of 20 Nov 2026). */
+export interface QueueStatus {
+  /** `running`: the speech engine is working on it. `queued`: it has not started and waits its turn.
+   *  `left_for_later`: this PC would need more than ten minutes for the whole file, so it is not started by
+   *  itself; the parts a tool asks for are transcribed when asked. `unavailable`: nothing will transcribe it
+   *  now (the speech engine cannot start on this PC, or the project is closing). */
+  state: "running" | "queued" | "left_for_later" | "unavailable";
+  /** Queued: the transcriptions that run before it. One that is running counts. */
+  ahead?: number;
+  /** Queued: something other than the work ahead holds the turn back: an export that is queued or running, or a
+   *  transcription somebody asked for and is waiting on (those go first). */
+  held_by?: "export" | "look";
+}
+
 export interface BackgroundTranscriber {
   /** Put `source` (an absolute path) in `language` ("" = the default) at the front of the queue,
    *  or report that it is already running: the whole file, or only `window` (source seconds).
@@ -26,6 +41,12 @@ export interface BackgroundTranscriber {
   /** Measure `source` (an absolute path) over [start, end) seconds, the whole file when both are
    *  null, next. Null when nothing will: the project is closing. */
   loudness(source: string, start: number | null, end: number | null): BackgroundLoudness | null;
+  /** Where the transcription of `source` (the whole file, or only `window`) stands in this queue. Null when it
+   *  is not in it: it was not asked for, or it is done. */
+  status?(source: string, language: string, window?: TranscribeWindow | null): QueueStatus | null;
+  /** Index `source` now, as a file the person imports by hand is: its transcript, its loudness and, for a
+   *  picture or video, its copy for the preview. A source indexed before is not queued again. */
+  index?(source: string): void;
 }
 
 const byDir = new Map<string, BackgroundTranscriber>();
@@ -53,6 +74,26 @@ export function prioritizeTranscript(
   window?: TranscribeWindow | null,
 ): boolean {
   return byDir.get(keyOf(projectDir))?.prioritize(source, language, window) ?? false;
+}
+
+/** Where `source`'s transcription stands in `projectDir`'s background queue. Null when it is not in it, and when
+ *  there is no queue to ask. */
+export function transcriptQueueStatus(
+  projectDir: string,
+  source: string,
+  language: string,
+  window?: TranscribeWindow | null,
+): QueueStatus | null {
+  return byDir.get(keyOf(projectDir))?.status?.(source, language, window) ?? null;
+}
+
+/** Hand `source` to `projectDir`'s background index now, as a file imported by hand is. False when there is no
+ *  index to hand it to, which is also when nothing is known about it. */
+export function indexImportedSource(projectDir: string, source: string): boolean {
+  const index = byDir.get(keyOf(projectDir));
+  if (!index?.index) return false;
+  index.index(source);
+  return true;
 }
 
 /** Ask `projectDir`'s background index to measure `source` over [start, end) next. Null when

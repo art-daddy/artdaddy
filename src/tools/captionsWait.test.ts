@@ -544,4 +544,23 @@ describe("what the model is told when captions wait for words", () => {
     expect(unknown.eta_s).toBeUndefined();
     expect(String(unknown.error)).not.toMatch(/should take about/);
   });
+
+  // The owner's decision of 20 Nov 2026: the assistant can tell captions that wait in a queue from ones being made.
+  it("says where the words stand in the queue when that is known, and leaves it out when it is not", () => {
+    const queued = pendingCaptionsResult(waiting, {
+      status: "in_progress",
+      stage: "transcribing",
+      waited_s: 60,
+      queue: { state: "queued", ahead: 2 },
+      note: "ignored",
+    });
+    expect(queued.queue).toEqual({ state: "queued", ahead: 2 });
+    const unknown = pendingCaptionsResult(waiting, {
+      status: "in_progress",
+      stage: "transcribing",
+      waited_s: 60,
+      note: "ignored",
+    });
+    expect(unknown).not.toHaveProperty("queue");
+  });
 });

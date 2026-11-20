@@ -8,6 +8,7 @@ import { useSpeechJobs, type SpeechJob } from "../store/speechJobs";
 import type { WakeTarget } from "../store/speechWakeHost";
 import { TranscriptionFailure } from "./speechFailure";
 import { estimateTranscribeSeconds, type PaceSample } from "./speechPace";
+import { registerBackgroundTranscriber, type QueueStatus } from "./transcriptQueue";
 import {
   __resetWaiting,
   waitBoundMs,
@@ -543,5 +544,119 @@ describe("a time is not claimed for a file whose run has said no word yet", () =
       ]),
       "a stretch that holds it",
     ).toBeUndefined();
+  });
+});
+
+// The owner's decision of 20 Nov 2026: what the assistant is told lets it tell a file that waits from one that is
+// being transcribed. `queue` is there when it is known, and absent when it is not, never a guess.
+describe("where the work stands (`queue`)", () => {
+  const DIR = "C:/proj";
+  const PATH = "C:/proj/talk.mp4";
+  const where = (over: Partial<NonNullable<WaitRequest<unknown>["where"]>> = {}) => ({
+    projectDir: DIR,
+    path: PATH,
+    language: "",
+    window: null,
+    ...over,
+  });
+  const running = (): SpeechJob => ({
+    id: "j1",
+    purpose: "look",
+    label: "talk.mp4",
+    work: [{ source: PATH, language: "", window: null }],
+    spanS: 120,
+    phase: "running",
+    stop: null,
+    enqueuedAt: 0,
+    startedAt: 0,
+    firstWordsAt: 1,
+    endedAt: null,
+    doneS: 10,
+    rate: 0.5,
+    etaS: 40,
+    facts: {
+      backend: "cpu",
+      gpuHeld: false,
+      noGpu: false,
+      cores: 4,
+      threads: 2,
+      exportsBusy: false,
+    },
+  });
+  const offs: Array<() => void> = [];
+  const queueHolds = (status: () => QueueStatus | null): void => {
+    offs.push(
+      registerBackgroundTranscriber(DIR, { prioritize: () => true, loudness: () => null, status }),
+    );
+  };
+  const queueOf = async (req: WaitRequest<never>): Promise<unknown> => {
+    const seen = start(req);
+    await vi.advanceTimersByTimeAsync(req.boundMs);
+    return (seen.outcome as unknown as { status: { queue?: unknown } }).status.queue;
+  };
+  afterEach(() => {
+    for (const off of offs.splice(0)) off();
+    useSpeechJobs.setState({ jobs: [] });
+  });
+
+  it("says a file the project's queue holds is queued behind how many, and what holds the turn", async () => {
+    queueHolds(() => ({ state: "queued", ahead: 2, held_by: "export" }));
+    expect(await queueOf(request(NEVER(), { where: where() }))).toEqual({
+      state: "queued",
+      ahead: 2,
+      held_by: "export",
+    });
+  });
+
+  it("says running when a run reads the file, whoever started it, whatever the queue says of it", async () => {
+    useSpeechJobs.setState({ jobs: [running()] });
+    queueHolds(() => ({ state: "queued", ahead: 2 }));
+    expect(await queueOf(request(NEVER(), { where: where() }))).toEqual({ state: "running" });
+  });
+
+  it("does not call a file running because a run reads another stretch of it", async () => {
+    useSpeechJobs.setState({
+      jobs: [
+        { ...running(), work: [{ source: PATH, language: "", window: { start: 0, end: 30 } }] },
+      ],
+    });
+    queueHolds(() => ({ state: "queued", ahead: 1 }));
+    expect(
+      await queueOf(request(NEVER(), { where: where({ window: { start: 60, end: 80 } }) })),
+    ).toEqual({ state: "queued", ahead: 1 });
+  });
+
+  it("says a look that waits for the look before it is queued behind those, in the order they were asked", async () => {
+    const first = start(request(NEVER(), { key: "first", boundMs: 15_000 }));
+    const second = start(request(NEVER(), { key: "second", boundMs: 15_000 }));
+    const third = start(request(NEVER(), { key: "third", boundMs: 15_000 }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    const q = (s: typeof first): unknown =>
+      (s.outcome as unknown as { status: { queue?: unknown } }).status.queue;
+    expect(q(first), "first in line, and nothing known of it: not called queued").toBeUndefined();
+    expect(q(second)).toEqual({ state: "queued", ahead: 1 });
+    expect(q(third)).toEqual({ state: "queued", ahead: 2 });
+  });
+
+  it("says nothing of a place in the queue while the speech model downloads: every file waits for it", async () => {
+    queueHolds(() => ({ state: "queued", ahead: 2 }));
+    const download = request(NEVER(), {
+      where: where(),
+      progress: () => ({ pct: 10, etaS: 60 }),
+    });
+    expect(await queueOf(download)).toBeUndefined();
+  });
+
+  it("says nothing it does not know, and is never lost for want of the queue", async () => {
+    expect(
+      await queueOf(request(NEVER(), { where: where() })),
+      "nothing queued it",
+    ).toBeUndefined();
+    queueHolds(() => {
+      throw new Error("the queue is closing");
+    });
+    const seen = start(request(NEVER(), { where: where() }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(seen.outcome).toMatchObject({ kind: "pending", status: { status: "in_progress" } });
   });
 });

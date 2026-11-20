@@ -255,6 +255,18 @@ afterEach(async () => {
 });
 
 describe("a look that has to wait for a transcript", () => {
+  // The owner's decision of 20 Nov 2026: the assistant can tell a look that waits behind another from one being made.
+  it("says a look that waits behind another look is queued, one ahead, and not the one being transcribed", async () => {
+    const { ctx } = rig({ engineMs: 40_000 });
+    const first = startLook(ctx, freshSrc(), look(30));
+    const second = startLook(ctx, freshSrc(), look(30));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(second.result.status).toBe("in_progress");
+    expect(second.result.queue).toEqual({ state: "queued", ahead: 1 });
+    expect(first.result.status).toBe("in_progress");
+    expect(first.result.queue?.state, "the one at the front is not queued").not.toBe("queued");
+  });
+
   it("tells the chat it is waiting for speech while it waits, so the line says so, and not after", async () => {
     const { ctx } = rig({ engineMs: 40_000 });
     const waiting = (): string[] => useLiveWait.getState().speechWaits.map((w) => w.tool);

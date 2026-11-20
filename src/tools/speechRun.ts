@@ -1,5 +1,5 @@
 // The glue between ONE run of the speech engine and the two things that observe it: the running-job
-// monitor (`speechMonitor.ts`: what the job's output says) and the store the top-bar chip reads
+// monitor (`speechMonitor.ts`: what the job's output says) and the store the status-bar chip reads
 // (`store/speechJobs.ts`). It only watches: it adds the run to the list when it launches, tells the list
 // what the monitor learns, withdraws the run when it ends, and stops it when the person presses Cancel or the
 // live check says the run is too slow. Nothing here can fail or slow a transcription: every call into the

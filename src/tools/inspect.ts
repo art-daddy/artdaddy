@@ -342,6 +342,12 @@ async function lookTranscript(
         boundMs: opts.waitMs,
         signal: ctx.signal,
         wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null, spanOf(window), path),
+        where: {
+          projectDir: ctx.store.projectDir,
+          path,
+          language: normLanguage(opts.language),
+          window,
+        },
       });
       if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };

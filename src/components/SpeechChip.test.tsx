@@ -1,4 +1,4 @@
-// The top-bar chip for a speech job (S2-04 = D), tested through what a person sees and can press: the
+// The chip for a speech job (S2-04 = D; in the top bar, now the status bar), tested through what a person sees and can press: the
 // words of each state (the owner's pictures), when the chip shows (a run once it has lasted 15 s, a
 // stopped one at once, a waiting one only when an export is why), what Cancel reaches, and what the
 // clock is allowed to keep running. Time is faked: the chip's 1-second tick is part of what is tested.

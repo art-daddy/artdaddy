@@ -32,7 +32,7 @@ export interface ClientToolContext {
   /** Work nobody is waiting on: the project's indexer, which took its turn before it started
    *  (`workGate.ts`). Its whisper does not queue among the looks'. Absent: someone is waiting. */
   background?: boolean;
-  /** What a foreground speech run is for, so the top-bar chip can title it ("captions", "look",
+  /** What a foreground speech run is for, so the status-bar chip can title it ("captions", "look",
    *  "transcript"). Absent: a look. The background's own runs are titled by `background`. */
   speechPurpose?: "captions" | "look" | "transcript";
   exportMode?: ExportMode;

@@ -1,6 +1,6 @@
-// The speech jobs in the top bar (S2-04 = D): a small chip beside the Export badge and, on a click, a
-// popover like the Account menu with what runs, how far, how fast, why it is slow and Cancel. Nothing is
-// drawn over the timeline. It only READS the store of speech jobs (the engine writes it) and sends
+// The speech jobs in the status bar (S2-04 = D; the owner moved it from the top bar to the bottom one on 20 Nov 2026):
+// a small chip and, on a click, a popover like the Account menu with what runs, how far, how fast, why it is slow and
+// Cancel. Nothing is drawn over the timeline. It only READS the store of speech jobs (the engine writes it) and sends
 // nothing anywhere. The classes and sentences are the ones of the owner's mockup pictures.
 import { useEffect, useRef, useState } from "react";
 
@@ -134,7 +134,15 @@ function wordsOf(job: SpeechJob): Words {
   return { chip, tone: slow ? "slow" : "fast", dialog: "transcription", sub: sub || null };
 }
 
-export default function SpeechChip(): JSX.Element | null {
+/** Where the chip's popover opens: `down` from a bar at the top of the window (the right-aligned one the Account
+ *  menu has), `up` from the status bar at the bottom, left-aligned with the chip. */
+export type ChipPlacement = "down" | "up";
+
+export default function SpeechChip({
+  placement = "down",
+}: {
+  placement?: ChipPlacement;
+} = {}): JSX.Element | null {
   const jobs = useSpeechJobs((s) => s.jobs);
   const now = useNow(jobs.length > 0);
   const [open, setOpen] = useState(false);
@@ -180,10 +188,15 @@ export default function SpeechChip(): JSX.Element | null {
   const running = goingBesides(jobs, job);
 
   return (
-    // The one flexible item of the right cluster (which keeps every other item at its own width): in a
-    // narrow window the chip's text is cut, the bar is not broken. The popover must not be clipped, so
-    // the cutting happens on the button inside, never with overflow on this box.
-    <div className="relative min-w-[2rem] max-w-[16rem] !shrink">
+    // The one flexible item of its bar (which keeps every other item at its own width): in a narrow window the
+    // chip's text is cut, the bar is not broken. The popover must not be clipped, so the cutting happens on the
+    // button inside, never with overflow on this box.
+    <div
+      className={cn(
+        "relative min-w-[2rem] !shrink",
+        placement === "up" ? "max-w-[28rem]" : "max-w-[16rem]",
+      )}
+    >
       <button
         ref={chipRef}
         type="button"
@@ -217,7 +230,10 @@ export default function SpeechChip(): JSX.Element | null {
             data-testid="speech-popover"
             role="dialog"
             aria-label={words.dialog}
-            className="absolute right-0 z-[91] mt-1 w-80 rounded-md border border-edge bg-panel py-1 shadow-2xl"
+            className={cn(
+              "absolute z-[91] w-80 rounded-md border border-edge bg-panel py-1 shadow-2xl",
+              placement === "up" ? "bottom-full left-0 mb-1" : "right-0 mt-1",
+            )}
           >
             {job.phase === "stopped" ? (
               <StoppedBody job={job} waiting={waiting} running={running} />

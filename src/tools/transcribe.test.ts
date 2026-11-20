@@ -51,7 +51,7 @@ import {
   type WhisperModelSpec,
   whisperModelPath,
 } from "./transcribe";
-import { registerBackgroundTranscriber } from "./transcriptQueue";
+import { registerBackgroundTranscriber, type QueueStatus } from "./transcriptQueue";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import {
   __resetJobNotes,
@@ -3116,7 +3116,8 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     await until(() => got !== undefined);
     expect(got.ok).toBe(true);
     expect(words(got)).toEqual(["w12", "w13", "w14"]);
-    expect(got.in_progress).toEqual([
+    // Which clips are not ready, in the order they play: where each stands (`queue`) is the next test's.
+    expect(got.in_progress.map(({ clip_id, track_id }: Any) => ({ clip_id, track_id }))).toEqual([
       { clip_id: "c2", track_id: "a1" },
       { clip_id: "c3", track_id: "a1" },
     ]);
@@ -3125,6 +3126,85 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     // The run still going keeps going; the one never started is the background's now.
     expect(runs).toHaveLength(2);
     expect(asked).toEqual([[src, "", { start: 1199, end: 1211 }]]);
+  });
+
+  // The owner's decision of 20 Nov 2026: the assistant can tell a file that waits from one that is being transcribed.
+  describe("and says where each clip that is not ready stands", () => {
+    async function notReady(
+      status?: (window: { start?: number | null } | null | undefined) => QueueStatus | null,
+    ): Promise<Any> {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const { fs, src, runner, runs } = await slow();
+      if (status)
+        unregister.push(
+          registerBackgroundTranscriber(DIR, {
+            prioritize: () => true,
+            loudness: () => null,
+            status: (source, _language, window) => (source === src ? status(window) : null),
+          }),
+        );
+      // The run going when the time ran out is the second clip's: the engine has begun it.
+      const { useSpeechJobs } = await import("../store/speechJobs");
+      useSpeechJobs.getState().add({
+        id: "run-c2",
+        purpose: "transcript",
+        label: "talk.wav",
+        work: [{ source: src, language: "", window: { start: 599, end: 611 } }],
+        spanS: 12,
+        phase: "running",
+        stop: null,
+        enqueuedAt: Date.now(),
+        startedAt: Date.now(),
+        firstWordsAt: Date.now(),
+        endedAt: null,
+        doneS: 1,
+        rate: 1,
+        etaS: 10,
+        facts: {
+          backend: "cpu",
+          gpuHeld: false,
+          noGpu: false,
+          cores: 4,
+          threads: 2,
+          exportsBusy: false,
+        },
+      });
+      let got: Any;
+      void getTranscriptTool({}, ctxWith(runner, fs)).then((r) => (got = r));
+      await until(() => runs.length === 2);
+      await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS);
+      await until(() => got !== undefined);
+      useSpeechJobs.getState().dismiss("run-c2");
+      return got;
+    }
+    const byClip = (got: Any): Record<string, unknown> =>
+      Object.fromEntries(got.in_progress.map((e: Any) => [e.clip_id, e.queue]));
+
+    it("the run that was going is running, and a clip handed to the project's queue is where that queue says", async () => {
+      const got = await notReady((window) =>
+        window?.start === 1199 ? { state: "queued", ahead: 3 } : null,
+      );
+      expect(byClip(got)).toEqual({ c2: { state: "running" }, c3: { state: "queued", ahead: 3 } });
+    });
+
+    it("says nothing of a clip nobody has started, rather than guessing: the next call starts it", async () => {
+      const got = await notReady();
+      expect(got.in_progress[0]).toEqual({
+        clip_id: "c2",
+        track_id: "a1",
+        queue: { state: "running" },
+      });
+      expect(got.in_progress[1]).toEqual({ clip_id: "c3", track_id: "a1" });
+    });
+
+    it("is not lost for want of the queue: a queue that cannot be read leaves the answer as it was", async () => {
+      const got = await notReady(() => {
+        throw new Error("the queue is closing");
+      });
+      expect(got.ok).toBe(true);
+      expect(got.in_progress).toHaveLength(2);
+      expect(got.in_progress[1]).toEqual({ clip_id: "c3", track_id: "a1" });
+    });
   });
 
   it("tells the chat it is waiting for speech while it waits, so the line says so, and not after", async () => {
