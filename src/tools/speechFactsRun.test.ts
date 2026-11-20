@@ -37,7 +37,12 @@ import { DEFAULT_BEAM } from "./speechDecoding";
 import { __resetSpeechFactsShipped, __setSpeechFactsShipped } from "./speechFacts";
 import { modelKeyOfPath } from "./speechModel";
 import { recordSpeechRun } from "./speechPace";
-import { __resetWordTimesShipped, __setWordTimesShipped } from "./speechWordTimes";
+import {
+  __resetWordTimesShipped,
+  __setWordTimesChipShipped,
+  __setWordTimesShipped,
+  WORD_TIMES_CHIP_MODELS,
+} from "./speechWordTimes";
 import { __resetSmallerFileFailure, ensureTranscripts, runWhisper } from "./transcribe";
 import { __resetWorkGate } from "./workGate";
 
@@ -95,6 +100,10 @@ beforeEach(() => {
   reportAppError.mockClear();
   __setWordTimesShipped(true);
   __setExportFlag("speech_word_times", true);
+  // The first-word rule is dark on both engine paths in this build. What the sample says about a run made with its
+  // arguments is still checked, so the graphics-chip path is switched on here too (and emptied again below).
+  __setWordTimesChipShipped(true);
+  (WORD_TIMES_CHIP_MODELS as string[]).push("small");
   __setSpeechFactsShipped(true);
   useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
   setClerkTokenProvider(async () => "isolated-speech-facts-session");
@@ -113,6 +122,7 @@ afterEach(() => {
   __resetJobSupervisor();
   __resetSpeechFactsShipped();
   __resetWordTimesShipped();
+  (WORD_TIMES_CHIP_MODELS as string[]).length = 0;
   __resetExportFlags();
   __resetAppEvents();
   setClerkTokenProvider(null);

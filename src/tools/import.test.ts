@@ -1026,8 +1026,7 @@ describe("what an agent's import says about the words", () => {
     expect(r.transcription).toBe(
       "Transcription of this file is queued in the background, 2 ahead of it.",
     );
-    expect(indexed).toHaveLength(1);
-    expect(indexed[0]).toMatch(/talk\.mp3$/);
+    expect(indexed).toEqual([`library/${r.media_ref}.mp3`]);
   });
 
   it("says it has started when nothing is ahead of it and nothing holds it back", async () => {
