@@ -251,7 +251,7 @@ describe("warming for a vitest run", () => {
     expect((await result).warmed).toBe(true);
     expect(spawned).toHaveLength(1);
     expect(spawned[0].args).toEqual(nativeRenderCargoArgs("build"));
-    expect(spawned[0].cwd.replace(/\\/g, "/")).toBe("C:/app/src-tauri");
+    expect(path.relative(path.resolve("C:/app"), spawned[0].cwd)).toBe("src-tauri");
   });
 
   it("builds anyway when vitest cannot list the run's files", async () => {
