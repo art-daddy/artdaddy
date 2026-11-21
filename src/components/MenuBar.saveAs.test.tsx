@@ -179,6 +179,32 @@ describe("Export Video → Save As", () => {
     );
   });
 
+  it("pre-fills the project's TITLE, not its folder name, once the project has one", async () => {
+    // The folder of a real project is an id-like slug (`summer_reel_final_ab12cd`); the title is what the person typed and sees in the
+    // header. The rule is the tool's own (`defaultExportStemOf`), so the dialog and the agent cannot name the same file two ways.
+    const store = ed.store as Record<string, unknown>;
+    const before = { dir: store.projectDir, readJson: store.readJson };
+    store.projectDir = "C:/Users/me/AppData/Akaru/projects/summer_reel_final_ab12cd";
+    store.readJson = async (_path: string, fallback: unknown) => ({
+      ...(fallback as object),
+      name: "Summer Reel (final)",
+    });
+    try {
+      startExport();
+      await waitFor(() =>
+        expect(save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            defaultPath: "C:/Users/test/Downloads/Summer Reel (final).mp4",
+          }),
+        ),
+      );
+    } finally {
+      store.projectDir = before.dir;
+      if (before.readJson === undefined) delete store.readJson;
+      else store.readJson = before.readJson;
+    }
+  });
+
   it("does not remember a folder for an export the user cancelled", async () => {
     save.mockResolvedValue(null);
     startExport();

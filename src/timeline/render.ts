@@ -8,6 +8,7 @@
 import type { ClientToolContext } from "../tools/context";
 import { stderrExcerpt, type CommandResult, type CommandStep } from "../tools/command";
 import {
+  INTERNAL_DIR,
   isAbsolutePath,
   joinPath,
   type LibraryClip,
@@ -3702,15 +3703,40 @@ export async function renderTimelineTool(
   return renderTimelineToPath(ctx, outPath, "working");
 }
 
-/** Basename of the project dir — the default export filename stem. Exported so the Save As
- *  dialog pre-fills the SAME name the tool would have chosen; a second copy of this rule in
+/** The default export filename stem: the project's TITLE (what the person called it, kept in its project.json) when it
+ *  yields a usable name, else the basename of the project folder, which is only an id-like slug (`my_film_c8c180`).
+ *  Exported so the Save As dialog pre-fills the SAME name the tool would have chosen; a second copy of this rule in
  *  the UI would drift from the one the agent uses. */
-export function defaultExportStem(projectDir: string): string {
+export function defaultExportStem(projectDir: string, title?: string): string {
   const base = projectDir
     .replace(/[\\/]+$/, "")
     .split(/[\\/]/)
     .pop();
-  return safeName(base ?? "", "artdaddy-export");
+  return safeName(title ?? "", "") || safeName(base ?? "", "artdaddy-export");
+}
+
+/** The open project's title from its project.json, or "" when it has none or the file cannot be read (a store
+ *  without `readJson` included): the caller then falls back to the folder name. */
+export async function projectTitle(
+  store: Pick<ProjectStoreAccess, "projectDir"> & Partial<Pick<ProjectStoreAccess, "readJson">>,
+): Promise<string> {
+  try {
+    const pj = await store.readJson?.<{ name?: unknown }>(
+      joinPath(store.projectDir, INTERNAL_DIR, "project.json"),
+      {},
+    );
+    return typeof pj?.name === "string" ? pj.name : "";
+  } catch {
+    return "";
+  }
+}
+
+/** {@link defaultExportStem} for an open project: the tool and the Save As dialog both ask this, so both name the
+ *  file after the project's title. */
+export async function defaultExportStemOf(
+  store: Pick<ProjectStoreAccess, "projectDir"> & Partial<Pick<ProjectStoreAccess, "readJson">>,
+): Promise<string> {
+  return defaultExportStem(store.projectDir, await projectTitle(store));
 }
 
 /** Windows refuses these names outright, whatever the extension follows them. */
@@ -3831,7 +3857,8 @@ export type ExportDest =
  *     with a numeric suffix rather than overwriting).
  */
 export async function exportDestination(
-  store: Pick<ProjectStoreAccess, "exportPath" | "projectDir" | "isDirectory" | "exists">,
+  store: Pick<ProjectStoreAccess, "exportPath" | "projectDir" | "isDirectory" | "exists"> &
+    Partial<Pick<ProjectStoreAccess, "readJson">>,
   opts: { name?: string; outputPath?: unknown },
 ): Promise<ExportDest> {
   const raw = typeof opts.outputPath === "string" ? opts.outputPath.trim() : "";
@@ -3839,7 +3866,7 @@ export async function exportDestination(
     // Export is the user's DELIVERABLE: render straight into the OS Downloads dir
     // (NLE-style — never inside the project, nothing tracks it). The name is
     // sanitized to a bare basename so it can't traverse out of Downloads.
-    const stem = exportStem(String(opts.name ?? "").trim(), defaultExportStem(store.projectDir));
+    const stem = exportStem(String(opts.name ?? "").trim(), await defaultExportStemOf(store));
     // Bounded: `exists` that always answers true (or a pathological folder) must not spin
     // forever in the render path. A thrown `exists` means "can't tell" — treat the name as
     // free, which is exactly today's behaviour rather than a refusal to export.
@@ -4001,7 +4028,7 @@ export async function exportTimelineTool(
       kept ??
       exportStem(
         String(args.name ?? args.filename ?? "").trim(),
-        defaultExportStem(ctx.store.projectDir),
+        await defaultExportStemOf(ctx.store),
       );
     const free = await freeName(ctx.store, f.dir, stem, ".mp4", new Set());
     Object.assign(dest, { path: free.path, filename: free.filename, defaulted: false });

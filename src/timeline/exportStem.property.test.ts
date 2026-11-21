@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 
 import { defaultExportStem, exportDestination, exportFolder, exportStem, safeName } from "./render";
+import type { ProjectStoreAccess } from "../tools/store";
 
 const FALLBACK = "project";
 
@@ -256,5 +257,113 @@ describe("exportStem — nothing legitimate is silently dropped", () => {
   it("still strips only the trailing extension, whatever the script", () => {
     expect(exportStem("夏休みの動画.mp4", FALLBACK)).toBe("夏休みの動画");
     expect(exportStem("Café.final.mov", FALLBACK)).toBe("Café.final");
+  });
+});
+
+// 0.29.1: the default name follows the project's TITLE, not its folder (an id-like slug such as
+// `release_0_29_0_hand_test_delete__c8c180`). The same two failure directions as above apply to a title,
+// because a title is typed by a person (or written by a model) just like an export name.
+describe("defaultExportStem — the title first, the folder as the fallback", () => {
+  const FOLDER = "C:\\projects\\summer_reel_ab12cd";
+
+  it("names the file exactly as the person titled the project, in any script", () => {
+    for (const title of [
+      "release 0.29.0 hand test (delete me)",
+      "Summer Reel – final cut",
+      "Café Séance",
+      "夏休みの動画",
+      "Видео 2",
+      "Take 27, rough-cut_v2",
+    ]) {
+      expect(defaultExportStem(FOLDER, title)).toBe(title);
+    }
+  });
+
+  it("falls back to the folder name when the title gives no usable name", () => {
+    for (const title of [
+      "",
+      "   ",
+      "...",
+      "///",
+      "<>:|?*",
+      "con",
+      "NUL",
+      "\u202e\u200b",
+      undefined,
+    ]) {
+      expect(defaultExportStem(FOLDER, title)).toBe("summer_reel_ab12cd");
+    }
+    expect(defaultExportStem(FOLDER)).toBe("summer_reel_ab12cd"); // the old one-argument call is unchanged
+  });
+
+  it("never lets a title escape the export directory or name a hidden or unusable file", () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 120 }), (title) => {
+        const stem = defaultExportStem(FOLDER, title);
+        expect(stem).not.toMatch(HOSTILE);
+        expect(stem.startsWith(".")).toBe(false);
+        expect(stem.split(/[/\\]/).length).toBe(1);
+        expect(stem.length).toBeGreaterThan(0);
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  it("keeps a title through every ordering of boundary dots and whitespace", () => {
+    const boundary = fc
+      .array(fc.constantFrom(".", " ", "\t", "\u00a0", "\u3000"), { maxLength: 12 })
+      .map((s) => s.join(""));
+    const word = fc
+      .array(fc.constantFrom("a", "B", "0", "é", "夏", "-", "_"), { minLength: 1, maxLength: 30 })
+      .map((s) => `cut-${s.join("")}`);
+    fc.assert(
+      fc.property(boundary, word, boundary, (prefix, name, suffix) => {
+        expect(defaultExportStem(FOLDER, `${prefix}${name}${suffix}`)).toBe(name);
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("is what the tool's default destination uses, read from the project's own project.json", async () => {
+    const asked: string[] = [];
+    const reader = (json: unknown): ProjectStoreAccess["readJson"] =>
+      (async (path: string, fallback: unknown) => {
+        asked.push(path);
+        return json ?? fallback;
+      }) as ProjectStoreAccess["readJson"];
+    const store = (json: unknown) => ({
+      projectDir: FOLDER,
+      exportPath: async (filename: string) => `C:\\Downloads\\${filename}`,
+      isDirectory: async () => false,
+      exists: async () => false,
+      readJson: reader(json),
+    });
+    const titled = await exportDestination(store({ name: "Summer Reel (final)" }), {});
+    expect(titled).toEqual({
+      ok: true,
+      filename: "Summer Reel (final).mp4",
+      path: "C:\\Downloads\\Summer Reel (final).mp4",
+      defaulted: true,
+    });
+    expect(asked[0]).toMatch(/internals[\\/]project\.json$/);
+    // No title in the file, a title that is not text, a file that cannot be read: the folder name, as before.
+    for (const json of [{}, { name: 7 }, { name: "..." }, null]) {
+      expect(await exportDestination(store(json), {})).toMatchObject({
+        filename: "summer_reel_ab12cd.mp4",
+      });
+    }
+    const unreadable = {
+      ...store({}),
+      readJson: (async () => Promise.reject(new Error("locked"))) as ProjectStoreAccess["readJson"],
+    };
+    expect(await exportDestination(unreadable, {})).toMatchObject({
+      filename: "summer_reel_ab12cd.mp4",
+    });
+    // A name the caller gave still wins over the title.
+    expect(
+      await exportDestination(store({ name: "Summer Reel" }), { name: "hero.mp4" }),
+    ).toMatchObject({
+      filename: "hero.mp4",
+    });
   });
 });

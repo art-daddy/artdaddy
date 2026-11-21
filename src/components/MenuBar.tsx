@@ -162,10 +162,10 @@ export default function MenuBar() {
   const chooseExportPath = async (): Promise<string | null> => {
     const store = ed().store;
     if (!store) return null;
-    const { defaultExportStem } = await import("../timeline/render");
+    const { defaultExportStemOf } = await import("../timeline/render");
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { joinPath } = await import("../tools/store");
-    const name = `${defaultExportStem(store.projectDir)}.mp4`;
+    const name = `${await defaultExportStemOf(store)}.mp4`;
     const dir = lastExportDir() ?? (await store.downloadDir());
     return await save({
       title: "Export video",
