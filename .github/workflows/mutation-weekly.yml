@@ -1,0 +1,98 @@
+# The whole mutation run of the client, once a week (Stryker). A REPORT, never a gate: it cannot block a merge or a
+# release. Line coverage says a line RAN; mutation testing breaks the code on purpose and checks that a test notices,
+# so a surviving mutant is a bug the tests would let through. The run is heavy, so it lives here, on the free Linux
+# runners of this public repository, and not on anybody's computer.
+#
+# Added 25 Nov 2026 at the owner's request. The first runs are also the MEASUREMENT of how long a full run takes: that
+# decides whether it stays weekly, becomes incremental, or is split further. What was measured so far: the unit suite
+# alone takes about five minutes to run once on a laptop, so every job pays that before its first mutant, and a mutant
+# in code that runs at load time needs the whole suite, which is why `ignoreStatic` is on (stryker.ci.mjs).
+#
+# Three jobs run side by side, each a third of the scope (stryker.ci.mjs cuts them from the same list as
+# `npm run mutation`), so the run fits GitHub's six-hour limit per job; a last job puts the three reports together.
+#
+#   gh workflow run mutation-weekly.yml                                       the full run now
+#   gh workflow run mutation-weekly.yml -f shard=tools                        one shard
+#   gh workflow run mutation-weekly.yml -f shard=rest -f mutate=src/contract/clamp.ts   one file (minutes): a smoke test
+name: Mutation (weekly)
+
+on:
+  schedule:
+    # Sunday 20:00 UTC, which is Monday 01:30 in India: the report is ready when the week starts.
+    - cron: "0 20 * * 0"
+  workflow_dispatch:
+    inputs:
+      shard:
+        description: "Which part of the scope to run"
+        type: choice
+        options: [all, timeline, tools, rest]
+        default: all
+      mutate:
+        description: "Only mutate these files (a Stryker glob such as src/contract/clamp.ts). Empty: the whole shard."
+        required: false
+        default: ""
+
+# The jobs only need to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-weekly
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    name: Stryker (${{ matrix.shard }})
+    runs-on: ubuntu-22.04
+    # GitHub stops any job at six hours. If a shard does not fit, it is cancelled, writes no report, and the last job says
+    # so: that is the measurement, and the answer is to cut that shard in two.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        # On a schedule there are no inputs, so the run is all three shards.
+        shard: ${{ fromJSON(inputs.shard && inputs.shard != 'all' && format('["{0}"]', inputs.shard) || '["timeline","tools","rest"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Stryker
+        env:
+          MUTATION_SHARD: ${{ matrix.shard }}
+          # Through the environment, never pasted into the script: the input is text typed by whoever starts the run.
+          MUTATE: ${{ inputs.mutate }}
+        run: |
+          args=(stryker.ci.mjs)
+          if [ -n "$MUTATE" ]; then args+=(--mutate "$MUTATE"); fi
+          npx stryker run "${args[@]}"
+      - name: Score of this shard, on the page of the run
+        if: always()
+        run: node scripts/ci/mutationSummary.mjs reports/mutation/mutation.json
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ matrix.shard }}
+          path: reports/mutation/
+          if-no-files-found: error
+          retention-days: 60
+
+  summary:
+    name: Score of the whole run
+    needs: mutation
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      EXPECTED: ${{ inputs.shard && inputs.shard != 'all' && '1' || '3' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-*
+          path: reports/shards
+      - name: All shards together, and the files to look at first
+        run: node scripts/ci/mutationSummary.mjs --expect "$EXPECTED" reports/shards/*/mutation.json
