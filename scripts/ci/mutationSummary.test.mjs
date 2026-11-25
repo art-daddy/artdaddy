@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,9 @@ import {
   MIN_MUTANTS_TO_RANK,
   WEAKEST,
   folderOf,
+  parseShards,
   reportMutation,
+  shardOfReport,
   summarize,
   summaryMarkdown,
 } from "./mutationSummary.mjs";
@@ -163,12 +165,12 @@ describe("where it is weakest", () => {
 });
 
 describe("reading a report", () => {
-  const run = (path, summaryFile, expectCount = 0) => {
+  const run = (path, summaryFile, shards = []) => {
     let said = "";
     const code = reportMutation(path, {
       out: (t) => (said += t),
       summaryFile,
-      expect: expectCount,
+      shards,
     });
     return { code, said };
   };
@@ -238,17 +240,66 @@ describe("reading a report", () => {
     expect(said).toContain("| src/tools | 10.0% |");
   });
 
-  it("says so, and is an error, when fewer shard reports arrived than were expected, but still shows what arrived", () => {
+  it("names every shard the run started that sent no report, is an error, and still shows what arrived", () => {
     const d = tmp();
-    writeFileSync(
-      join(d, "a.json"),
-      JSON.stringify(reportOf({ "src/timeline/a.ts": fileOf({ Killed: 9, Survived: 1 }) })),
-    );
-    const lost = run([join(d, "a.json")], undefined, 3);
+    const shardReport = (shard, files) => {
+      const path = join(d, `mutation-${shard}`, "mutation.json");
+      mkdirSync(dirname(path));
+      writeFileSync(path, JSON.stringify(reportOf(files)));
+      return path;
+    };
+    const timeline = shardReport("timeline-01", {
+      "src/timeline/a.ts": fileOf({ Killed: 9, Survived: 1 }),
+    });
+    const rest = shardReport("rest", { "src/lib/b.ts": fileOf({ Killed: 1, Survived: 1 }) });
+    const started = ["timeline-01", "timeline-02", "tools-1", "rest"];
+    const lost = run([timeline, rest], undefined, started);
     expect(lost.code).toBe(1);
-    expect(lost.said).toContain("Only 1 of 3 reports arrived");
-    expect(lost.said).toContain("Mutation score 90.0%");
-    expect(run([join(d, "a.json")], undefined, 1).code).toBe(0);
+    expect(lost.said).toContain("2 of 4 shards sent no report: timeline-02, tools-1");
+    expect(lost.said).toContain("Mutation score 83.3%");
+    const all = run([timeline, rest], undefined, ["timeline-01", "rest"]);
+    expect(all.code).toBe(0);
+    expect(all.said).not.toContain("sent no report");
+  });
+
+  it("names the shards even when no report arrived at all", () => {
+    const d = tmp();
+    const { code, said } = run([join(d, "mutation-tools-1", "mutation.json")], undefined, [
+      "tools-1",
+      "rest",
+    ]);
+    expect(code).toBe(1);
+    expect(said).toContain("no report from tools-1, rest");
+  });
+
+  it("takes a report as its shard's by the folder the workflow downloads it into", () => {
+    expect(shardOfReport("reports/shards/mutation-timeline-01/mutation.json")).toBe("timeline-01");
+    expect(shardOfReport("reports\\shards\\mutation-rest\\mutation.json")).toBe("rest");
+    expect(parseShards('["tools-1","rest"]')).toEqual(["tools-1", "rest"]);
+    for (const wrong of ["", "[]", '"rest"', "[1]", '[""]'])
+      expect(() => parseShards(wrong), wrong).toThrow();
+  });
+
+  it("works as a command with the list of shards, and refuses a list it cannot read", () => {
+    const d = tmp();
+    const path = join(d, "mutation-rest", "mutation.json");
+    mkdirSync(dirname(path));
+    writeFileSync(
+      path,
+      JSON.stringify(reportOf({ "src/a.ts": fileOf({ Killed: 4, Survived: 1 }) })),
+    );
+    const env = { ...process.env, GITHUB_STEP_SUMMARY: "" };
+    const cmd = (...args) =>
+      spawnSync(process.execPath, [script, ...args], { env, encoding: "utf8" });
+    const fine = cmd("--shards", '["rest"]', path);
+    expect(fine.status).toBe(0);
+    expect(fine.stdout).toContain("Mutation score 80.0%");
+    const short = cmd("--shards", '["rest","tools-1"]', path);
+    expect(short.status).toBe(1);
+    expect(short.stdout).toContain("1 of 2 shards sent no report: tools-1");
+    const garbled = cmd("--shards", "", path);
+    expect(garbled.status).toBe(1);
+    expect(garbled.stdout).toContain("the list of shards the run started is missing or wrong");
   });
 
   it("is an error when one of several reports is missing, and still summarises the others", () => {

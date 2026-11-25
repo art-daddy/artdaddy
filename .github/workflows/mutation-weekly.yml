@@ -3,16 +3,19 @@
 # so a surviving mutant is a bug the tests would let through. The run is heavy, so it lives here, on the free Linux
 # runners of this public repository, and not on anybody's computer.
 #
-# Added 25 Nov 2026 at the owner's request. The first runs are also the MEASUREMENT of how long a full run takes: that
-# decides whether it stays weekly, becomes incremental, or is split further. What was measured so far: the unit suite
-# alone takes about five minutes to run once on a laptop, so every job pays that before its first mutant, and a mutant
-# in code that runs at load time needs the whole suite, which is why `ignoreStatic` is on (stryker.ci.mjs).
+# Added 25 Nov 2026 at the owner's request. The first full run to get past Stryker's first pass (25 Nov, run
+# 45652956328) was the measurement: in three jobs, the 9 files of `rest` were done in an hour, but after 5 h 30 min the
+# timeline had tested 9% of its work and the tools 46%, so neither fitted GitHub's six-hour limit for a job. Every job
+# also pays Stryker's first pass (each test once, in one thread: 9 to 17 minutes here) before its first mutant, and a
+# mutant in code that runs at load time needs the whole suite, which is why `ignoreStatic` is on (stryker.ci.mjs).
 #
-# Three jobs run side by side, each a third of the scope (stryker.ci.mjs cuts them from the same list as
-# `npm run mutation`), so the run fits GitHub's six-hour limit per job; a last job puts the three reports together.
+# So the scope is cut into many shards that run side by side, each planned to test its mutants in no more than about
+# four hours (stryker.ci.mjs; the files, and the parts of the biggest files, of each shard are in
+# scripts/ci/mutationShards.json, sized from that run). The first job lists the shards from stryker.ci.mjs, so the list
+# lives in one place; the last job puts their reports together and names any shard that sent none.
 #
 #   gh workflow run mutation-weekly.yml                                       the full run now
-#   gh workflow run mutation-weekly.yml -f shard=tools                        one shard
+#   gh workflow run mutation-weekly.yml -f shard=tools-01                     one shard (its name, from stryker.ci.mjs)
 #   gh workflow run mutation-weekly.yml -f shard=rest -f mutate=src/contract/clamp.ts   one file (minutes): a smoke test
 name: Mutation (weekly)
 
@@ -23,9 +26,8 @@ on:
   workflow_dispatch:
     inputs:
       shard:
-        description: "Which part of the scope to run"
-        type: choice
-        options: [all, timeline, tools, rest]
+        description: "Which shard to run: all, or one name from stryker.ci.mjs (such as tools-01 or rest)"
+        type: string
         default: all
       mutate:
         description: "Only mutate these files (a Stryker glob such as src/contract/clamp.ts). Empty: the whole shard."
@@ -41,17 +43,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  shards:
+    name: Shards to run
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - id: list
+        env:
+          # Through the environment, never pasted into the script: the input is text typed by whoever starts the run.
+          # Empty on a schedule, which runs every shard; a name that is not a shard stops the run here.
+          WANTED: ${{ inputs.shard }}
+        run: >-
+          node --input-type=module -e 'const { shardsToRun } = await import("./stryker.ci.mjs");
+          console.log("list=" + JSON.stringify(shardsToRun(process.env.WANTED)));' >> "$GITHUB_OUTPUT"
+
   mutation:
     name: Stryker (${{ matrix.shard }})
+    needs: shards
     runs-on: ubuntu-22.04
-    # GitHub stops any job at six hours. If a shard does not fit, it is cancelled, writes no report, and the last job says
-    # so: that is the measurement, and the answer is to cut that shard in two.
+    # GitHub stops any job at six hours. Each shard is planned at about four hours of mutants plus its setup and first
+    # pass. If one does not fit, it is cancelled, writes no report, and the last job names it: that is the measurement,
+    # and the answer is to give that shard's files to more shards (scripts/ci/mutationShards.json).
     timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
-        # On a schedule there are no inputs, so the run is all three shards.
-        shard: ${{ fromJSON(inputs.shard && inputs.shard != 'all' && format('["{0}"]', inputs.shard) || '["timeline","tools","rest"]') }}
+        shard: ${{ fromJSON(needs.shards.outputs.list) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,12 +105,13 @@ jobs:
 
   summary:
     name: Score of the whole run
-    needs: mutation
+    needs: [shards, mutation]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      EXPECTED: ${{ inputs.shard && inputs.shard != 'all' && '1' || '3' }}
+      # The shards this run started: the summary names every one of them that sent no report.
+      SHARDS: ${{ needs.shards.outputs.list }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -95,4 +119,4 @@ jobs:
           pattern: mutation-*
           path: reports/shards
       - name: All shards together, and the files to look at first
-        run: node scripts/ci/mutationSummary.mjs --expect "$EXPECTED" reports/shards/*/mutation.json
+        run: node scripts/ci/mutationSummary.mjs --shards "$SHARDS" reports/shards/*/mutation.json
