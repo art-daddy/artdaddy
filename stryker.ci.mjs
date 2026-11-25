@@ -1,7 +1,9 @@
 // Stryker for the weekly CI run (.github/workflows/mutation-weekly.yml). The same scope as `npm run mutation`
 // (stryker.config.mjs), with these changes:
-//   - the vitest config that leaves out the one known-red test (vitest.mutation.config.ts). Stryker aborts if ANY
-//     test is red in its first run, so one unrelated red test would otherwise stop the whole report;
+//   - the vitest config that leaves out the few tests that cannot pass in Stryker's first run (vitest.mutation.config.ts,
+//     each with its reason). Stryker aborts if ANY test is red in that run, so one of them would otherwise stop the
+//     whole report;
+//   - a longer limit for that first run (dryRunTimeoutMinutes, below);
 //   - a JSON report next to the HTML one: scripts/ci/mutationSummary.mjs reads it for the page of the run;
 //   - one log line per step (progress-append-only) instead of a progress bar, and no clear-text list of every
 //     mutant (the HTML report has them), so the log of a long run stays readable;
@@ -49,4 +51,10 @@ export default {
   // The Linux runners of a public repository have four cores.
   concurrency: 4,
   timeoutMS: 30000,
+  // Stryker's first run executes every test that imports the shard's files once, in ONE thread (its vitest runner
+  // allows one worker) and with the shard's files instrumented. Its default limit of 5 minutes stopped all three shards
+  // of the first full run. On a laptop the timeline shard, the slowest, took 43 minutes (tools 25, rest 19); GitHub's
+  // runner did the one-file pass 2.3 times as fast. 90 minutes is twice the laptop's slowest and still ends a run that
+  // hangs long before the job's own limit.
+  dryRunTimeoutMinutes: 90,
 };
