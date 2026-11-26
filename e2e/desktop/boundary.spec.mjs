@@ -23,14 +23,34 @@ function scratchFile(tag) {
   return p;
 }
 
+// A dev build's first load waits on a cold vite (measured at ~50 s), so it gets the lanes' raised ceiling when set.
+const BOOT_MS = Number(process.env.ARTDADDY_E2E_TIMEOUT_MS || 30_000);
+
+/** What the webview shows, for a failure message: a blank or error page says why the bundle never mounted. */
+async function whatTheWebviewShows() {
+  try {
+    const [href, title, text] = await evalInApp(() => [
+      location.href,
+      document.title,
+      (document.body?.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 300),
+    ]);
+    const windows = (await browser.getWindowHandles()).length;
+    return `${href} ("${title}") in ${windows} window(s): ${text || "(no text)"}`;
+  } catch (error) {
+    return `nothing readable (${error.message})`;
+  }
+}
+
 describe("packaged app boot", () => {
   it("mounts the production bundle into #root (not a blank webview)", async () => {
-    const root = await $("#root");
-    await root.waitForExist({ timeout: 30_000 });
-    await browser.waitUntil(
-      async () => (await evalInApp(() => document.getElementById("root")?.innerHTML.length ?? 0)) > 50,
-      { timeout: 30_000, timeoutMsg: "#root stayed empty — the app white-screened in the webview" },
-    );
+    try {
+      await browser.waitUntil(
+        async () => (await evalInApp(() => document.getElementById("root")?.innerHTML.length ?? 0)) > 50,
+        { timeout: BOOT_MS, interval: 500 },
+      );
+    } catch {
+      assert.fail(`#root stayed missing or empty for ${BOOT_MS / 1000} s; the webview shows ${await whatTheWebviewShows()}`);
+    }
   });
 
   it("loaded the built bundle, not an error page or a bare shell", async () => {

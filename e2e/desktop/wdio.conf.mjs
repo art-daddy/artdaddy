@@ -79,7 +79,8 @@ export const config = {
   ],
   reporters: ["spec"],
   framework: "mocha",
-  mochaOpts: { ui: "bdd", timeout: 120_000 },
+  // Above the boot wait in boundary.spec.mjs, which follows ARTDADDY_E2E_TIMEOUT_MS, so it can say what went wrong.
+  mochaOpts: { ui: "bdd", timeout: Math.max(120_000, Number(process.env.ARTDADDY_E2E_TIMEOUT_MS || 0) + 60_000) },
   logLevel: "warn",
   waitforTimeout: 20_000,
   connectionRetryCount: 3,

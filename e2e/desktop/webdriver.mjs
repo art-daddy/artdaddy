@@ -163,10 +163,19 @@ export async function launchForAttach(application, port = ATTACH_PORT) {
     stdio: "ignore",
   });
   try {
+    // The browser answers before the app's window exists, and an attach then finds no page to drive.
+    let targets = [];
     await waitFor(
-      async () => (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(3_000) })).ok,
-      { label: `the app's WebView2 debugging port ${port}`, timeout: 120_000, interval: 250 },
-    );
+      async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3_000) });
+        targets = res.ok ? await res.json() : [];
+        return targets.some((t) => t.type === "page" || t.type === "webview");
+      },
+      { label: `a page on the app's WebView2 debugging port ${port}`, timeout: 120_000, interval: 250 },
+    ).catch((error) => {
+      const seen = targets.map((t) => `${t.type} ${t.url}`).join(", ") || "none";
+      throw new Error(`${error.message} (targets: ${seen})`);
+    });
   } catch (error) {
     stopTree(app);
     throw error;
@@ -180,24 +189,48 @@ export function attachCapabilities(port = ATTACH_PORT) {
   return { browserName: "webview2", "ms:edgeOptions": { debuggerAddress: `127.0.0.1:${port}` } };
 }
 
+/** The webview's address, title and the start of its text, for a failure message. */
+async function describePage(s) {
+  try {
+    const [href, title, text] = await s.exec(
+      'return [location.href, document.title, (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().slice(0, 300)];',
+    );
+    return `${href} ("${title}"): ${text || "(no text)"}`;
+  } catch (error) {
+    return `nothing readable (${error.message})`;
+  }
+}
+
+/** Waits until the webview holds a page from a real origin. A blank or error page has none ("null"): without this a
+ *  lane waits out its whole boot timeout and says only that the app did not boot, not what the webview shows. */
+async function waitForPage(s) {
+  try {
+    await waitFor(async () => (await s.exec("return location.origin;")) !== "null", {
+      label: "the app's page",
+      interval: 500,
+    });
+  } catch {
+    throw new Error(`the app's page did not load; the webview shows ${await describePage(s)}`);
+  }
+}
+
 /** A session on the app: started by the Edge WebDriver, or, with ARTDADDY_WEBVIEW2_DEBUG_PORT set, started here and
- *  attached to (launchForAttach). Either way `quit()` closes the app. */
+ *  attached to (launchForAttach). Either way `quit()` closes the app, and the app's page has loaded. */
 export async function newSession(application) {
   if (ATTACH_PORT) {
     const launched = await launchForAttach(application);
-    let v;
+    let attached;
     try {
-      v = await call("POST", "/session", { capabilities: { alwaysMatch: attachCapabilities() } });
+      const v = await call("POST", "/session", { capabilities: { alwaysMatch: attachCapabilities() } });
+      const id = v.sessionId ?? v.capabilities?.sessionId;
+      if (!id) throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
+      attached = session(id);
+      await waitForPage(attached);
     } catch (error) {
+      await attached?.quit();
       launched.stop();
       throw error;
     }
-    const id = v.sessionId ?? v.capabilities?.sessionId;
-    if (!id) {
-      launched.stop();
-      throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
-    }
-    const attached = session(id);
     const detach = attached.quit;
     attached.quit = async () => {
       await detach();
@@ -211,7 +244,14 @@ export async function newSession(application) {
   });
   const id = v.sessionId ?? v.capabilities?.sessionId;
   if (!id) throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
-  return session(id);
+  const started = session(id);
+  try {
+    await waitForPage(started);
+  } catch (error) {
+    await started.quit();
+    throw error;
+  }
+  return started;
 }
 
 function session(id) {

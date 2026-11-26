@@ -210,18 +210,20 @@ try {
       $env:VITE_API_BASE_URL = "http://127.0.0.1:$ServicePort"
       $env:VITE_E2E_AUTH_BYPASS = '1'
       $viteLog = Join-Path $outDir 'vite.log'
+      # On 127.0.0.1, which a WebView2 always tries for "localhost": left to itself Node puts vite on ::1 only, which a
+      # WebView2 with no IPv6 route never asks (on GitHub's runner the app's page never loaded).
       $vite = Start-Process -FilePath 'node' -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
-        -ArgumentList @('node_modules\vite\bin\vite.js', '--port', '5173', '--strictPort') `
+        -ArgumentList @('node_modules\vite\bin\vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort') `
         -RedirectStandardOutput $viteLog -RedirectStandardError "$viteLog.err"
       $served = $false
       for ($i = 0; $i -lt 120 -and -not $served; $i++) {
         try {
-          $served = (Invoke-WebRequest -Uri 'http://localhost:5173/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+          $served = (Invoke-WebRequest -Uri 'http://127.0.0.1:5173/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
         } catch {
           Start-Sleep -Seconds 1
         }
       }
-      if (-not $served) { throw 'vite did not serve http://localhost:5173 within 2 minutes (see vite.log)' }
+      if (-not $served) { throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes (see vite.log)' }
       if (-not (Get-ListenerPid $ServicePort)) { throw "the stand-in service did not start on port $ServicePort (see service.err.log)" }
 
       $env:ARTDADDY_APP_BINARY = $binary
