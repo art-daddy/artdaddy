@@ -50,12 +50,24 @@ test.describe("when the turn cannot happen", () => {
 
   test("a connection lost after the first word: the failure is said and the round is never sent again by itself", async ({
     qa,
+    browserName,
   }) => {
     qa.server.script(breaksAfterFirstWord());
     await qa.openProject();
     await qa.send("Describe my project");
     await expect(qa.reply(new RegExp(`^${FIRST_WORD}`))).toBeVisible({ timeout: 15_000 });
-    await expect(qa.pane.getByText(CANT_REACH).first()).toBeVisible({ timeout: 15_000 });
+    // Chromium reports the cut socket (TypeError "network error") and the app names a lost
+    // connection. Playwright's WebKit ends a cut stream as if it were complete, so the app only sees
+    // a stream that ended without its result, which has no sentence of its own and reads as
+    // "couldn't tell why" (reported as a bug; which one macOS WebKit gives is on the run's report).
+    const lost = qa.pane.getByText(CANT_REACH).first();
+    const unknown = qa.pane.getByText(/^That didn't work, and we couldn't tell why\./).first();
+    await expect(lost.or(unknown)).toBeVisible({ timeout: 15_000 });
+    const said = (await lost.isVisible()) ? "lost connection" : "couldn't tell why";
+    test
+      .info()
+      .annotations.push({ type: "cut stream reads", description: `${browserName}: ${said}` });
+    if (browserName === "chromium") expect(said).toBe("lost connection");
     await qa.idle();
     // The round had begun (in production its tokens were already spent): no silent second try.
     await qa.page.waitForTimeout(2500);

@@ -59,6 +59,32 @@ test.describe("approving a paid or destructive call", () => {
       .toContain("user denied this tool call");
   });
 
+  test("Allow on a paid generation sends exactly one request to the paid service, and the turn goes on", async ({
+    qa,
+  }) => {
+    // The fake paid proxy refuses (it never calls anything); a generation that fails later wakes
+    // the agent with a note, so a reply is scripted for that round too.
+    qa.server.script(
+      generateImage(),
+      plainText("Started the picture."),
+      plainText("The picture did not come out; nothing else was changed."),
+    );
+    await qa.openProject();
+    await qa.send("Make an opening picture of a kite");
+    await expect(qa.pane.getByText("Generate an image")).toBeVisible({ timeout: 15_000 });
+    expect(paidCalls(qa)).toHaveLength(0);
+    const resumed = startTimer(inBrowser("Allow on a paid call to the next answer"));
+    await qa.pane.getByRole("button", { name: "Allow", exact: true }).click();
+    await expect(qa.reply("Started the picture.")).toBeVisible({ timeout: 20_000 });
+    resumed.stop();
+    await qa.idle();
+    await qa.page.waitForTimeout(2000);
+    // One approval, one paid request: never a second one behind the person's back.
+    const paid = paidCalls(qa);
+    expect(paid, paid.map((p) => p.path).join(", ")).toHaveLength(1);
+    expect(JSON.stringify(paid[0].body)).toContain("a red kite over green hills at dawn");
+  });
+
   test("deleting a library asset asks first; Delete removes it from the saved library and leaves the person's own file alone", async ({
     qa,
   }) => {

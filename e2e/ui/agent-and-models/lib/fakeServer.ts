@@ -15,7 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo, Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
-import type { Reply, ReplySource, Round, Step } from "./reply";
+import type { ReplySource, Round, Step } from "./reply";
 
 export interface Seen {
   method: string;
@@ -159,17 +159,24 @@ export class FakeArtDaddy {
     if (p === "/health") return json(200, { ok: true });
     if (p === "/auth/verify") return json(200, { ok: true });
     if (p === "/auth/desktop/refresh") {
-      // The desktop app renews its saved session here at start. Any saved token is good.
+      // The QA shell's keychain holds a `qa-refresh-` token, renewed here at start. Any other token
+      // is a real person's session (a real dev build pointed here by mistake reads the PC's own
+      // keychain): it is answered "unavailable", which never rotates or clears it, and it is never
+      // kept in `seen`.
       const token = (body as { refresh_token?: unknown } | null)?.refresh_token;
-      if (typeof token !== "string" || !token)
-        return json(401, { detail: "invalid refresh token" });
+      seen.body = "[refresh token not recorded]";
+      if (typeof token !== "string" || !token.startsWith("qa-refresh-"))
+        return json(503, { detail: "desktop authentication is unavailable" });
       return json(200, {
         access_token: fakeAccessToken(),
         refresh_token: `qa-refresh-${++this.requestSeq}`,
         expires_in: 3600,
       });
     }
-    if (p === "/auth/desktop/revoke") return json(200, { ok: true });
+    if (p === "/auth/desktop/revoke") {
+      seen.body = "[refresh token not recorded]";
+      return json(200, { ok: true });
+    }
     if (p === "/me")
       return json(200, {
         user_id: "qa_user",

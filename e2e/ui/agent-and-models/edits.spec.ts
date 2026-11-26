@@ -13,8 +13,8 @@ import { inBrowser, startTimer } from "./lib/waits";
 
 const STILL = path.resolve("e2e/ui/agent-and-models/fixtures/media/still.png");
 
-const clipsOf = (tl: SavedTimeline | null) =>
-  (tl?.tracks ?? []).flatMap((t) => (t.clips ?? []).map((c) => ({ track: String(t.id), ...c })));
+const clipsOf = (tl: SavedTimeline | null): Array<Record<string, unknown> & { track: string }> =>
+  (tl?.tracks ?? []).flatMap((t) => (t.clips ?? []).map((c) => ({ ...c, track: String(t.id) })));
 
 test.describe("the agent edits the project", () => {
   test.setTimeout(120_000);

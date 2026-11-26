@@ -35,6 +35,12 @@ Two stand-ins, both started fresh for every test by the fixture in `lib/qa.ts`:
 What the shell does not cover: the real Rust commands, WebView2 and WKWebView themselves, real OS
 dialogs and the MCP server. Those belong to `e2e/desktop`.
 
+Do not point a real dev build at the fake server. A dev build reads the PC's own keychain entry
+(`com.artdaddy.app`), which on a shared PC is the installed app's saved session. The fake server
+answers any token that is not the shell's own `qa-refresh-...` with "unavailable" (which never
+rotates or clears it) and never records it, but it is a stand-in for the browser lane, not for the
+real app.
+
 ## Adding a scripted reply
 
 One small file in `fixtures/replies/` that exports a function returning a `Reply`, built with the
@@ -61,7 +67,9 @@ In a test, queue the replies in the order the rounds will come. A reply can also
 the round it answers, to read the tool results the app sent back:
 
 ```ts
-qa.server.script(addTrack("video"), (round) => addClips(ref, 90, String(round.toolResults[0].result.track_id)));
+qa.server.script(addTrack("video"), (round) =>
+  addClips(ref, 90, String(round.toolResults[0].result.track_id)),
+);
 ```
 
 ## Waits
