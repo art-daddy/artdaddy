@@ -68,6 +68,9 @@ export const config = {
     {
       browserName: "wry",
       "tauri:options": { application: binary },
+      // WebdriverIO 9 opens a WebDriver BiDi session by default, which tauri-driver does not speak (and which can
+      // replace an embedded app's page with `data:,`). Classic WebDriver is what tauri-driver forwards.
+      "wdio:enforceWebDriverClassic": true,
     },
   ],
   reporters: ["spec"],
