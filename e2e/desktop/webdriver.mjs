@@ -5,8 +5,9 @@
 // W3C WebDriver server, and `fetch` is enough to speak it. The Actions API below is REAL pointer
 // input delivered to the app window only — unlike synthetic OS-level mouse events, it cannot
 // land in another application if the app loses focus.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,27 @@ export const root = path.resolve(here, "..", "..");
 const BASE = "http://127.0.0.1:4444";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The app's MCP port (src-tauri/src/mcp.rs DEFAULT_PORT). */
+export const MCP_PORT = 19787;
+
+function portTaken(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+/** Whether something already listens on the MCP port. Only one app can hold it, so a lane that talks MCP checks this
+ *  BEFORE it launches its app: if another ArtDaddy (an installed one) holds the port, every call would reach that
+ *  app and its projects, never the one under test. */
+export function mcpPortTaken(port = MCP_PORT) {
+  return portTaken(port);
+}
 
 export function appBinary() {
   const explicit = process.env.ARTDADDY_APP_BINARY;
@@ -54,11 +76,12 @@ export function projectsRoot() {
   return path.join(base, folder, "projects");
 }
 
-async function call(method, url, body) {
+async function call(method, url, body, timeoutMs) {
   const res = await fetch(BASE + url, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
   });
   const text = await res.text();
   let json;
@@ -73,20 +96,42 @@ async function call(method, url, body) {
   return json.value;
 }
 
+/** Starts tauri-driver (4444), which runs the Edge WebDriver (4445) as its child, and waits until it answers.
+ *
+ *  Lanes run back to back (the nightly timing run) met two failures here: killing tauri-driver alone left that child
+ *  running and holding 4445, and a pair started while the previous one was still letting go of its ports found the
+ *  new Edge WebDriver unable to bind ("Only one usage of each socket address") and tauri-driver never answering. So
+ *  `driver.kill()` stops the whole tree on Windows, a start waits for both ports, and a pair that does not answer
+ *  within 30 s is stopped and started again (three tries). */
 export async function startDriver() {
   const native = process.env.MSEDGEDRIVER || "msedgedriver";
-  const proc = spawn("tauri-driver", ["--native-driver", native], { stdio: ["ignore", "pipe", "pipe"] });
-  proc.stderr.on("data", (d) => process.stderr.write(`[tauri-driver] ${d}`));
-  // Poll the status endpoint rather than sleeping a fixed time.
-  for (let i = 0; i < 60; i++) {
-    try {
-      await call("GET", "/status");
-      return proc;
-    } catch {
-      await sleep(250);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let i = 0; i < 80 && ((await portTaken(4444)) || (await portTaken(4445))); i++) await sleep(250);
+    const proc = spawn("tauri-driver", ["--native-driver", native], { stdio: ["ignore", "pipe", "pipe"] });
+    proc.stderr.on("data", (d) => process.stderr.write(`[tauri-driver] ${d}`));
+    if (process.platform === "win32") {
+      const killOne = proc.kill.bind(proc);
+      proc.kill = (signal) => {
+        if (proc.exitCode === null && proc.pid) {
+          spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
+        }
+        return killOne(signal);
+      };
     }
+    // Poll the status endpoint rather than sleeping a fixed time.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        await call("GET", "/status", undefined, 3_000);
+        return proc;
+      } catch {
+        await sleep(250);
+      }
+    }
+    proc.kill();
+    process.stderr.write(`[tauri-driver] did not answer on 4444 (try ${attempt} of 3)\n`);
+    await sleep(1_000);
   }
-  proc.kill();
   throw new Error("tauri-driver did not come up on 4444");
 }
 
