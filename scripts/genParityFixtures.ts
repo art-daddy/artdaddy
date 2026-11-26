@@ -28,10 +28,11 @@ function run(args: string[]): void {
 const pick = (rules: Array<[string, number | string]>, otherwise: number | string): string =>
   rules.reduceRight((rest, [when, value]) => `if(${when},${value},${rest})`, String(otherwise));
 
-/** 320x180 H.264 the way phones write it (High profile, BT.709 tagged, B-frames), 60 frames. */
-function clip(file: string, rgb: [string, string, string]): void {
+/** H.264 the way phones write it (High profile, BT.709 tagged, B-frames), 60 frames, 320x180 unless
+ *  sized otherwise. */
+function clip(file: string, rgb: [string, string, string], size = "320x180"): void {
   run([
-    ...["-f", "lavfi", "-i", "color=c=black:s=320x180:r=30:d=2,format=gbrp"],
+    ...["-f", "lavfi", "-i", `color=c=black:s=${size}:r=30:d=2,format=gbrp`],
     ...[
       "-vf",
       `geq=r='${rgb[0]}':g='${rgb[1]}':b='${rgb[2]}',scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`,
@@ -85,6 +86,13 @@ mkdirSync(path.join(outDir, "ref"), { recursive: true });
       stripes[5][c],
     )})`;
   clip(PARITY_MEDIA.clipB, [channel(0), channel(1), channel(2)]);
+}
+
+// detail: fine grey stripes, 4 px light and 4 px dark, standing still, at the canvas size so neither
+// painter scales it (two scalers on stripes this fine differ by 7 levels, hub mismatch 7).
+{
+  const stripe = "if(lt(mod(X,8),4),220,30)";
+  clip(PARITY_MEDIA.detail, [stripe, stripe, stripe], "640x360");
 }
 
 // still: 400x300, a light border, a diagonal split and an orange disc.

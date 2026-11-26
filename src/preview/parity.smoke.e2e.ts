@@ -45,10 +45,17 @@ import { joinPath } from "../tools/store";
 
 type Rec = Record<string, unknown>;
 
-/** How close the export must come to its own frozen reference on any platform: the shipped ffmpeg
- *  builds differ by platform and x264 by thread count, which moves a block by a level or two. A
- *  look that changed (a missing caption, a moved box, another frame) moves blocks by tens. */
-export const EXPORT_TOLERANCE = { mean: 1.5, max: 12 };
+/** How close the export must come to its own frozen reference. The references are Windows (x64)
+ *  exports, and an x64 ffmpeg exports them to the bit (Windows, and the Linux runners): there the
+ *  tolerance only absorbs an encoder thread-count change. The macOS (arm64) ffmpeg lands a level or
+ *  two away, most at a sharp colour edge: measured on macos-15 (26 Nov) mean 0.99 to 1.93 and max 6
+ *  to 21. A look that changed moves blocks by tens: a missing caption by 190, another frame of the
+ *  clip by 187 (mean 4.5). */
+export const EXPORT_TOLERANCE = {
+  x64: { mean: 1.5, max: 12 },
+  arm64: { mean: 2.5, max: 24 },
+} as const;
+const TOLERANCE = process.arch === "arm64" ? EXPORT_TOLERANCE.arm64 : EXPORT_TOLERANCE.x64;
 
 const WRITE = process.env.ARTDADDY_PARITY_WRITE === "1";
 const KEEP = process.env.ARTDADDY_PARITY_FRAMES ?? "";
@@ -131,7 +138,9 @@ describe("the export shows the frozen parity references", () => {
 
   const seen = new Map<string, Picture>();
   for (const c of ALL_PARITY_CASES) {
-    const here = !c.platform || c.platform === process.platform;
+    const here =
+      (!c.platform || c.platform === process.platform) &&
+      (!c.exportArch || c.exportArch === process.arch);
     it.skipIf(!here)(
       `${c.name}: ${c.what}`,
       async () => {
@@ -151,13 +160,13 @@ describe("the export shows the frozen parity references", () => {
           const reference = decodePng(readFileSync(path.join(DIR, name)));
           const d = difference(blocks, reference);
           console.log(`[parity] export ${c.name}@${n}: ${told(d)}`);
-          if (!within(d, EXPORT_TOLERANCE)) {
+          if (!within(d, TOLERANCE)) {
             await keep(EVIDENCE, `${c.name}@${n}.export.png`, full);
             await keep(EVIDENCE, `${c.name}@${n}.export-blocks.png`, blocks);
           }
           expect(
-            within(d, EXPORT_TOLERANCE),
-            `${name}: the export differs from its reference (${told(d)}; allowed mean ${EXPORT_TOLERANCE.mean}, max ${EXPORT_TOLERANCE.max})`,
+            within(d, TOLERANCE),
+            `${name}: the export differs from its reference (${told(d)}; allowed on ${process.arch} mean ${TOLERANCE.mean}, max ${TOLERANCE.max})`,
           ).toBe(true);
         }
       },
@@ -171,7 +180,7 @@ describe("the export shows the frozen parity references", () => {
       const [a, b] = [seen.get(`${c.name}@${first}`), seen.get(`${c.name}@${last}`)];
       if (!a || !b) continue; // that case did not run here
       expect(difference(a, b).max, `${c.name}@${first} against @${last}`).toBeGreaterThan(
-        EXPORT_TOLERANCE.max * 4,
+        TOLERANCE.max * 4,
       );
     }
   });

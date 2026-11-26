@@ -28,6 +28,10 @@ export const PARITY_MEDIA = {
   clipA: "clip_a.mp4",
   /** 320x180 H.264, 60 frames: six coloured stripes and a dark bar moving down 2 px a frame. */
   clipB: "clip_b.mp4",
+  /** 640x360 H.264 (the canvas size, so neither painter scales it), 60 frames: fine grey stripes,
+   *  4 px wide, and nothing moves. A filter meant to leave a sharp, still picture alone shows
+   *  plainly whether it does. */
+  detail: "detail.mp4",
   /** 400x300 (4:3) PNG: a diagonal split, an orange disc and a light border. */
   still: "still.png",
   /** 640x120 PNG with transparency, a lower-third banner: a half-transparent white bar with a solid
@@ -52,6 +56,15 @@ export interface ParityCase {
   /** The picture depends on the platform (a system font): the reference was made here, and both
    *  halves hold it on this platform only. */
   platform?: NodeJS.Platform;
+  /** The EXPORT's picture depends on the processor (ffmpeg draws its noise another way on arm64):
+   *  the reference was made on this architecture, and the export half holds it there only. */
+  exportArch?: NodeJS.Architecture;
+  /** A mismatch found in one browser engine only (the engine Playwright names): the preview test
+   *  is an expected failure in that engine and a plain test in the others. */
+  knownIn?: Partial<Record<"chromium" | "webkit", string>>;
+  /** The known mismatch is that the preview never draws this frame at all: its test expects the
+   *  draw itself to fail, where any other case's undrawn picture fails for real. */
+  undrawn?: boolean;
 }
 
 /** The reference file of one compared frame, relative to PARITY_DIR. */
@@ -115,20 +128,26 @@ const box = (x: number, y: number, w: number, h = w) => ({
   transform: { position: { x, y }, scale_x: w, scale_y: h },
 });
 
-/** A clip of clip_a over the whole canvas, carrying `extra`: the base of most look cases. */
+/** A clip (clip_a unless named) over the whole canvas, carrying `extra`: the base of most look
+ *  cases. */
 const lookCase = (
   name: string,
   what: string,
   extra: Extra,
   known?: string,
   frames: readonly number[] = [15],
+  media: ParityMedia = "clipA",
 ): ParityCase => ({
   name,
   what,
   frames,
   known,
-  timeline: (ref) => timeline(track("v1", "video", 0, [video("a", "clipA", ref, [0, 30], extra)])),
+  timeline: (ref) => timeline(track("v1", "video", 0, [video("a", media, ref, [0, 30], extra)])),
 });
+
+/** Found by this suite on 26 Nov 2026 and not in the hub's table: reported to the scrum master with
+ *  the two frames, and held here as expected failures like the table's rows. */
+const FOUND = "found 26 Nov, not in the hub table";
 
 /** The caption add_captions writes for one spoken line: a run per word, timed in seconds from the
  *  card's start, centred 90% down the frame, in the default look. */
@@ -179,6 +198,9 @@ export const PARITY_CASES: readonly ParityCase[] = [
     name: "text-caption",
     what: "a title and a spoken-word caption over a clip",
     frames: [20],
+    knownIn: {
+      webkit: `${FOUND}: WebKit sets canvas text with textBaseline "middle" about 0.1 em lower than Chromium (5 px at 44 px in Poppins), so the preview draws the title lower than the export; on macOS the caption also comes out heavier`,
+    },
     timeline: (ref) =>
       timeline(
         track("v1", "video", 0, [video("a", "clipA", ref, [0, 30])]),
@@ -235,10 +257,6 @@ export const PARITY_CASES: readonly ParityCase[] = [
     effects: [{ type: "sharpen", params: { sharpness: 1.5 } }],
   }),
 ];
-
-/** Found by this suite on 26 Nov 2026 and not in the hub's table: reported to the scrum master with
- *  the two frames, and held here as expected failures like the table's rows. */
-const FOUND = "found 26 Nov, not in the hub table";
 
 /** The preview hub's "Known mismatches", each as the case that shows it. Their preview test is an
  *  expected failure; the export half is held to its reference like any other case. */
@@ -317,31 +335,46 @@ export const KNOWN_MISMATCH_CASES: readonly ParityCase[] = [
   ),
   lookCase(
     "curves",
-    "a tone curve",
+    "an S-curve for contrast",
     {
       color: {
         masterCurve: [
-          [0, 0.15],
-          [0.5, 0.7],
-          [1, 0.85],
+          [0, 0.05],
+          [0.4, 0.15],
+          [0.6, 0.85],
+          [1, 0.95],
         ],
       },
     },
-    "row 3: the preview bakes the curve into a 256-step ramp; the export runs ffmpeg's curves",
+    "row 3: the preview joins the curve's points with straight lines (a 256-step ramp); ffmpeg's curves draws a smooth spline through them",
   ),
   lookCase(
     "motion-blur",
-    "motion blur on a moving bar",
+    "motion blur on a clip whose fine stripes stand still",
     { effects: [{ type: "motion", params: { frames: 8 } }] },
-    "row 4: the export averages earlier frames (tmix); a stateless draw smears sideways",
-    [20],
+    "row 4: the export averages earlier frames (tmix), so what stands still stays sharp; a stateless draw smears the whole picture sideways",
+    [15],
+    "detail",
   ),
   lookCase(
     "denoise",
-    "strong denoise",
+    "strong denoise on fine, sharp stripes",
     { effects: [{ type: "denoise", params: { strength: 20 } }] },
     "row 4: hqdn3d in the export leaves clean edges; the preview's stand-in blurs them",
+    [15],
+    "detail",
   ),
+  {
+    ...lookCase(
+      "held-frame",
+      "a clip of a still scene, paused on a frame its decoder holds back (a P-frame after three B-frames)",
+      {},
+      `${FOUND}: paused there, the preview never gets the frame (it feeds the decoder 4 samples past the playhead, too few to push a frame held for reordering out); the export shows it`,
+      [20],
+      "detail",
+    ),
+    undrawn: true,
+  },
   lookCase(
     "glow",
     "glow",
@@ -354,12 +387,16 @@ export const KNOWN_MISMATCH_CASES: readonly ParityCase[] = [
     { effects: [{ type: "clarity", params: { clarity: 0.8, dehaze: 0.8 } }] },
     "row 5: wide shader unsharp and contrast in the preview, unsharp 7x7 and eq in the export",
   ),
-  lookCase(
-    "grain",
-    "film grain",
-    { effects: [{ type: "grain", params: { grain: 40 } }] },
-    "row 5: hash noise in the preview, ffmpeg's noise filter in the export",
-  ),
+  {
+    ...lookCase(
+      "grain",
+      "film grain",
+      { effects: [{ type: "grain", params: { grain: 40 } }] },
+      "row 5: hash noise in the preview, ffmpeg's noise filter in the export",
+    ),
+    // macos-15 (arm64) exported this 4.9 levels apart from the x64 reference, max 32 (26 Nov).
+    exportArch: "x64",
+  },
   lookCase(
     "vignette",
     "vignette",
