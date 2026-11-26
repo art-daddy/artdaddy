@@ -1,0 +1,19 @@
+{
+  "id": "golden_0_7_0_title_only_f5401f",
+  "name": "Golden 0.7.0 title only",
+  "schemaVersion": 1,
+  "createdAt": "2026-08-19T06:47:13.000Z",
+  "modifiedAt": "2026-08-19T06:47:13.000Z",
+  "activeTimeline": "timeline.json",
+  "settings": {
+    "canvas": {
+      "width": 1080,
+      "height": 1920,
+      "fps": 30
+    },
+    "model_id": "",
+    "active_style": "",
+    "active_workflow": "",
+    "planning_mode": "beats"
+  }
+}

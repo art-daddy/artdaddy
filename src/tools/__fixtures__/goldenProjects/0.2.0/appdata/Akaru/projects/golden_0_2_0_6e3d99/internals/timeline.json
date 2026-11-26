@@ -1,0 +1,188 @@
+{
+  "units": "frames",
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  "tracks": [
+    {
+      "id": "v1",
+      "kind": "video",
+      "z": 0,
+      "clips": [
+        {
+          "id": "clip_442428d8",
+          "media_ref": "media_0be386747c94",
+          "timeline_in": 0,
+          "timeline_out": 60,
+          "kind": "video",
+          "source_in": 60,
+          "source_out": 120,
+          "link_group": "lg_b2ad1e34",
+          "color": {
+            "brightness": 0.1,
+            "saturation": 1.2
+          }
+        },
+        {
+          "id": "clip_4d25baf2",
+          "media_ref": "media_0be386747c94",
+          "timeline_in": 60,
+          "timeline_out": 150,
+          "kind": "video",
+          "source_in": 120,
+          "source_out": 210,
+          "link_group": "lg_cb49c36e",
+          "color": {
+            "brightness": 0.1,
+            "saturation": 1.2
+          }
+        },
+        {
+          "id": "clip_d7be6316",
+          "media_ref": "media_c532ffa5ce6b",
+          "timeline_in": 150,
+          "timeline_out": 240,
+          "kind": "video",
+          "source_in": 0,
+          "source_out": 90,
+          "transform": {
+            "position": {
+              "x": 0.1,
+              "y": -0.1
+            },
+            "scale": 1.2
+          },
+          "opacity": 0.8,
+          "transition_in": {
+            "kind": "crossfade",
+            "duration": 12
+          },
+          "effects": [
+            {
+              "type": "vignette",
+              "params": {
+                "vignette": 0.4
+              }
+            }
+          ]
+        },
+        {
+          "id": "clip_ef4ed6e4",
+          "media_ref": "media_62c4d7f0b226",
+          "timeline_in": 240,
+          "timeline_out": 300,
+          "kind": "video",
+          "source_in": 30,
+          "source_out": 90
+        }
+      ]
+    },
+    {
+      "id": "v2",
+      "kind": "video",
+      "z": 1,
+      "clips": []
+    },
+    {
+      "id": "a1",
+      "kind": "audio",
+      "z": 0,
+      "clips": [
+        {
+          "id": "aud_5983515e",
+          "kind": "audio",
+          "media_ref": "media_0be386747c94",
+          "source_in": 60,
+          "source_out": 120,
+          "timeline_in": 0,
+          "timeline_out": 60,
+          "link_group": "lg_b2ad1e34"
+        },
+        {
+          "id": "clip_e15ca0ce",
+          "kind": "audio",
+          "media_ref": "media_0be386747c94",
+          "source_in": 120,
+          "source_out": 210,
+          "timeline_in": 60,
+          "timeline_out": 150,
+          "link_group": "lg_cb49c36e"
+        }
+      ]
+    },
+    {
+      "id": "a2",
+      "kind": "audio",
+      "z": 1,
+      "clips": []
+    },
+    {
+      "id": "track_d5bbda1d",
+      "kind": "video",
+      "z": 2,
+      "clips": [
+        {
+          "id": "clip_ee21905d",
+          "media_ref": "media_095d2dac678a",
+          "timeline_in": 30,
+          "timeline_out": 150,
+          "kind": "image",
+          "opacity": [
+            {
+              "t": 0,
+              "v": 0
+            },
+            {
+              "t": 20,
+              "v": 1,
+              "ease": "ease-out"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "track_c4fbc045",
+      "kind": "audio",
+      "z": 3,
+      "clips": [
+        {
+          "id": "clip_ab44cfe9",
+          "media_ref": "media_75d2bf49e3b7",
+          "timeline_in": 0,
+          "timeline_out": 240,
+          "kind": "audio",
+          "source_in": 0,
+          "source_out": 240,
+          "volume": 0.5,
+          "fade": {
+            "in": 15,
+            "out": 30
+          }
+        }
+      ],
+      "mute": true
+    },
+    {
+      "id": "captions",
+      "kind": "text",
+      "z": 4,
+      "clips": [
+        {
+          "id": "txt_9f8d4cee",
+          "kind": "text",
+          "timeline_in": 0,
+          "timeline_out": 75,
+          "content": [
+            {
+              "text": "Golden 0.2.0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "failures": []
+}
