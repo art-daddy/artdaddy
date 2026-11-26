@@ -22,6 +22,8 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ATTACH_PORT, attachCapabilities, launchForAttach } from "./webdriver.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..", "..");
 const isWin = process.platform === "win32";
@@ -57,6 +59,7 @@ if (!binary) {
 }
 
 let driver;
+let attached;
 
 export const config = {
   runner: "local",
@@ -66,8 +69,9 @@ export const config = {
   maxInstances: 1,
   capabilities: [
     {
-      browserName: "wry",
-      "tauri:options": { application: binary },
+      // With ARTDADDY_WEBVIEW2_DEBUG_PORT set, onPrepare starts the app and the session attaches to it: an elevated
+      // WebView2 (GitHub's Windows runners) ignores the variables the Edge WebDriver would start it with (webdriver.mjs).
+      ...(ATTACH_PORT ? attachCapabilities() : { browserName: "wry", "tauri:options": { application: binary } }),
       // WebdriverIO 9 opens a WebDriver BiDi session by default, which tauri-driver does not speak (and which can
       // replace an embedded app's page with `data:,`). Classic WebDriver is what tauri-driver forwards.
       "wdio:enforceWebDriverClassic": true,
@@ -80,7 +84,7 @@ export const config = {
   waitforTimeout: 20_000,
   connectionRetryCount: 3,
 
-  onPrepare: () => {
+  onPrepare: async () => {
     driver = spawn("tauri-driver", ["--native-driver", nativeDriver()], {
       stdio: [null, process.stdout, process.stderr],
     });
@@ -90,8 +94,10 @@ export const config = {
           "  Install it with:  cargo install tauri-driver --locked",
       );
     });
+    if (ATTACH_PORT) attached = await launchForAttach(binary);
   },
   onComplete: () => {
+    attached?.stop();
     driver?.kill();
   },
 };

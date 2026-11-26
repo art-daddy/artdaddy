@@ -96,6 +96,13 @@ async function call(method, url, body, timeoutMs) {
   return json.value;
 }
 
+/** Stops a process and everything it started (Windows does not stop a killed process's children). */
+function stopTree(proc) {
+  if (proc.exitCode !== null || !proc.pid) return;
+  if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
+  else proc.kill("SIGKILL");
+}
+
 /** Starts tauri-driver (4444), which runs the Edge WebDriver (4445) as its child, and waits until it answers.
  *
  *  Lanes run back to back (the nightly timing run) met two failures here: killing tauri-driver alone left that child
@@ -112,9 +119,7 @@ export async function startDriver() {
     if (process.platform === "win32") {
       const killOne = proc.kill.bind(proc);
       proc.kill = (signal) => {
-        if (proc.exitCode === null && proc.pid) {
-          spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
-        }
+        stopTree(proc);
         return killOne(signal);
       };
     }
@@ -135,7 +140,72 @@ export async function startDriver() {
   throw new Error("tauri-driver did not come up on 4444");
 }
 
+/** The WebView2 debugging port to ATTACH through instead of letting the Edge WebDriver start the app (see
+ *  launchForAttach); 0 when unset, the usual way. */
+export const ATTACH_PORT = Number(process.env.ARTDADDY_WEBVIEW2_DEBUG_PORT || 0);
+
+/** Starts the app with its WebView2 debugging port open, for the Edge WebDriver to attach to (`debuggerAddress`).
+ *
+ *  The Edge WebDriver opens that port with WEBVIEW2_* variables when it starts the app, and an ELEVATED WebView2
+ *  ignores those ("session not created: DevToolsActivePort file doesn't exist"). GitHub's Windows runners are
+ *  elevated, so there the port comes from HKLM policy instead (the desktop-e2e job in .github/workflows/ci.yml sets
+ *  it, as scripts/qa/windowsUpdateCanary.mjs does) and the variable below serves a normal machine. Whatever opens the
+ *  port replaces the app's own WebView2 arguments (tauri.conf.json), so they are repeated. Returns the app's process
+ *  once the port answers. */
+export async function launchForAttach(application, port = ATTACH_PORT) {
+  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
+  const own = (conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "";
+  const app = spawn(application, [], {
+    env: {
+      ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `${own} --remote-debugging-port=${port} --remote-allow-origins=*`.trim(),
+    },
+    stdio: "ignore",
+  });
+  try {
+    await waitFor(
+      async () => (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(3_000) })).ok,
+      { label: `the app's WebView2 debugging port ${port}`, timeout: 120_000, interval: 250 },
+    );
+  } catch (error) {
+    stopTree(app);
+    throw error;
+  }
+  return { app, stop: () => stopTree(app) };
+}
+
+/** The capabilities that attach the Edge WebDriver to a WebView2 whose debugging port is `port`. tauri-driver passes a
+ *  request with no `tauri:options` through as it is. */
+export function attachCapabilities(port = ATTACH_PORT) {
+  return { browserName: "webview2", "ms:edgeOptions": { debuggerAddress: `127.0.0.1:${port}` } };
+}
+
+/** A session on the app: started by the Edge WebDriver, or, with ARTDADDY_WEBVIEW2_DEBUG_PORT set, started here and
+ *  attached to (launchForAttach). Either way `quit()` closes the app. */
 export async function newSession(application) {
+  if (ATTACH_PORT) {
+    const launched = await launchForAttach(application);
+    let v;
+    try {
+      v = await call("POST", "/session", { capabilities: { alwaysMatch: attachCapabilities() } });
+    } catch (error) {
+      launched.stop();
+      throw error;
+    }
+    const id = v.sessionId ?? v.capabilities?.sessionId;
+    if (!id) {
+      launched.stop();
+      throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
+    }
+    const attached = session(id);
+    const detach = attached.quit;
+    attached.quit = async () => {
+      await detach();
+      launched.stop();
+      for (let i = 0; i < 40 && launched.app.exitCode === null; i++) await sleep(250);
+    };
+    return attached;
+  }
   const v = await call("POST", "/session", {
     capabilities: { alwaysMatch: { "tauri:options": { application } } },
   });

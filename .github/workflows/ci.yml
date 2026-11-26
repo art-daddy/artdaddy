@@ -517,6 +517,19 @@ jobs:
             try { if ((Invoke-WebRequest http://localhost:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { exit 0 } } catch { Start-Sleep -Seconds 1 }
           }
           throw 'vite did not serve http://localhost:5173 within 2 minutes'
+      # GitHub's Windows runners are elevated, and an elevated WebView2 ignores the WEBVIEW2_* variables the Edge
+      # WebDriver opens the app's debugging port with ("DevToolsActivePort file doesn't exist"); HKLM policy reaches it,
+      # as scripts/qa/windowsUpdateCanary.mjs found. So the port is opened here, with the app's own WebView2 arguments
+      # (the policy replaces them), and the lanes start the app and attach to it (e2e/desktop/webdriver.mjs).
+      - name: open the app's WebView2 debugging port through policy (the runner is elevated)
+        shell: pwsh
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $exe = $(if ($conf.PSObject.Properties['mainBinaryName'] -and $conf.mainBinaryName) { $conf.mainBinaryName } else { $conf.productName }) + '.exe'
+          $own = ($conf.app.windows | Where-Object { $_.additionalBrowserArgs } | Select-Object -First 1).additionalBrowserArgs
+          $browserArgs = "$own --remote-debugging-port=9223 --remote-allow-origins=*".Trim()
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments" /v $exe /t REG_SZ /d "$browserArgs" /f
+          "ARTDADDY_WEBVIEW2_DEBUG_PORT=9223" >> $env:GITHUB_ENV
       - name: WebdriverIO lane (npm run e2e:desktop)
         run: npm run e2e:desktop
       - name: timed real-app lanes
