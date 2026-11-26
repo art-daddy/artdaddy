@@ -185,8 +185,8 @@ export function attachBrowserArgs(port = ATTACH_PORT) {
 }
 
 /** The arguments for an ELEVATED machine, which takes them only from HKLM policy (the desktop-e2e job in ci.yml sets
- *  this): the app's own and the debugging port. On GitHub's runner WebView2 ignored the whole policy value once it also
- *  held the driver's switches (about 640 characters) and started with no port. */
+ *  this): the app's own and the debugging port. On GitHub's runner WebView2 ignored the whole policy value once it was
+ *  longer than about 250 characters (246 applied, 271 did not), so the driver's switches do not fit in it. */
 export function policyBrowserArgs(port = ATTACH_PORT) {
   return [...ownBrowserArgs(), `--remote-debugging-port=${port}`, "--remote-allow-origins=*"].join(" ");
 }
