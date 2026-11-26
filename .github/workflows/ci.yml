@@ -263,3 +263,179 @@ jobs:
         # "A public key has been found, but no private key" - the job was red on every run.
         shell: bash
         run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+  # The tool contract, read-only. `codegen --check` fails when the authored catalog
+  # (src/contract/catalog.json), its compiled identity (identity.json) or the frozen 0.21.5
+  # snapshot disagree; it used to run only in the local pre-push hook. The server's generated
+  # copies live in the server's private repository and are compared by that repository's CI,
+  # against the client commit it pins: there is no server checkout here, and the job says so.
+  contract:
+    name: tool contract (codegen --check)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      ARTDADDY_SERVER_DIR: ${{ github.workspace }}/../no-server-checkout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: The catalog, its identity and the frozen 0.21.5 snapshot agree (read-only)
+        run: |
+          node scripts/codegen.mjs --check
+          git diff --exit-code # the check never writes
+          echo "::notice title=Tool contract::client half checked. The server's generated copies are compared by the server's CI (no server checkout in this repository's CI)."
+      # The canary: change one tool description in a copy, without running codegen. The check must
+      # turn red on it, or a green check above proves nothing.
+      - name: A changed tool description without codegen turns the check red (canary)
+        run: |
+          canary="$RUNNER_TEMP/contract-canary"
+          mkdir -p "$canary/scripts" "$canary/src/contract/legacy"
+          cp scripts/codegen.mjs "$canary/scripts/"
+          cp src/contract/catalog.json src/contract/identity.json "$canary/src/contract/"
+          cp src/contract/legacy/0.21.5.json "$canary/src/contract/legacy/"
+          node -e '
+            const fs = require("fs");
+            const file = process.argv[1];
+            const text = fs.readFileSync(file, "utf8");
+            const marker = "\"description\": \"";
+            const at = text.indexOf(marker);
+            if (at < 0) process.exit(2);
+            fs.writeFileSync(file, text.slice(0, at + marker.length) + "Drift canary. " + text.slice(at + marker.length));
+          ' "$canary/src/contract/catalog.json"
+          if node "$canary/scripts/codegen.mjs" --check > "$canary/out.txt" 2>&1; then
+            echo "::error title=Tool contract::codegen --check passed on a catalog changed without codegen, so it detects no drift"
+            exit 1
+          fi
+          if ! grep -q "identity.json" "$canary/out.txt"; then
+            cat "$canary/out.txt"
+            echo "::error title=Tool contract::the canary failed, but not on the stale identity it should have found"
+            exit 1
+          fi
+          echo "drift caught: $(cat "$canary/out.txt")"
+
+  # Every commit of a push or pull request is scanned for secrets (gitleaks, pinned, its checksum
+  # checked). Any finding fails the job, and findings are printed redacted: these logs are public.
+  # A reviewed false positive goes into .gitleaksignore by its fingerprint.
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # every commit of the change is scanned
+      - name: The change this run judges (its base and its head)
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          head="${PR_HEAD:-$(git rev-parse HEAD)}"
+          base="${PR_BASE:-$PUSH_BEFORE}"
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git merge-base origin/main "$head" 2>/dev/null || true)" # a new branch: what main does not have
+          fi
+          if [ "$base" = "$head" ]; then
+            base="$(git rev-parse --verify --quiet "$head^" || true)"
+          fi
+          echo "CHANGE_BASE=$base" >> "$GITHUB_ENV"
+          echo "CHANGE_HEAD=$head" >> "$GITHUB_ENV"
+          echo "This run judges ${base:-the whole history}..$head"
+      - name: No secret in this change (gitleaks)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          dir="$RUNNER_TEMP/gitleaks"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $dir/gitleaks.tar.gz" | sha256sum --check --strict --quiet
+          tar -xzf "$dir/gitleaks.tar.gz" -C "$dir" gitleaks
+          scan() { "$dir/gitleaks" git "$@" --config .gitleaks.toml --redact=100 --no-banner --log-level error --exit-code 3; }
+          # The canary: a commit holding a random token shaped like a GitHub one must be found with this
+          # repository's settings, or a clean scan below proves nothing.
+          canary="$dir/canary"
+          git init -q "$canary"
+          printf 'token = "ghp_%s"\n' "$(openssl rand -hex 18)" > "$canary/planted.txt"
+          git -C "$canary" add planted.txt
+          git -C "$canary" -c user.name=canary -c user.email=canary@localhost commit -qm canary
+          found=0
+          scan "$canary" > /dev/null 2>&1 || found=$?
+          if [ "$found" -ne 3 ]; then
+            echo "::error title=Secret scan::gitleaks did not find the planted fake token (exit $found), so a clean scan proves nothing"
+            exit 1
+          fi
+          if [ -n "$CHANGE_BASE" ]; then range="$CHANGE_BASE..$CHANGE_HEAD"; else range="$CHANGE_HEAD"; fi
+          commits="$(git rev-list --count "$range")"
+          code=0
+          scan . --log-opts="$range" --report-format json --report-path "$dir/report.json" || code=$?
+          n="$(jq length "$dir/report.json" 2>/dev/null || echo 0)"
+          {
+            echo "### Secret scan (gitleaks $GITLEAKS_VERSION)"
+            echo
+            echo "$commits commits scanned ($range): $n findings. The planted fake token was found."
+            if [ "$n" -gt 0 ]; then
+              echo
+              echo "| Rule | File | Line | Commit | Fingerprint |"
+              echo "| --- | --- | --- | --- | --- |"
+              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) | \(.Commit[0:12]) | `\(.Fingerprint)` |"' "$dir/report.json"
+              echo
+              echo "A secret in a commit stays in git history: rotate it first. A reviewed false positive goes into .gitleaksignore by its fingerprint, with the owner's review."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$code" in
+            0) echo "no secret in the $commits commits of $range" ;;
+            3) echo "::error title=Secret in this change::gitleaks found $n secrets in $range (redacted; see the job summary)"; exit 1 ;;
+            *) echo "::error title=Secret scan::gitleaks could not scan $range (exit $code)"; exit 1 ;;
+          esac
+
+  # Known vulnerabilities in the app's libraries (npm). Every advisory is reported, with whether it is
+  # in a shipped library or only a development one; a new advisory on a library nobody touched never
+  # turns a run red. A change fails only when it adds or moves a library that has a HIGH or CRITICAL
+  # advisory of its own (scripts/ci/libraryAudit.mjs compares the change's lockfile with its base's).
+  libraries:
+    name: library audit (npm audit)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the change's base lockfile is compared with this one
+      - name: The change this run judges (its base and its head)
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          head="${PR_HEAD:-$(git rev-parse HEAD)}"
+          base="${PR_BASE:-$PUSH_BEFORE}"
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git merge-base origin/main "$head" 2>/dev/null || true)" # a new branch: what main does not have
+          fi
+          if [ "$base" = "$head" ]; then
+            base="$(git rev-parse --verify --quiet "$head^" || true)"
+          fi
+          echo "CHANGE_BASE=$base" >> "$GITHUB_ENV"
+          echo "This run judges ${base:-the whole history}..$head"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Known advisories in the libraries; a high one in a library this change added or moved fails
+        run: |
+          # The canary: a library version known to carry a high advisory must come back high, or a
+          # clean audit proves nothing.
+          canary="$RUNNER_TEMP/audit-canary"
+          mkdir -p "$canary"
+          (cd "$canary" && npm init -y > /dev/null && npm install --package-lock-only --ignore-scripts --no-audit --no-fund lodash@4.17.20 > /dev/null)
+          (cd "$canary" && npm audit --json > audit.json) || true
+          npm audit --json > "$RUNNER_TEMP/audit.json" || true
+          npm audit --omit=dev --json > "$RUNNER_TEMP/audit-shipped.json" || true
+          base=()
+          if [ -n "$CHANGE_BASE" ] && ! git diff --quiet "$CHANGE_BASE" HEAD -- package.json package-lock.json; then
+            git show "$CHANGE_BASE:package-lock.json" > "$RUNNER_TEMP/base-lock.json"
+            base=(--base-lock "$RUNNER_TEMP/base-lock.json")
+          fi
+          node scripts/ci/libraryAudit.mjs --audit "$RUNNER_TEMP/audit.json" --shipped-audit "$RUNNER_TEMP/audit-shipped.json" \
+            --lock package-lock.json --canary-audit "$canary/audit.json" --canary-package lodash "${base[@]}"

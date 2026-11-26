@@ -1,0 +1,3 @@
+# Reviewed false positives for CI's secret scan (gitleaks): one fingerprint per line, exactly as the job summary
+# prints it (<commit>:<file>:<rule>:<line>). A real secret is rotated, never listed here.
+# Each entry needs a maintainer's review and a comment above it saying why it is not a secret.
