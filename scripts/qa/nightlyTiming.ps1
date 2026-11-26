@@ -210,8 +210,8 @@ try {
       $env:VITE_API_BASE_URL = "http://127.0.0.1:$ServicePort"
       $env:VITE_E2E_AUTH_BYPASS = '1'
       $viteLog = Join-Path $outDir 'vite.log'
-      # On 127.0.0.1, which a WebView2 always tries for "localhost": left to itself Node puts vite on ::1 only, which a
-      # WebView2 with no IPv6 route never asks (on GitHub's runner the app's page never loaded).
+      # On 127.0.0.1, which WebView2 always tries for "localhost". Node's own choice here is ::1, which a WebView2 with
+      # no IPv6 route may skip.
       $vite = Start-Process -FilePath 'node' -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
         -ArgumentList @('node_modules\vite\bin\vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort') `
         -RedirectStandardOutput $viteLog -RedirectStandardError "$viteLog.err"
