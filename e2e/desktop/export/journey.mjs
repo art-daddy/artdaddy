@@ -84,7 +84,8 @@ export async function linkMedia(d, pid, project, file) {
   const libraryFile = path.join(project.dir, "internals", "library.json");
   const before = (readJson(libraryFile, { clips: [] }).clips ?? []).length;
   await openMenu(d, "File", "Import Media…");
-  const answer = nativeDialog(pid, ["-Kind", "save", "-Title", "Link media*", "-Path", file, "-TimeoutMs", "20000"]);
+  // A minute: on a busy PC the Open dialog has taken longer than 20 s to appear.
+  const answer = nativeDialog(pid, ["-Kind", "save", "-Title", "Link media*", "-Path", file, "-TimeoutMs", "60000"]);
   if (!answer.ok) throw new Error(`Import Media's dialog: ${answer.reason ?? JSON.stringify(answer)}`);
   const end = Date.now() + 120_000;
   for (;;) {
@@ -199,7 +200,7 @@ export function nativeDialog(pid, args) {
   }
 }
 
-export function saveAs(pid, file, { overwrite = false, cancel = false, timeoutMs = 20_000 } = {}) {
+export function saveAs(pid, file, { overwrite = false, cancel = false, timeoutMs = 60_000 } = {}) {
   return nativeDialog(pid, [
     "-Kind", "save", "-Title", "Export video", "-TimeoutMs", String(timeoutMs),
     ...(cancel ? ["-Button", "Cancel"] : ["-Path", file]),
@@ -242,25 +243,6 @@ export function exportProcesses() {
 /** How many exports are encoding right now (one output each, however many processes feed it). */
 export function exportsEncoding() {
   return new Set(exportProcesses().map((p) => p.output)).size;
-}
-
-/** What the app's native side printed at the end of each export of this session (`jobs_list`): the lines the
- *  app learns its memory and temporary-space estimates from, so a missing estimate can be traced to its cause. */
-export function exportDiagnostics(d) {
-  return d.eval(`window.__TAURI_INTERNALS__.invoke('jobs_list').then((jobs) => jobs
-    .filter((j) => j.lane === 'export')
-    .map((j) => {
-      const text = (j.stderr_head ?? '') + '\\n' + (j.stderr_tail ?? '');
-      const line = (re) => (text.match(re) ?? [null])[0];
-      return {
-        file: j.meta?.filename ?? String(j.meta?.destPath ?? '').split(/[\\\\/]/).pop(),
-        state: j.state,
-        code: j.code,
-        transport: j.meta?.renderTransport ?? null,
-        temporary: line(/native render temporary: .*/),
-        resident: line(/native render resident: .*/),
-      };
-    }), (e) => String(e))`);
 }
 
 /** Hold a file open with no sharing, as another program (a player, a sync client) can. */

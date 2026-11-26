@@ -56,7 +56,7 @@ export const scenarios = [
 
       // The window's X, then Cancel: nothing changes.
       nativeDialog(t.pid, ["-Kind", "close"]);
-      const asked = nativeDialog(t.pid, ["-Kind", "message", "-Title", "ArtDaddy", "-Button", "Cancel", "-TimeoutMs", "15000"]);
+      const asked = nativeDialog(t.pid, ["-Kind", "message", "-Title", "ArtDaddy", "-Button", "Cancel", "-TimeoutMs", "60000"]);
       t.check("closing the window asks first, in plain words", asked.ok && asked.text.includes(QUIT_QUESTION), JSON.stringify(asked));
       await t.sleep(2500);
       const after = await stage(t.d);
@@ -66,7 +66,7 @@ export const scenarios = [
       const during = await stage(t.d);
       await openMenu(t.d, "File", "Exit");
       const q0 = performance.now();
-      const ok = nativeDialog(t.pid, ["-Kind", "message", "-Title", "ArtDaddy", "-Button", "OK", "-TimeoutMs", "15000"]);
+      const ok = nativeDialog(t.pid, ["-Kind", "message", "-Title", "ArtDaddy", "-Button", "OK", "-TimeoutMs", "60000"]);
       t.check("asked again, answered OK", ok.ok, JSON.stringify(ok));
       const exited = await t.app.waitExit(30_000);
       t.time("app.quit-with-export.to-exit", performance.now() - q0);

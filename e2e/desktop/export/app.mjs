@@ -16,7 +16,7 @@
 // `cargo build` with TAURI_CONFIG is what `tauri dev` runs; running the exe ourselves is what lets a
 // scenario quit it, kill it and start it again by process id.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -202,4 +202,23 @@ export class App {
 export function ensureDir(p) {
   if (!existsSync(p)) mkdirSync(p, { recursive: true });
   return p;
+}
+
+/** This identity's native export journal (the app keeps one intent per export there, and takes an unfinished one
+ *  over at its next start). Only this lane's own identity: never the installed app's. */
+export const journalDir = () => path.join(process.env.LOCALAPPDATA ?? "", IDENTIFIER, "exports", "intents-v1");
+
+/** Move what earlier runs left in this identity's journal into `into` (kept as evidence), so a run starts with
+ *  nothing for the app to take over: an export an earlier run left unfinished would otherwise come back in this
+ *  run's queue. Returns what was moved. */
+export function clearJournal(into) {
+  const dir = journalDir();
+  if (!process.env.LOCALAPPDATA || !existsSync(dir)) return [];
+  const moved = [];
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".json"))) {
+    ensureDir(into);
+    renameSync(path.join(dir, name), path.join(into, name));
+    moved.push(name);
+  }
+  return moved;
 }

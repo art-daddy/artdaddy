@@ -7,14 +7,15 @@
 import { copyFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
-import { dialogState, exportDiagnostics, exportProcesses, openExportDialog, pcSays, pressInDialog, startExport, waitForEnd } from "../journey.mjs";
+import { dialogState, exportProcesses, openExportDialog, pcSays, pressInDialog, startExport, waitForEnd } from "../journey.mjs";
 import { endCardSeconds, partialsIn, probe, sha256 } from "../media.mjs";
 import { near, outDir, projectWith } from "./01-dialog.mjs";
 
 const QUESTION = '[data-export-question] [role=dialog]';
 /** Found by this lane on 26 Nov: with the PC reporting 1 MB free where the file goes, the export started without
  *  asking. The space check (src/timeline/exportOptions.ts, assessExport) needs a measured size for this kind of
- *  export, temporary files included; without one it records "disk_unknown" and asks nothing. */
+ *  export, temporary files included; without one it records "disk_unknown" and asks nothing, and the exports this
+ *  PC learned from (chip-encoded HD) all lack the temporary-space figure, so it never has one. */
 const NO_SPACE_QUESTION = "No space question before an export when the destination drive is nearly full";
 
 /** The export went ahead without asking: stop it the way a person would, and put the dialog away. */
@@ -71,6 +72,16 @@ export const scenarios = [
     async run(t) {
       await projectWith(t, "room", [{ file: t.fixtures.busy(12), at: 0 }]);
       const out = outDir(t);
+      // One export first, so the app has learned this kind of export on this PC (its time and its sizes): the space
+      // check works from what it learned.
+      await openExportDialog(t.d);
+      await startExport(t.d, t.pid, path.join(out, "learn.mp4"));
+      const learnt = await waitForEnd(t.d, { ms: 300_000 });
+      await pressInDialog(t.d, "Close");
+      const samples = await t.d
+        .eval(`JSON.parse(localStorage.getItem('artdaddy-export-calibration-v4') ?? '[]').map((c) => ({ seconds: c.workload?.durationSeconds ?? null, finalBytes: c.finalBytes ?? null, temporaryBytes: c.temporaryBytes ?? null }))`)
+        .catch((e) => String(e));
+      t.note(`learned from a first export of this edit (${learnt.status}): ${JSON.stringify(samples)}`);
       const file = path.join(out, "room.mp4");
       const undo = await pcSays(t.d, { destination_free_bytes: 1_000_000, scratch_free_bytes: 900_000_000_000 });
       try {
@@ -80,12 +91,10 @@ export const scenarios = [
         if (!q) {
           const s = await stopIt(t);
           t.knownBug(NO_SPACE_QUESTION, "the app asks before it starts: not enough space for the exported file", false, `it started instead: ${s.status}`);
-          // Why: the space check needs this PC's measured temporary-space use for this kind of export, learned from
-          // what the native side prints at the end of each export. Record what it printed and what was learned.
-          t.note(`what the app learned from earlier exports (temporary bytes per sample): ${JSON.stringify(await t.d.eval(
-            `JSON.parse(localStorage.getItem('artdaddy-export-calibration-v4') ?? '[]').map((c) => c.temporaryBytes ?? null)`,
-          ).catch((e) => String(e)))}`);
-          t.note(`what the native side printed at the end of this session's exports: ${JSON.stringify(await exportDiagnostics(t.d).catch((e) => String(e)))}`);
+          // Why (src/timeline/exportOptions.ts, assessExport): the space check needs the temporary space this kind of
+          // export uses, as learned from earlier exports; a sample without it leaves the check "unknown".
+          if (Array.isArray(samples) && samples.length && samples.every((x) => x.temporaryBytes === null))
+            t.note("every export the app learned from has no temporary-space figure, so its space check cannot decide");
           return;
         }
         t.knownBug(NO_SPACE_QUESTION, "the app asks before it starts: not enough space for the exported file", true);
@@ -141,7 +150,9 @@ export const scenarios = [
           const s = await stopIt(t);
           t.knownBug(NO_SPACE_QUESTION, "the app asks before it starts", false, `it started instead: ${s.status}`);
           await t.sleep(1500);
-          t.check("stopped at once, the file already there is untouched", (await sha256(file)) === oldHash);
+          // Without the question the export runs (here the disk is not really full, so it can finish and replace
+          // the file): what declining would have kept is part of the same bug.
+          t.knownBug(NO_SPACE_QUESTION, "the file already there is untouched", (await sha256(file)) === oldHash, `the export ${s.status === "Done" ? "finished before it could be stopped" : "was stopped"}`);
           t.check("and no partial was left", partialsIn(out).length === 0, partialsIn(out).join(", "));
           return;
         }

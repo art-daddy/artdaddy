@@ -11,7 +11,8 @@
 //   `<lab>/locks/real-app.lock` and removes it at the end. If the caller already holds it, set
 //   ARTDADDY_QA_LOCK_HELD=1; ARTDADDY_QA_LOCK_WAIT_MIN=<minutes> waits for another run, looking every 20 s.
 //   ARTDADDY_LAB_READY=<script> names a readiness check (a PowerShell script whose output says READY or NOT READY,
-//   for power and free memory): the run does not start, nor start its next scenario, while it says NOT READY.
+//   for power and free memory): the run does not start, nor start its next scenario, while it says NOT READY
+//   (before a scenario it waits up to ARTDADDY_QA_READY_WAIT_MIN minutes, default 10, then leaves it not run).
 // - The heavy scenarios time exports, so they first wait for a quiet PC (no other test run, build or encoder, and
 //   the PC under ARTDADDY_QA_QUIET_PERCENT percent busy, default 25) for up to ARTDADDY_QA_QUIET_WAIT_MIN minutes
 //   (default 30), and are not run if it never gets quiet; ARTDADDY_QA_ALLOW_BUSY=1 times them anyway, marked busy.
@@ -21,7 +22,8 @@
 //   web view keeps its storage in the run folder, and the page talks to a stand-in server (backend.mjs) that
 //   answers the compatibility check and refuses everything else. No request can reach a model or a vendor.
 //   The projects folder cannot be isolated (the app has no working override for it), so projects are named
-//   `sweep_qa-export …` and removed at the end through the app's own project removal.
+//   `sweep_qa-export …` and removed at the end through the app's own project removal. What earlier runs left in
+//   this identity's native export journal is set aside into the run folder first, so no earlier export comes back.
 // - Save As is the native Windows dialog, answered by nativeDialog.ps1 (UI Automation and window messages:
 //   no mouse, no keyboard, no focus change). The app has no test hook for it.
 //
@@ -34,9 +36,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
-import { App, buildShell, IDENTIFIER, LINK_SCHEME, otherAppsRunning, root, signInLinkTarget, startPage } from "./app.mjs";
+import { App, buildShell, clearJournal, IDENTIFIER, LINK_SCHEME, otherAppsRunning, root, signInLinkTarget, startPage } from "./app.mjs";
 import { startBackend } from "./backend.mjs";
-import { newProject, openMenu, removeProjects, sleep } from "./journey.mjs";
+import { nativeDialog, newProject, openMenu, removeProjects, sleep } from "./journey.mjs";
 import { cpuSampler, describeLoad, machineLoad, otherHeavyWork } from "./machine.mjs";
 import { busyClip, colourClip } from "./media.mjs";
 
@@ -95,14 +97,15 @@ async function main() {
   let lock = null;
   // A shared PC's lock (ARTDADDY_LAB_DIR); without one (a CI runner) there is no other run to share with. Another
   // run is waited for, looking every 20 s, for up to ARTDADDY_QA_LOCK_WAIT_MIN minutes (default 0).
-  if (LOCK && process.env.ARTDADDY_QA_LOCK_HELD !== "1" && existsSync(path.dirname(LOCK))) {
+  const takeLock = async () => {
+    if (!LOCK || process.env.ARTDADDY_QA_LOCK_HELD === "1" || !existsSync(path.dirname(LOCK))) return;
     const give = Date.now() + Number(process.env.ARTDADDY_QA_LOCK_WAIT_MIN || 0) * 60_000;
     for (;;) {
       try {
         lock = openSync(LOCK, "wx");
         writeSync(lock, `e2e/desktop/export run ${stamp} (pid ${process.pid})\n`);
         closeSync(lock);
-        break;
+        return;
       } catch {
         let holder = "";
         try {
@@ -115,13 +118,20 @@ async function main() {
         await sleep(20_000);
       }
     }
-  }
-  // Checked once the lock is ours, not before the wait: the PC may have gone onto battery meanwhile.
-  const verdict = labVerdict();
-  report.labReady = verdict?.line ?? "no readiness check configured";
-  if (verdict && !verdict.ready) {
+  };
+  // Checked once the lock is ours, not before the wait: the PC may have gone onto battery meanwhile. NOT READY lets
+  // the lock go and tries again every 30 s for up to ARTDADDY_QA_READY_WAIT_MIN minutes (default 10).
+  const readyBy = Date.now() + Number(process.env.ARTDADDY_QA_READY_WAIT_MIN ?? 10) * 60_000;
+  for (;;) {
+    await takeLock();
+    const verdict = labVerdict();
+    report.labReady = verdict?.line ?? "no readiness check configured";
+    if (!verdict || verdict.ready) break;
     if (lock !== null) rmSync(LOCK, { force: true });
-    throw new Error(`the PC is not ready: ${verdict.line}`);
+    lock = null;
+    if (Date.now() >= readyBy) throw new Error(`the PC is not ready: ${verdict.line}`);
+    console.log(`the PC is not ready (${verdict.line}); trying again in 30 s`);
+    await sleep(30_000);
   }
 
   const linkBefore = signInLinkTarget();
@@ -149,6 +159,8 @@ async function main() {
   const app = new App(runDir);
   const scenarios = await loadScenarios();
   const created = [];
+  // What earlier runs left in this identity's export journal, set aside (and kept in the run folder).
+  report.journalSetAside = clearJournal(path.join(runDir, "journal-before"));
   try {
     const boot = await app.launch("first launch");
     timings.push({ scenario: "start", name: "app.launch.to-menu", ms: boot.ms, cold: true });
@@ -183,7 +195,15 @@ async function main() {
       const t = context(s, app, fixtures, created);
       const t0 = performance.now();
       console.log(`\n▶ ${s.name}`);
-      const now = labVerdict();
+      // A moment of NOT READY (the sign-in broker over its cap until the guard resets it) passes within minutes:
+      // wait for READY for up to ARTDADDY_QA_READY_WAIT_MIN minutes (default 10) before giving the scenario up.
+      let now = labVerdict();
+      const readyBy = Date.now() + Number(process.env.ARTDADDY_QA_READY_WAIT_MIN ?? 10) * 60_000;
+      while (now && !now.ready && Date.now() < readyBy) {
+        console.log(`  waiting for the PC to be ready: ${now.line}`);
+        await sleep(30_000);
+        now = labVerdict();
+      }
       if (now && !now.ready) {
         t.notRun(`the PC is not ready: ${now.line}`);
         t.result.status = "not run";
@@ -206,6 +226,12 @@ async function main() {
           console.log(`  threw: ${String(e?.message ?? e).split("\n")[0]}`);
           await t.shot("error").catch(() => {});
         }
+      }
+      // A native dialog that appeared after its step stopped waiting would hold the app for every later scenario.
+      if (app.running()) {
+        await sleep(2000);
+        const swept = nativeDialog(app.pid, ["-Kind", "sweep"]);
+        if (swept.closed?.length) t.note(`closed a dialog left open: ${swept.closed.join(", ")}`);
       }
       t.result.ms = Math.round(performance.now() - t0);
       t.result.status = t.result.notRun

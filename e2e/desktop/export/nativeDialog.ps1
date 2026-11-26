@@ -15,11 +15,13 @@
 #   -Kind message  wait for a message box titled -Title, report its text and press -Button (OK, Cancel,
 #                  Yes or No).
 #   -Kind close    ask the main window to close, as its X button does.
+#   -Kind sweep    cancel every dialog of the app that is still open (one that appeared after the step that waited
+#                  for it gave up: left open, it would hold the app for every later step), and report their titles.
 #
 # Prints one JSON line. Exit code 0 when the action was taken, 1 when it was not.
 param(
   [Parameter(Mandatory = $true)][int]$ProcessId,
-  [Parameter(Mandatory = $true)][ValidateSet('save', 'message', 'close')][string]$Kind,
+  [Parameter(Mandatory = $true)][ValidateSet('save', 'message', 'close', 'sweep')][string]$Kind,
   [string]$Title = '',
   [string]$Path = '',
   [string]$Button = '',
@@ -107,6 +109,26 @@ if ($Kind -eq 'close') {
     }
   }
   Out-Result @{ ok = $false; reason = 'no main window' } 1
+}
+
+if ($Kind -eq 'sweep') {
+  $closed = @()
+  foreach ($d in Get-Dialogs) {
+    try {
+      $name = $d.Current.Name
+      if (-not $name) { continue }
+      # A dialog with a Cancel button (a file dialog, a plain message box) is cancelled by its id; a task dialog
+      # draws its buttons itself and is told which one to press.
+      $cancel = $null
+      foreach ($b in $d.FindAll($Scope::Children, (Prop $AE::ClassNameProperty 'Button'))) {
+        if ($b.Current.Name.Replace('&', '').Trim() -ieq 'Cancel') { $cancel = $b }
+      }
+      if ($cancel) { Press-Id $d ([int]$cancel.Current.AutomationId) }
+      else { [void][QaExport.Win32]::PostMessage((Hwnd $d), $TDM_CLICK_BUTTON, [IntPtr]$IDS['cancel'], [IntPtr]::Zero) }
+      $closed += $name
+    } catch {}
+  }
+  Out-Result @{ ok = $true; closed = $closed } 0
 }
 
 if ($Kind -eq 'message') {
