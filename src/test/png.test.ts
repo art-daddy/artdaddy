@@ -120,11 +120,11 @@ describe("png", () => {
     expect(at(still, 200, 150)).toEqual([240, 150, 40]);
     expect(at(still, 30, 280)).toEqual([40, 150, 160]);
     expect(at(still, 370, 20)).toEqual([90, 40, 120]);
-    // logo.png: 160x160 RGBA; alpha is dropped and the colour kept.
-    const logo = decodePng(readFileSync(path.join(PARITY, "logo.png")));
-    expect([logo.w, logo.h]).toEqual([160, 160]);
-    expect(at(logo, 80, 80)).toEqual([250, 220, 40]);
-    expect(at(logo, 80, 20)).toEqual([250, 250, 250]);
+    // banner.png: 640x120 RGBA; alpha is dropped and the colour kept.
+    const banner = decodePng(readFileSync(path.join(PARITY, "banner.png")));
+    expect([banner.w, banner.h]).toEqual([640, 120]);
+    expect(at(banner, 5, 60)).toEqual([250, 220, 40]);
+    expect(at(banner, 320, 60)).toEqual([250, 250, 250]);
   });
 
   it("writes a file other readers take: an RGB PNG with its chunks named and checked", () => {
@@ -166,8 +166,8 @@ describe("png", () => {
   });
 
   it("drops alpha from an RGBA file: three bytes a pixel", () => {
-    const logo = decodePng(readFileSync(path.join(PARITY, "logo.png")));
-    expect(logo.rgb.length).toBe(160 * 160 * 3);
+    const banner = decodePng(readFileSync(path.join(PARITY, "banner.png")));
+    expect(banner.rgb.length).toBe(640 * 120 * 3);
   });
 
   it("refuses bytes that do not make the picture it is told, and a damaged file", () => {

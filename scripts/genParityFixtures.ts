@@ -25,7 +25,7 @@ function run(args: string[]): void {
 }
 
 /** A geq colour for the region test: `when ? yes : no`, as nested if()s. */
-const pick = (rules: Array<[string, number]>, otherwise: number): string =>
+const pick = (rules: Array<[string, number | string]>, otherwise: number | string): string =>
   rules.reduceRight((rest, [when, value]) => `if(${when},${value},${rest})`, String(otherwise));
 
 /** 320x180 H.264 the way phones write it (High profile, BT.709 tagged, B-frames), 60 frames. */
@@ -111,24 +111,19 @@ mkdirSync(path.join(outDir, "ref"), { recursive: true });
   ]);
 }
 
-// logo: 160x160 with transparency, a white ring around a half-transparent yellow disc.
+// banner: a 640x120 lower third, a half-transparent white bar (its top and bottom edges soft over
+// 3 px) with a solid yellow tab at its left end. Half transparency over a third of the frame is what
+// shows how each painter composites such a pixel.
 {
-  const r = "hypot(X-80,Y-80)";
-  const ring = `between(${r},50,72)`;
-  const inner = `lt(${r},50)`;
+  const tab = "lt(X,16)";
+  const bar = "0.5*clip(Y/3,0,1)*clip((119-Y)/3,0,1)";
   run([
-    ...["-f", "lavfi", "-i", "color=c=black@0:s=160x160:d=1,format=gbrap"],
+    ...["-f", "lavfi", "-i", "color=c=black@0:s=640x120:d=1,format=gbrap"],
     ...[
       "-vf",
-      `geq=r='${pick([[ring, 250]], 250)}':g='${pick([[ring, 250]], 220)}':b='${pick([[ring, 250]], 40)}':a='${pick(
-        [
-          [ring, 255],
-          [inner, 128],
-        ],
-        0,
-      )}'`,
+      `geq=r='250':g='${pick([[tab, 220]], 250)}':b='${pick([[tab, 40]], 250)}':a='255*${pick([[tab, 1]], bar)}'`,
     ],
-    ...["-frames:v", "1", "-pix_fmt", "rgba", path.join(outDir, PARITY_MEDIA.logo)],
+    ...["-frames:v", "1", "-pix_fmt", "rgba", path.join(outDir, PARITY_MEDIA.banner)],
   ]);
 }
 

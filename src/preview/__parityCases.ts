@@ -30,8 +30,9 @@ export const PARITY_MEDIA = {
   clipB: "clip_b.mp4",
   /** 400x300 (4:3) PNG: a diagonal split, an orange disc and a light border. */
   still: "still.png",
-  /** 160x160 PNG with transparency: a white ring around a half-transparent yellow disc. */
-  logo: "logo.png",
+  /** 640x120 PNG with transparency, a lower-third banner: a half-transparent white bar with a solid
+   *  yellow tab at its left end. */
+  banner: "banner.png",
 } as const;
 export type ParityMedia = keyof typeof PARITY_MEDIA;
 
@@ -268,13 +269,16 @@ export const KNOWN_MISMATCH_CASES: readonly ParityCase[] = [
   ),
   {
     name: "alpha-png",
-    what: "a logo whose PNG has half-transparent pixels",
+    what: "a lower-third banner whose PNG is half transparent, at its own size",
     frames: [15],
     known: `${FOUND}: the preview darkens a half-transparent pixel twice (its bitmap is premultiplied, the shader reads it as straight alpha)`,
     timeline: (ref) =>
       timeline(
         track("v1", "video", 0, [video("a", "clipA", ref, [0, 30])]),
-        track("v2", "video", 1, [image("l", "logo", ref, [0, 30], box(0.5, 0.5, 0.3, 0.55))]),
+        // 640x120 across the bottom third: drawn 1:1, so no scaler stands between the two painters.
+        track("v2", "video", 1, [
+          image("l", "banner", ref, [0, 30], box(0.5, 300 / 360, 1, 120 / 360)),
+        ]),
       ),
   },
   {
