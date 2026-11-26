@@ -37,6 +37,11 @@ export default {
     // it to ffmpeg's picture through committed fixtures.
     "src/preview/orientation.ts",
     "src/contract/clamp.ts",
+    // Whether an installed app is offered, downloads and installs an update, and the gate that stops a build the
+    // service no longer supports. Both are unit-covered, so a survivor here is a real gap. (The update feed itself
+    // is read in Rust: src-tauri/tests/update_feed.rs.)
+    "src/update/updater.ts",
+    "src/update/compatibility.ts",
     // NOT src/eval/studio.ts: the stub surface is exercised by the LIVE eval lane,
     // not by vitest, so its mutants are ~all "no coverage" and only dilute the score.
     "!src/**/*.test.ts",
