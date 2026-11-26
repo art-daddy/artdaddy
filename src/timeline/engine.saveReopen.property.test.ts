@@ -46,8 +46,31 @@ const keyframes = fc
 const animatable = fc.oneof(num(fc.double({ min: 0, max: 1, noNaN: true })), keyframes);
 const mediaRef = fc.stringMatching(/^media_[0-9a-f]{12}$/);
 
+type Animated = number | Array<{ t: number; v: number; ease: string }>;
+interface SlotBase {
+  gap: number;
+  dur: number;
+  extra: Record<string, unknown>;
+  disabled: boolean | undefined;
+}
+interface TextSlot extends SlotBase {
+  content: Array<{ text: string }>;
+  style: { preset: string; size: number } | undefined;
+}
+interface MediaSlot extends SlotBase {
+  media: string;
+  still: boolean;
+  window: { from: number; speed: number } | undefined;
+  opacity: Animated | undefined;
+  volume: Animated | undefined;
+  fade: { in: number; out: number } | undefined;
+  transform: { position: { x: number; y: number }; scale: Animated } | undefined;
+  crossfade: number | undefined;
+  effects: Array<{ type: string; params: Record<string, number> }> | undefined;
+}
+
 /** The clip-shaped part of one slot on a track: its own fields, apart from where it sits. */
-function slot(kind: Track["kind"]) {
+function slot(kind: Track["kind"]): fc.Arbitrary<TextSlot | MediaSlot> {
   const common = {
     gap: fc.integer({ min: 0, max: 600 }),
     dur: fc.integer({ min: 1, max: 900 }),
@@ -55,7 +78,7 @@ function slot(kind: Track["kind"]) {
     disabled: fc.option(fc.boolean(), { nil: undefined }),
   };
   if (kind === "text")
-    return fc.record({
+    return fc.record<TextSlot>({
       ...common,
       content: fc.array(fc.record({ text }), { minLength: 1, maxLength: 3 }),
       style: fc.option(
@@ -66,7 +89,7 @@ function slot(kind: Track["kind"]) {
         { nil: undefined },
       ),
     });
-  return fc.record({
+  return fc.record<MediaSlot>({
     ...common,
     media: mediaRef,
     still: kind === "video" ? fc.boolean() : fc.constant(false),
