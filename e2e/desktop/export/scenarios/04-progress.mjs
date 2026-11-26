@@ -48,6 +48,13 @@ export const scenarios = [
       const total = performance.now() - savedAt;
       t.time("export.progress.save-to-done", total, { timelineSeconds: seconds, resolution: "1920x1080" });
       t.check("the export finished", end.status === "Done", end.all);
+      // What the dialog said, each time it changed stage (the percentages and pace within a stage are left out).
+      const stages = [];
+      for (const s of samples) {
+        const stage = `${s.status.replace(/\s*·?\s*\d+%/, "")} | ${s.pace.replace(/[\d.]+×|\d+\s*(h|min|s)\b/g, "#")}`;
+        if (stages.at(-1)?.stage !== stage) stages.push({ at: Math.round(s.at), stage, status: s.status, pace: s.pace });
+      }
+      t.note(`what the dialog said, by stage: ${JSON.stringify(stages.map((x) => `${(x.at / 1000).toFixed(1)} s: ${x.status}${x.pace ? ` (${x.pace})` : ""}`))}`);
 
       const firstPercent = samples.find((s) => /\d+%/.test(s.status));
       const firstLeft = samples.find((s) => secondsSaid(s.pace) !== null);
@@ -55,11 +62,13 @@ export const scenarios = [
       if (firstPercent) t.time("export.progress.save-to-first-percent", firstPercent.at);
       if (firstLeft) t.time("export.progress.save-to-first-time-left", firstLeft.at, { said: firstLeft.pace });
       t.check("a percentage appears while it renders", !!firstPercent, samples.slice(0, 8).map((s) => s.status).join(" | "));
-      const percents = samples.map((s) => Number(/(\d+)%/.exec(s.status)?.[1] ?? NaN)).filter((n) => Number.isFinite(n));
+      // Within the render (each later stage may count its own way): the percentage only goes up.
+      const rendering = samples.filter((s) => /^Rendering/.test(s.status));
+      const percents = rendering.map((s) => Number(/(\d+)%/.exec(s.status)?.[1] ?? NaN)).filter((n) => Number.isFinite(n));
       const middle = [...new Set(percents.filter((n) => n > 0 && n < 100))];
       t.check("it moves through percentages in between (not 0 then 100)", middle.length >= 3, middle.join(","));
       const backwards = percents.findIndex((n, i) => i > 0 && n < percents[i - 1]);
-      t.check("the percentage never goes backwards", backwards === -1, backwards === -1 ? "" : `${percents[backwards - 1]} then ${percents[backwards]}`);
+      t.check("while it renders, the percentage never goes backwards", backwards === -1, backwards === -1 ? "" : `${percents[backwards - 1]} then ${percents[backwards]}`);
       t.check("the speed is shown while it renders (as a multiple of the video's length)", samples.some((s) => /\d+(\.\d)?×/.test(s.pace)), samples.map((s) => s.pace).filter(Boolean).slice(0, 5).join(" | "));
       t.check("a time left is shown before it ends", !!firstLeft || !!firstFinishing, samples.map((s) => s.pace).filter(Boolean).slice(-6).join(" | "));
       if (firstLeft) {
@@ -70,8 +79,9 @@ export const scenarios = [
         t.note(`first time left: "${firstLeft.pace}" at ${(firstLeft.at / 1000).toFixed(1)} s; it really took ${actual.toFixed(1)} s more`);
         t.check("the first time left it showed was true (within half to twice a figure; under a minute meant under a minute)", held, `${firstLeft.pace} vs ${actual.toFixed(1)} s`);
       }
-      const waits = samples.filter((s) => /Saving|Checking|Finishing/i.test(`${s.status} ${s.pace}`));
-      if (waits.length) t.time("export.progress.saving-and-checking", waits[waits.length - 1].at - waits[0].at);
+      // After the render: from its last percentage to Done (saving the file and checking it).
+      const lastRendering = rendering.at(-1);
+      if (lastRendering) t.time("export.progress.render-end-to-done", total - lastRendering.at, { lastSaid: lastRendering.status });
       const info = probe(file);
       t.check("the file is the whole timeline plus the end card", near(info.duration, seconds + endCardSeconds(1920, 1080), 0.2), `${info.duration} s`);
       await pressInDialog(t.d, "Close");

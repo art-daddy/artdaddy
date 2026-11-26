@@ -22,13 +22,17 @@ Run it from this page, step by step, not from memory. About 10 minutes.
 ## Steps (each with what must be true after it)
 
 1. `cua.listWindows()` alone, as the tool asks, and read its documentation.
-   - True: a window titled "ArtDaddy" whose process is the one `byhand-hold` printed.
-2. Bind that window only (by its process id, never by title alone).
+   - True: a window titled "ArtDaddy" whose process is the one `byhand-hold` printed. The tool names the app
+     `com.artdaddy.app` for a dev build too, the same as an installed app, so match the window id to the process:
+     the id is the window handle; list the process's windows (EnumWindows by process id) from a shell first.
+2. Bind that window only, by its window id (never by app name or title alone).
    - True: the bound window's process path is under `cargo-target\debug\artdaddy.exe`, not
-     `AppData\Local\artdaddy\artdaddy.exe` (an installed app).
-3. Click File, then "Export Video (.mp4)…".
+     `AppData\Local\artdaddy\artdaddy.exe` (an installed app). Check each Windows dialog the same way.
+3. Press File, then "Export Video (.mp4)…". In the page, background clicks did not reach the buttons on
+   26 Nov; `pressKey("Return", {elementIndex})` on the button did (the tool takes a brief foreground lease).
    - True: the Export dialog shows "Resolution: Same as project (1920 x 1080)", "Advanced settings",
-     Cancel and Export, nothing cut off. Time from the click to the dialog.
+     Cancel and Export, nothing cut off (screenshots of this window could not be captured on 26 Nov: judge from
+     the accessibility text and say so). Time from the press to the dialog.
 4. Click Export.
    - True: a Windows "Export video" dialog opens; its File name box reads `sweep_qa-export by hand`
      (the project's title, not its folder name); "Save as type" reads "MP4 video (*.mp4)".
@@ -39,14 +43,15 @@ Run it from this page, step by step, not from memory. About 10 minutes.
 6. Click Export again. In the File name box, type the full path of `reports/qa/export/byhand/by hand.mp4`.
 7. Press Enter.
    - True: Windows asks "by hand.mp4 already exists. Do you want to replace it?" with Yes and No.
-8. Click No.
-   - True: the question closes and the Save As dialog stays open with the name still typed.
-9. Press Enter, then click Yes.
+8. Click No. (The lane answers Yes through its own script; a by-hand session never replaces a file.)
+   - True: the question closes and the Save As dialog stays open with the name still typed; the old
+     `by hand.mp4` is untouched.
+9. Change the name to the full path of `reports/qa/export/byhand/by hand new.mp4` and press Enter.
    - True: within seconds the Export dialog shows "Rendering and encoding · N%", then "Done" and
-     "Saved to …\reports\qa\export\byhand\by hand.mp4" in full (not cut off). Time from Yes to Done.
-10. On disk (a shell, not the screen): `by hand.mp4` is a new file (not the old one's size), and `probe()`
-    from `e2e/desktop/export/media.mjs` says h264 and aac, about 8.03 s (6 s plus the end card);
-    `colourAt()` at 1.5 s is red and at 4.5 s is blue. No `.by hand.mp4.*.partial` beside it.
+     "Saved to …\reports\qa\export\byhand\by hand new.mp4" in full (not cut off). Time from Enter to Done.
+10. On disk (a shell, not the screen): `by hand new.mp4` exists, and `probe()` from
+    `e2e/desktop/export/media.mjs` says h264 and aac, about 8.03 s (6 s plus the end card); `colourAt()` at
+    1.5 s is red and at 4.5 s is blue. No `.by hand new.mp4.*.partial` beside it; `by hand.mp4` is unchanged.
 11. Click Close in the Export dialog.
 
 ## Clean-up

@@ -320,8 +320,10 @@ function context(s, app, fixtures, created) {
       console.log(`  not run: ${reason}`);
     },
     async project(label) {
+      const t0 = performance.now();
       const p = await newProject(app.d, label);
       created.push(p.id);
+      t.time("project.new.to-editor", performance.now() - t0);
       return p;
     },
     shot(name) {

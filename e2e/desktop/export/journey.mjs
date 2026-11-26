@@ -48,13 +48,14 @@ export async function newProject(d, label) {
   await d.click(nameBox);
   await d.type(`sweep_qa-export ${label}`);
   await d.clickText("Create", { sel: "button" });
+  // Two minutes: on a busy PC creating the project has taken longer than 30 s.
   const id = await d.waitFor(
     "location.pathname.startsWith('/p/') && decodeURIComponent(location.pathname.slice(3))",
-    30_000,
+    120_000,
   );
   // The editor, not the start screen behind it: the start screen has its own file input, and a file handed
   // to it in the gap between the two is lost.
-  await d.waitFor("!!document.querySelector('[data-track-id]')", 30_000);
+  await d.waitFor("!!document.querySelector('[data-track-id]')", 60_000);
   await sleep(800);
   return { id, dir: projectDir(id) };
 }

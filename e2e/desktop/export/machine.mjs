@@ -90,7 +90,7 @@ export function otherHeavyWork(appPid) {
     if (mine.has(pid) || pid === process.pid) continue;
     const what =
       /^(cargo|rustc|link|cl|msbuild)\.exe$/i.test(p.name) ? p.name
-      : /^ffmpeg/i.test(p.name) ? `${p.name} (not this run's app)`
+      : /ffmpeg/i.test(p.name) ? `${p.name} (not this run's app)`
       : /^node\.exe$/i.test(p.name) && /vitest|stryker|playwright|wdio|vite(\.js)? build|tsc(\.js)?\b|\bsmoke\b/i.test(p.cmd) ? `node ${(/vitest|stryker|playwright|wdio|vite(\.js)? build|tsc|smoke/i.exec(p.cmd) ?? [""])[0]}`
       : null;
     if (what) heavy.push(what);
@@ -132,7 +132,7 @@ export function cpuSampler(appPid, everyMs = 5000) {
           if (r.pid === 0 || /^(System Idle Process|Idle)$/i.test(r.name)) continue;
           if (r.pid === appPid) sums.host += r.seconds;
           else if (tree.has(r.pid)) {
-            if (/^ffmpeg/i.test(r.name)) sums.encoders += r.seconds;
+            if (/ffmpeg/i.test(r.name)) sums.encoders += r.seconds;
             else if (/^msedgewebview2/i.test(r.name)) sums.webview += r.seconds;
             else sums.appOther += r.seconds;
           } else {
