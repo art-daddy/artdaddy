@@ -24,11 +24,23 @@ export function releaseToUpdateFrom(repository, target) {
     if (!isVersion(given)) throw new Error(`FROM_VERSION must be x.y.z, not "${given}"`);
     return given;
   }
-  const listed = spawnSync("gh", ["api", `repos/${repository}/releases?per_page=100`], {
-    encoding: "utf8",
-  });
-  if (listed.status !== 0)
-    throw new Error(`could not list the releases of ${repository}: ${listed.stderr}`);
+  // Only the fields the rule reads: a full release (its notes, every asset) is about 13 KB, so a page of them would
+  // outgrow spawnSync's default 1 MB buffer at about 80 releases.
+  const listed = spawnSync(
+    "gh",
+    [
+      "api",
+      `repos/${repository}/releases?per_page=100`,
+      "--jq",
+      "[.[] | {tag_name, draft, prerelease}]",
+    ],
+    { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (listed.error || listed.status !== 0) {
+    throw new Error(
+      `could not list the releases of ${repository}: ${listed.error?.message ?? listed.stderr}`,
+    );
+  }
   const from = previousRelease(JSON.parse(listed.stdout), target);
   if (!from) throw new Error(`no shipped release of ${repository} is older than ${target}`);
   return from;
