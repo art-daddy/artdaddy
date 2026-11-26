@@ -432,9 +432,8 @@ describe("a damaged project file", () => {
     },
   );
 
-  // The three documents below are set aside (or ignored) on a failed read and the project opens with
-  // that document empty. The bytes survive; the person is not told (projects hub, Known issues:
-  // "moved aside on first read and the app carries on with empty state; nothing tells the person").
+  // The documents below are set aside (or ignored) on a failed read and the project opens with that
+  // document empty. The bytes survive; nothing tells the person.
   const cut = (doc: Doc) => ORIGINAL[doc].slice(0, Math.floor(ORIGINAL[doc].length / 2));
 
   describe("project.json cut short", () => {

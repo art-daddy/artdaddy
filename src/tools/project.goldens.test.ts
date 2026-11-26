@@ -2,8 +2,8 @@
 //
 // Each folder under __fixtures__/goldenProjects/<release>/ was WRITTEN BY THAT RELEASE'S OWN CODE (its
 // README says how): the app-data folder as the app left it on a Windows PC, two projects in it. The
-// releases kept are the first of each format the app has written (generated for every release the
-// repository has the source of; the rest wrote one of these, listed in each golden.json under
+// releases kept are the first of each format the app has written (generated for every release whose
+// source was available to build; the rest wrote one of these, listed in each golden.json under
 // sameFormatAs), plus the release people run today.
 //
 // The test does what this build does after an update, through the same calls the window makes: the

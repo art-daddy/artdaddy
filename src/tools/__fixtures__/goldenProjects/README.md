@@ -35,9 +35,10 @@ The generator calls only the old release's own code: its `dataRoot.ts` (which na
 
 ## Which releases
 
-The generator was run on all 43 releases this repository has the source of. They wrote six formats; the
-folder kept for each is the first release that wrote it, plus the release in use today. `sameFormatAs`
-in each `golden.json` lists the releases whose output had the same files, fields and track layout.
+The generator was run on 43 releases, 0.2.0 to 0.29.1: every one whose source was available to build.
+They wrote six formats; the folder kept for each is the first release that wrote it, plus the release in
+use today. `sameFormatAs` in each `golden.json` lists the releases whose output had the same files,
+fields and track layout.
 
 | Folder | Commit | Same format | What changed |
 | --- | --- | --- | --- |
@@ -49,6 +50,6 @@ in each `golden.json` lists the releases whose output had the same files, fields
 | 0.23.0 | 830a3b01 | 0.23.0 to 0.29.1 | a new project can leave its canvas to the first video (`canvas_auto`) |
 | 0.29.1 | 3911d9b5 | 0.29.1 | the release in use today |
 
-Not covered: releases 0.9.0 to 0.12.0, whose source is not in this repository (their formats lie between
-0.7.0's and 0.12.1's, both kept); development builds from before 21 July 2026, which kept a project's
-files in a `.akaru` folder that no release reads; and chats, which the generator does not write.
+Not covered: releases 0.9.0 to 0.12.0, whose source was not available to build (their formats lie
+between 0.7.0's and 0.12.1's, both kept); development builds from before 21 July 2026, which kept a
+project's files in a `.akaru` folder that no release reads; and chats, which the generator does not write.
