@@ -489,8 +489,14 @@ jobs:
       - run: npm run build:sidecar
       - run: npm run build:mcpb
       - run: npm run bundle:browser
-      - name: build the dev app (debug; it loads its page from the dev server)
-        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+      # Under the lanes' own identifier and sign-in link scheme, never the installed app's (e2e/desktop/timing/identity.mjs;
+      # qa skill rule 12). The same build the lab PC's nightly run times.
+      - name: build the dev app (debug; it loads its page from the dev server) under its own identity
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = node e2e/desktop/timing/identity.mjs
+          "TAURI_CONFIG=$env:TAURI_CONFIG"
+          cargo build --locked --manifest-path src-tauri/Cargo.toml
       - name: tauri-driver
         run: cargo install tauri-driver --locked
       - name: an Edge WebDriver matching the runner's WebView2
@@ -516,9 +522,9 @@ jobs:
           "WebView2 arguments for $($exe): $browserArgs"
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments" /v $exe /t REG_SZ /d "$browserArgs" /f
           "ARTDADDY_WEBVIEW2_DEBUG_PORT=9223" >> $env:GITHUB_ENV
-      # The page (vite on 5173) and the stand-in service (8790) start in the step that uses them. Started in a step of
-      # their own, they were not running when the app loaded its page ("localhost refused to connect"; the job's orphan
-      # cleanup found neither). vite listens on both loopbacks (::, dual-stack), whichever one localhost becomes here.
+      # The page (vite, where the identity's devUrl points) and the stand-in service (8790) start in the step that uses
+      # them. Started in a step of their own, they were not running when the app loaded its page ("localhost refused to
+      # connect"; the job's orphan cleanup found neither).
       - name: the real app (npm run e2e:desktop, then the timed lanes)
         shell: pwsh
         env:
@@ -526,20 +532,20 @@ jobs:
           VITE_E2E_AUTH_BYPASS: "1"
           VITE_SENTRY_DSN: ""
         run: |
+          $pagePort = node e2e/desktop/timing/identity.mjs --port
           $service = Start-Process -FilePath node -PassThru -ArgumentList 'scripts/qa/standInServer.mjs', '--port', '8790', '--log', "$env:RUNNER_TEMP\service.log" `
             -RedirectStandardOutput "$env:RUNNER_TEMP\service.out.log" -RedirectStandardError "$env:RUNNER_TEMP\service.err.log"
-          $vite = Start-Process -FilePath node -PassThru -ArgumentList 'node_modules/vite/bin/vite.js', '--host', '::', '--port', '5173', '--strictPort' `
+          $vite = Start-Process -FilePath node -PassThru -ArgumentList 'node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', $pagePort, '--strictPort' `
             -RedirectStandardOutput "$env:RUNNER_TEMP\vite.log" -RedirectStandardError "$env:RUNNER_TEMP\vite.err.log"
           $served = $false
           for ($i = 0; $i -lt 120 -and -not $served; $i++) {
-            try { $served = (Invoke-WebRequest http://127.0.0.1:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch { Start-Sleep -Seconds 1 }
+            try { $served = (Invoke-WebRequest "http://127.0.0.1:$pagePort/" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch { Start-Sleep -Seconds 1 }
           }
-          if (-not $served) { throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes' }
-          foreach ($url in 'http://127.0.0.1:5173/', 'http://[::1]:5173/', 'http://127.0.0.1:8790/') {
+          if (-not $served) { throw "vite did not serve http://127.0.0.1:$pagePort within 2 minutes" }
+          foreach ($url in "http://127.0.0.1:$pagePort/", 'http://127.0.0.1:8790/') {
             try { $code = (Invoke-WebRequest $url -UseBasicParsing -TimeoutSec 5 -SkipHttpErrorCheck).StatusCode } catch { $code = $_.Exception.Message }
             "$url -> $code"
           }
-          "localhost is $([System.Net.Dns]::GetHostAddresses('localhost') -join ', ')"
           npm run e2e:desktop
           $wdio = $LASTEXITCODE
           node scripts/qa/timingBudgets.mjs run --lanes desktop --runs 1
