@@ -263,3 +263,53 @@ jobs:
         # "A public key has been found, but no private key" - the job was red on every run.
         shell: bash
         run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+  # The tool contract, read-only. `codegen --check` fails when the authored catalog
+  # (src/contract/catalog.json), its compiled identity (identity.json) or the frozen 0.21.5
+  # snapshot disagree; it used to run only in the local pre-push hook. The server's generated
+  # copies live in the server's private repository and are compared by that repository's CI,
+  # against the client commit it pins: there is no server checkout here, and the job says so.
+  contract:
+    name: tool contract (codegen --check)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      ARTDADDY_SERVER_DIR: ${{ github.workspace }}/../no-server-checkout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: The catalog, its identity and the frozen 0.21.5 snapshot agree (read-only)
+        run: |
+          node scripts/codegen.mjs --check
+          git diff --exit-code # the check never writes
+          echo "::notice title=Tool contract::client half checked. The server's generated copies are compared by the server's CI (no server checkout in this repository's CI)."
+      # The canary: change one tool description in a copy, without running codegen. The check must
+      # turn red on it, or a green check above proves nothing.
+      - name: A changed tool description without codegen turns the check red (canary)
+        run: |
+          canary="$RUNNER_TEMP/contract-canary"
+          mkdir -p "$canary/scripts" "$canary/src/contract/legacy"
+          cp scripts/codegen.mjs "$canary/scripts/"
+          cp src/contract/catalog.json src/contract/identity.json "$canary/src/contract/"
+          cp src/contract/legacy/0.21.5.json "$canary/src/contract/legacy/"
+          node -e '
+            const fs = require("fs");
+            const file = process.argv[1];
+            const text = fs.readFileSync(file, "utf8");
+            const marker = "\"description\": \"";
+            const at = text.indexOf(marker);
+            if (at < 0) process.exit(2);
+            fs.writeFileSync(file, text.slice(0, at + marker.length) + "Drift canary. " + text.slice(at + marker.length));
+          ' "$canary/src/contract/catalog.json"
+          if node "$canary/scripts/codegen.mjs" --check > "$canary/out.txt" 2>&1; then
+            echo "::error title=Tool contract::codegen --check passed on a catalog changed without codegen, so it detects no drift"
+            exit 1
+          fi
+          if ! grep -q "identity.json" "$canary/out.txt"; then
+            cat "$canary/out.txt"
+            echo "::error title=Tool contract::the canary failed, but not on the stale identity it should have found"
+            exit 1
+          fi
+          echo "drift caught: $(cat "$canary/out.txt")"
