@@ -14,14 +14,18 @@ const h = vi.hoisted(() => ({
   calls: [] as string[],
   /** Whether a project's document opens when the app is sent to it. */
   documentOpens: true,
-  /** Each runs once: while the tool host starts, while a project is being created, while the bridge waits for a document. */
+  /** Each runs once: as the project list is read (the request has passed the door by then), while the tool host starts,
+   *  while a project is being created, while the bridge waits for a document. */
+  whileReadingProjects: null as null | (() => void),
   whileHostStarts: null as null | (() => void),
   whileCreating: null as null | (() => void),
   whileDocumentOpens: null as null | (() => void),
   routes: [] as string[],
 }));
 
-const once = (key: "whileHostStarts" | "whileCreating" | "whileDocumentOpens") => {
+const once = (
+  key: "whileReadingProjects" | "whileHostStarts" | "whileCreating" | "whileDocumentOpens",
+) => {
   const run = h[key];
   h[key] = null;
   run?.();
@@ -32,19 +36,22 @@ vi.mock("../platform", () => ({
 }));
 vi.mock("../store/projects", () => ({
   useProjects: {
-    getState: () => ({
-      activeId: h.activeId,
-      active: h.projects.find((p) => p.id === h.activeId),
-      projects: h.projects,
-      refresh: async () => undefined,
-      create: async (...args: unknown[]) => {
-        h.created.push(args);
-        once("whileCreating");
-        const made = { id: "made_1", name: String(args[0]) };
-        h.projects = [...h.projects, made];
-        return made;
-      },
-    }),
+    getState: () => {
+      once("whileReadingProjects");
+      return {
+        activeId: h.activeId,
+        active: h.projects.find((p) => p.id === h.activeId),
+        projects: h.projects,
+        refresh: async () => undefined,
+        create: async (...args: unknown[]) => {
+          h.created.push(args);
+          once("whileCreating");
+          const made = { id: "made_1", name: String(args[0]) };
+          h.projects = [...h.projects, made];
+          return made;
+        },
+      };
+    },
   },
 }));
 vi.mock("../project/openDocuments", () => ({
@@ -106,6 +113,7 @@ beforeEach(async () => {
   h.created.length = 0;
   h.calls.length = 0;
   h.documentOpens = true;
+  h.whileReadingProjects = null;
   h.whileHostStarts = null;
   h.whileCreating = null;
   h.whileDocumentOpens = null;
@@ -178,6 +186,28 @@ describe("a gate that closes while a call is on its way in", () => {
     expect(window.location.pathname, "a build that must update opened the project").toBe("/");
   });
 
+  it("the person signs out as manage_project opens a project: refused, named as sign-in, and the app stays where it was", async () => {
+    const { useAuth } = await import("../store/auth");
+    h.whileReadingProjects = () => useAuth.setState({ status: "locked", hasStoredSession: false });
+    window.history.replaceState({}, "", "/");
+    const reply = await call("manage_project", { action: "open", id: "p2" });
+    expect(reply.isError, "a signed-out app reported a project as opened").toBe(true);
+    expect(body(reply)).toMatchObject({ opened: "p2", ready: false });
+    expect(String(body(reply).reason)).toMatch(/sign-in screen/);
+    expect(String(body(reply).remedy)).toMatch(/sign in/);
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("an update becomes required while manage_project opens a project: the reply names the update, not a slow open", async () => {
+    const { useCompatibility } = await import("../update/compatibility");
+    h.documentOpens = false;
+    h.whileDocumentOpens = () => useCompatibility.setState({ status: "required" });
+    const reply = await call("manage_project", { action: "open", id: "p2" });
+    expect(reply.isError).toBe(true);
+    expect(body(reply)).toMatchObject({ ran: false });
+    expect(String(body(reply).reason)).toMatch(/required update/);
+  });
+
   it("the door refuses a signed-out app and says that nothing ran", async () => {
     const { useAuth } = await import("../store/auth");
     useAuth.setState({ status: "locked", hasStoredSession: false });
@@ -240,6 +270,7 @@ describe("manage_project", () => {
     const reply = await pending;
     expect(reply.isError).toBe(true);
     expect(body(reply)).toMatchObject({ opened: "p2", ready: false });
+    expect(String(body(reply).reason)).toMatch(/did not finish opening/);
     expect(String(body(reply).remedy)).toMatch(/action='current'/);
   });
 

@@ -251,13 +251,14 @@ describe("a Stop from the agent", () => {
 describe("a failure below the door", () => {
   const PRIVATE = "D:\\Clients\\Acme\\HolidayCut\\project.json";
 
-  it("reaches the agent as an error, never as a success and never as silence", async () => {
+  it("reaches the agent as an error that says what went wrong, never as a success and never as silence", async () => {
     h.openFails = new Error(`could not read ${PRIVATE}: access denied`);
     send({ id: 21, method: "tools/call", params: { name: "get_timeline", arguments: {} } });
     const sent = await repliesFor(21);
     expect(sent).toHaveLength(1);
     expectWellFormed(sent[0], "a project that could not be opened");
     expect((sent[0] as { isError?: boolean }).isError).toBe(true);
+    expect(JSON.stringify(sent[0])).toContain("access denied");
     expect(h.calls, "no tool ran").toEqual([]);
   });
 
@@ -405,6 +406,7 @@ describe("the frames a tool rendered", () => {
         { path: "C:/proj/cache/gone.png" },
         frame("C:/proj/cache/kept.png", 10),
         "not an attachment",
+        null,
       ],
     };
     const reply = await answer(44);
