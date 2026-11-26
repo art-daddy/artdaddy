@@ -10,9 +10,10 @@
 #        it); without it the step says so and is skipped, so a contributor is not blocked;
 #     2. prettier --check on the changed src/**/*.{ts,tsx,css} files (CI's format check);
 #     3. the type check (tsc --noEmit, incremental), when a changed file can change what it reports;
-#     4. the tests of the changed files: vitest on a changed src/**/*.test.ts(x) and on the tests beside a
-#        changed src file (<name>.test.ts(x) and <name>.*.test.ts(x)); node --test on a changed
-#        scripts/**/*.test.mjs and on the <name>.test.mjs beside a changed scripts/**/<name>.mjs.
+#     4. the tests of the changed files (a changed test file, and <name>.test.* and <name>.*.test.* beside a
+#        changed file), each run by the runner that owns it: vitest for the files its config includes (asked
+#        with vitest list, so vitest.config.ts decides), node --test for a *.test.mjs/.cjs/.js file vitest
+#        leaves out (the scripts/qa controls); the e2e specs are left to CI.
 #   "Changed" means touched by a pushed commit that is on no remote-tracking branch yet. Like the whole gate,
 #   the checks read the working tree.
 #
@@ -111,8 +112,9 @@ EOF
 
   TYPES=0
   FORMAT=""
-  VITEST=""
-  NODE_TESTS=""
+  # The test files of the change: a changed test file, and the ones beside a changed file (<name>.test.* and
+  # <name>.*.test.*). Which runner takes each is decided below, not from its folder.
+  TESTS=""
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     case "$file" in
@@ -122,21 +124,15 @@ EOF
     case "$file" in
       src/*.ts|src/*.tsx|src/*.css) FORMAT="$FORMAT$file$NL" ;;
     esac
-    case "$file" in
-      src/*.test.ts|src/*.test.tsx) VITEST="$VITEST$file$NL" ;;
-      src/*.ts|src/*.tsx)
+    case "${file##*/}" in
+      *.test.*|*.spec.*) TESTS="$TESTS$file$NL" ;;
+      ?*.*)
         stem="${file%.*}"
-        for beside in "$stem".test.ts "$stem".test.tsx "$stem".*.test.ts "$stem".*.test.tsx; do
+        for beside in "$stem".test.* "$stem".*.test.*; do
           if [ -f "$beside" ]; then
-            VITEST="$VITEST$beside$NL"
+            TESTS="$TESTS$beside$NL"
           fi
         done
-        ;;
-      scripts/*.test.mjs) NODE_TESTS="$NODE_TESTS$file$NL" ;;
-      scripts/*.mjs)
-        if [ -f "${file%.mjs}.test.mjs" ]; then
-          NODE_TESTS="$NODE_TESTS${file%.mjs}.test.mjs$NL"
-        fi
         ;;
     esac
   done <<EOF
@@ -175,6 +171,10 @@ EOF
     echo "[pre-push] no changed file the type check reads - type check skipped."
   fi
 
+  # Each test file goes to the runner that owns it. vitest names its own, from its config's include and exclude
+  # (vitest list reads vitest.config.ts). Of the rest, a *.test.mjs, .cjs or .js file carries Node's own test-file
+  # name and runs under node --test: today the scripts/qa controls, which the config leaves out of vitest. Anything
+  # else (the Playwright and WebdriverIO specs under e2e/) has no runner in this check: CI runs it.
   set --
   SEEN="$NL"
   while IFS= read -r file; do
@@ -184,6 +184,46 @@ EOF
     esac
     SEEN="$SEEN$file$NL"
     set -- "$@" "$file"
+  done <<EOF
+$TESTS
+EOF
+  VITEST=""
+  NODE_TESTS=""
+  LEFT=""
+  if [ $# -gt 0 ]; then
+    OWNED=$(NO_COLOR=1 npx vitest list --filesOnly "$@" </dev/null)
+    if [ $? -ne 0 ]; then
+      echo "[pre-push] vitest list FAILED (vitest could not read its config) - push aborted."
+      exit 1
+    fi
+    CR=$(printf '\r')
+    OWN="$NL"
+    while IFS= read -r file; do
+      OWN="$OWN${file%"$CR"}$NL"
+    done <<EOF
+$OWNED
+EOF
+    for file in "$@"; do
+      case "$OWN" in
+        *"$NL$file$NL"*) VITEST="$VITEST$file$NL" ;;
+        *)
+          case "$file" in
+            *.test.mjs|*.test.cjs|*.test.js) NODE_TESTS="$NODE_TESTS$file$NL" ;;
+            *) LEFT="$LEFT $file" ;;
+          esac
+          ;;
+      esac
+    done
+  fi
+  if [ -n "$LEFT" ]; then
+    echo "[pre-push] no runner in this check for:$LEFT (CI runs them)."
+  fi
+
+  set --
+  while IFS= read -r file; do
+    if [ -n "$file" ]; then
+      set -- "$@" "$file"
+    fi
   done <<EOF
 $VITEST
 EOF
@@ -197,19 +237,15 @@ EOF
   fi
 
   set --
-  SEEN="$NL"
   while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    case "$SEEN" in
-      *"$NL$file$NL"*) continue ;;
-    esac
-    SEEN="$SEEN$file$NL"
-    set -- "$@" "$file"
+    if [ -n "$file" ]; then
+      set -- "$@" "$file"
+    fi
   done <<EOF
 $NODE_TESTS
 EOF
   if [ $# -gt 0 ]; then
-    echo "[pre-push] node --test on the tests of the changed scripts: $*"
+    echo "[pre-push] node --test on the Node tests of the changed files: $*"
     node --test "$@"
     if [ $? -ne 0 ]; then
       echo "[pre-push] Node tests FAILED - push aborted."
