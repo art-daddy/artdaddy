@@ -15,6 +15,7 @@ export default async function warmup(config: FullConfig): Promise<void> {
       "/preview-probe-chroma.html",
       "/preview-probe-rotation.html",
       "/preview-probe-stream.html",
+      "/preview-probe-parity.html",
     ])
       await page.goto(`${baseURL}${path}`, { waitUntil: "load", timeout: 300_000 });
   } finally {

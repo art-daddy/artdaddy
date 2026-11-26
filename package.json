@@ -17,6 +17,7 @@
     "codegen": "node scripts/codegen.mjs",
     "fontmetrics": "vite-node scripts/genFontMetrics.ts",
     "fixtures:rotation": "vite-node scripts/genRotationFixtures.ts",
+    "fixtures:parity": "vite-node scripts/genParityFixtures.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
