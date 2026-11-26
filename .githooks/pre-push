@@ -1,10 +1,229 @@
 #!/bin/sh
-# Guard: build + test the client before every push to a remote.
+# Guard: what runs before a push depends on what is pushed.
+#
+#   A push that updates main: the whole local gate, as before (about half an hour): build + vitest, the Node
+#   exporter QA controls, cargo test, the real-ffmpeg goldens and the server's tool-contract test.
+#   Any other push (a work branch, a qa/** branch, a tag): a quick check of a few minutes, because CI runs the
+#   whole suite on the pull request and the push of main runs the whole gate again here:
+#     1. the spend check on the files at the tip of each pushed branch, where the maintainers' companion
+#        checkout is in reach (ARTDADDY_WIKI_DIR, else an artdaddy-wiki folder beside this repository or above
+#        it); without it the step says so and is skipped, so a contributor is not blocked;
+#     2. prettier --check on the changed src/**/*.{ts,tsx,css} files (CI's format check);
+#     3. the type check (tsc --noEmit, incremental), when a changed file can change what it reports;
+#     4. the tests of the changed files: vitest on a changed src/**/*.test.ts(x) and on the tests beside a
+#        changed src file (<name>.test.ts(x) and <name>.*.test.ts(x)); node --test on a changed
+#        scripts/**/*.test.mjs and on the <name>.test.mjs beside a changed scripts/**/<name>.mjs.
+#   "Changed" means touched by a pushed commit that is on no remote-tracking branch yet. Like the whole gate,
+#   the checks read the working tree.
+#
+# Git writes one line per pushed ref on stdin: "<local ref> <local sha> <remote ref> <remote sha>". A remote
+# ref of refs/heads/main on any line makes it a push of main. Run by hand with nothing on stdin, the hook runs
+# the whole gate.
 #
 # Tests/builds are intentionally NOT run during normal editing. This hook is
 # the gate that guarantees they run when code actually leaves the machine.
 #
 # Deliberate bypass (rare): git push --no-verify
+
+NL='
+'
+MAIN_PUSH=0
+REFS=0
+# "<local sha> <remote sha>", one line per pushed ref that carries commits
+TIPS=""
+if [ ! -t 0 ]; then
+  while read -r local_ref local_sha remote_ref remote_sha || [ -n "$local_ref" ]; do
+    [ -n "$remote_ref" ] || continue
+    REFS=$((REFS + 1))
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+      MAIN_PUSH=1
+    fi
+    # an all-zero local sha is a deletion: nothing is pushed
+    case "$local_sha" in
+      *[!0]*) TIPS="$TIPS$local_sha $remote_sha$NL" ;;
+    esac
+  done
+fi
+
+if [ "$REFS" -gt 0 ] && [ "$MAIN_PUSH" -eq 0 ]; then
+  echo "[pre-push] client: not a push of main, so the whole gate is skipped (it runs on a push of main, and CI runs the suite on the pull request); quick check only."
+
+  SPEND_WIKI=""
+  if [ -n "$ARTDADDY_WIKI_DIR" ]; then
+    if [ -f "$ARTDADDY_WIKI_DIR/scripts/spend_guard.py" ]; then
+      SPEND_WIKI="$ARTDADDY_WIKI_DIR"
+    else
+      echo "[pre-push] ARTDADDY_WIKI_DIR is set to '$ARTDADDY_WIKI_DIR', which has no scripts/spend_guard.py."
+    fi
+  else
+    up=".."
+    for level in 1 2 3 4 5 6 7 8; do
+      if [ -f "$up/artdaddy-wiki/scripts/spend_guard.py" ]; then
+        SPEND_WIKI="$up/artdaddy-wiki"
+        break
+      fi
+      up="$up/.."
+    done
+  fi
+  if [ -z "$SPEND_WIKI" ]; then
+    echo "[pre-push] spend check skipped: no wiki checkout found."
+  else
+    SPEND_PY=""
+    for interpreter in python3 python; do
+      if command -v "$interpreter" >/dev/null 2>&1 && "$interpreter" -c "" >/dev/null 2>&1; then
+        SPEND_PY="$interpreter"
+        break
+      fi
+    done
+    if [ -z "$SPEND_PY" ]; then
+      echo "[pre-push] spend check cannot run (no working python3 or python) - push aborted."
+      exit 1
+    fi
+    CHECKED=" "
+    while read -r tip base; do
+      [ -n "$tip" ] || continue
+      case "$CHECKED" in
+        *" $tip "*) continue ;;
+      esac
+      CHECKED="$CHECKED$tip "
+      "$SPEND_PY" "$SPEND_WIKI/scripts/spend_guard.py" check --name client --repo . --rev "$tip" </dev/null
+      if [ $? -ne 0 ]; then
+        echo "[pre-push] spend check FAILED at the branch tip $tip - push aborted."
+        exit 1
+      fi
+    done <<EOF
+$TIPS
+EOF
+  fi
+
+  # The files the pushed commits touch, leaving out commits a remote-tracking branch already holds.
+  CHANGED=""
+  while read -r tip base; do
+    [ -n "$tip" ] || continue
+    if git cat-file -e "$base^{commit}" 2>/dev/null; then
+      CHANGED="$CHANGED$(git log --format= --name-only --no-renames "$tip" --not "$base" --remotes </dev/null)$NL"
+    else
+      CHANGED="$CHANGED$(git log --format= --name-only --no-renames "$tip" --not --remotes </dev/null)$NL"
+    fi
+  done <<EOF
+$TIPS
+EOF
+
+  TYPES=0
+  FORMAT=""
+  VITEST=""
+  NODE_TESTS=""
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$file" in
+      src/*|vite.config.ts|tsconfig*.json|package.json|package-lock.json) TYPES=1 ;;
+    esac
+    [ -f "$file" ] || continue
+    case "$file" in
+      src/*.ts|src/*.tsx|src/*.css) FORMAT="$FORMAT$file$NL" ;;
+    esac
+    case "$file" in
+      src/*.test.ts|src/*.test.tsx) VITEST="$VITEST$file$NL" ;;
+      src/*.ts|src/*.tsx)
+        stem="${file%.*}"
+        for beside in "$stem".test.ts "$stem".test.tsx "$stem".*.test.ts "$stem".*.test.tsx; do
+          if [ -f "$beside" ]; then
+            VITEST="$VITEST$beside$NL"
+          fi
+        done
+        ;;
+      scripts/*.test.mjs) NODE_TESTS="$NODE_TESTS$file$NL" ;;
+      scripts/*.mjs)
+        if [ -f "${file%.mjs}.test.mjs" ]; then
+          NODE_TESTS="$NODE_TESTS${file%.mjs}.test.mjs$NL"
+        fi
+        ;;
+    esac
+  done <<EOF
+$CHANGED
+EOF
+
+  set --
+  SEEN="$NL"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$SEEN" in
+      *"$NL$file$NL"*) continue ;;
+    esac
+    SEEN="$SEEN$file$NL"
+    set -- "$@" "$file"
+  done <<EOF
+$FORMAT
+EOF
+  if [ $# -gt 0 ]; then
+    echo "[pre-push] prettier --check on the $# changed files CI's format check reads..."
+    npx prettier --check "$@"
+    if [ $? -ne 0 ]; then
+      echo "[pre-push] format check FAILED (CI's npm run format:check fails the same way) - run npx prettier --write on them. Push aborted."
+      exit 1
+    fi
+  fi
+
+  if [ "$TYPES" -eq 1 ]; then
+    echo "[pre-push] type check (tsc --noEmit)..."
+    npx tsc --noEmit --incremental --tsBuildInfoFile "$(git rev-parse --git-path pre-push-tsc.tsbuildinfo)"
+    if [ $? -ne 0 ]; then
+      echo "[pre-push] type check FAILED - push aborted."
+      exit 1
+    fi
+  else
+    echo "[pre-push] no changed file the type check reads - type check skipped."
+  fi
+
+  set --
+  SEEN="$NL"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$SEEN" in
+      *"$NL$file$NL"*) continue ;;
+    esac
+    SEEN="$SEEN$file$NL"
+    set -- "$@" "$file"
+  done <<EOF
+$VITEST
+EOF
+  if [ $# -gt 0 ]; then
+    echo "[pre-push] vitest on the tests of the changed files: $*"
+    npx vitest run --passWithNoTests "$@"
+    if [ $? -ne 0 ]; then
+      echo "[pre-push] tests FAILED - push aborted."
+      exit 1
+    fi
+  fi
+
+  set --
+  SEEN="$NL"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$SEEN" in
+      *"$NL$file$NL"*) continue ;;
+    esac
+    SEEN="$SEEN$file$NL"
+    set -- "$@" "$file"
+  done <<EOF
+$NODE_TESTS
+EOF
+  if [ $# -gt 0 ]; then
+    echo "[pre-push] node --test on the tests of the changed scripts: $*"
+    node --test "$@"
+    if [ $? -ne 0 ]; then
+      echo "[pre-push] Node tests FAILED - push aborted."
+      exit 1
+    fi
+  fi
+
+  if [ -z "$VITEST$NODE_TESTS" ]; then
+    echo "[pre-push] no unit test file belongs to the changed files."
+  fi
+  echo "[pre-push] quick check passed - allowing push."
+  exit 0
+fi
+
 echo "[pre-push] client: running build + vitest..."
 
 npm run build && npm test
@@ -64,7 +283,17 @@ if [ -f "$SERVER_DIR/src/akaru/turn/tools/catalog.py" ]; then
   else
     SRV_PY="python"
   fi
-  (cd "$SERVER_DIR" && "$SRV_PY" -m pytest tests/unit/turn/tools/test_client_bundle.py -q)
+  # The server's own helper starts pytest without the spend opt-in and with its model keys blank; a server
+  # checkout from before it existed runs pytest directly, without the opt-in.
+  (
+    unset ARTDADDY_SPEND_KEYS
+    cd "$SERVER_DIR" || exit 1
+    if [ -f tests/pytest_without_spend_keys.py ]; then
+      "$SRV_PY" tests/pytest_without_spend_keys.py tests/unit/turn/tools/test_client_bundle.py -q
+    else
+      "$SRV_PY" -m pytest tests/unit/turn/tools/test_client_bundle.py -q
+    fi
+  )
   if [ $? -ne 0 ]; then
     echo "[pre-push] the bundled contract is STALE - run 'npm run codegen' and commit it."
     exit 1

@@ -36,9 +36,11 @@ cargo test --locked       # in src-tauri/
 npm run smoke             # only if you touched rendering; needs real ffmpeg
 ```
 
-A pre-push hook runs the build, the unit suite and the cargo tests, and refuses the
-push if any fail. Please don't bypass it with `--no-verify`; if a test is wrong, fix
-the test in the same change and say why.
+A pre-push hook checks every push and refuses it if a check fails. A push of `main` runs
+the build, the unit suite, the cargo tests and the real-ffmpeg goldens; any other push (your
+branch) runs a quick check of what you changed (prettier, the type check and the tests beside
+the changed files), and CI runs the full suite on your pull request. Please don't bypass it
+with `--no-verify`; if a test is wrong, fix the test in the same change and say why.
 
 ## What we look for in a change
 

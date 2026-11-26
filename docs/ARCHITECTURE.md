@@ -546,8 +546,10 @@ workflow with the run's number (a dry run unless you untick it).
 - **Sidecars**: `npm run fetch:sidecars` / `build:sidecar` (ffmpeg/yt-dlp).
 - **Release**: `npm run release` (sidecars + browser bundle + `tauri build`).
 - **Codegen**: `npm run codegen` (client source -> compiled identity and trusted backend snapshots).
-- **Git hooks**: `.githooks/pre-push` runs build + unit tests, then the e2e goldens
-  when ffmpeg is present (`git config core.hooksPath .githooks` after a fresh clone).
+- **Git hooks**: `.githooks/pre-push` runs the whole local gate for a push of `main` (build +
+  unit tests, the Node QA controls, cargo test, then the e2e goldens when ffmpeg is present) and
+  a quick check of the changed files for any other push (prettier, the type check, the tests
+  beside them), whose CI runs the suite (`git config core.hooksPath .githooks` after a fresh clone).
 
 ### macOS native Quit
 
@@ -656,8 +658,8 @@ for 17 minutes and the offer had to be rolled back.
    (`scripts/sidecarStaging.mjs` pins it, with SHA-256s, like ffmpeg). Bump it on purpose
    (`npm run bump:yt-dlp`) so the gate tests it; a release never takes whatever "latest" is
    that day. The release commit bumps the version in the files `src/lib/versionPins.test.ts` guards.
-2. **Gate.** Push a `qa/**` branch (the pre-push hook is the full local gate, CI runs on it),
-   then push `main`.
+2. **Gate.** Push a `qa/**` branch (CI runs the full suite on it; the pre-push hook runs only its
+   quick check there), then push `main` (the pre-push hook runs the full local gate).
 3. **Draft.** `gh release create vX.Y.Z --draft --target <sha>`.
 4. **Builds.** Dispatch the Windows, macOS and Linux build workflows from the `qa/**` ref with
    `publish=true` and `enable_auto_update=true` (macOS and Linux also `whisper_ref=v1.9.2`). Each
