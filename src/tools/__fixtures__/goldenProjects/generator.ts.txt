@@ -1,0 +1,445 @@
+// Golden-project generator. NOT a test of anything: it is copied into a source tree extracted from
+// an OLD release (git archive <release commit> src ...) and run there with vitest, so the files it
+// writes are what THAT build's own code wrote. It drives the old build's own writers only:
+// dataRoot.ts (where the data folder is), ProjectRegistry.createProject + register + setActive
+// (project.json, the seed timeline.json, projects.json), ensureStarterTimeline (the open-time
+// starter tracks), registerLibraryClip (library.json + owned media) and the timeline tools through
+// the old ClientToolRegistry. Then it reopens both projects with the same old code and records what
+// THAT build read back: what the golden test expects today's build to read back too.
+//
+// Inputs (env): GOLDEN_VERSION (e.g. 0.2.0), GOLDEN_REF (the commit), GOLDEN_DATE (ISO: the clock
+// the old code sees), GOLDEN_OUT (absolute folder to write into), GOLDEN_FEATURES (comma list of
+// what this release could do that the first one could not: hold, stretch, auto).
+import { it, vi } from "vitest";
+import * as nodeFs from "node:fs";
+import * as nodePath from "node:path";
+import { ProjectRegistry } from "./tools/project";
+import { ProjectStoreAccess, joinPath, type DirEntry, type FsLike } from "./tools/store";
+import { ensureStarterTimeline, loadTimeline } from "./timeline/engine";
+import { registerTestDocument, resetTestDocuments } from "./test/timelineKit";
+import { ClientToolRegistry } from "./tools/registry";
+import { registerTimelineTools } from "./timeline/ops";
+import { registerLibraryClip } from "./tools/import";
+import { projectsRoot, registryPath } from "./tools/dataRoot";
+import type { CommandRunner } from "./tools/command";
+
+// The OS folders Tauri would report on a Windows PC, so the build's OWN dataRoot.ts names the
+// data folder (it was "Akaru" before the rename to ArtDaddy) and no dev override applies.
+const APPDATA = "C:/Users/golden/AppData/Roaming";
+vi.mock("@tauri-apps/api/path", () => ({
+  dataDir: async () => "C:/Users/golden/AppData/Roaming",
+  appDataDir: async () => "C:/Users/golden/AppData/Roaming/com.app",
+  appCacheDir: async () => "C:/Users/golden/AppData/Local/com.app",
+  appLocalDataDir: async () => "C:/Users/golden/AppData/Local/com.app",
+  downloadDir: async () => "C:/Users/golden/Downloads",
+}));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: async (cmd: string) => {
+    if (cmd === "get_env") return null;
+    throw new Error(`no Tauri in the golden generator: ${cmd}`);
+  },
+  Channel: class {},
+}));
+
+const VERSION = process.env.GOLDEN_VERSION ?? "";
+const REF = process.env.GOLDEN_REF ?? "";
+const WHEN = process.env.GOLDEN_DATE ?? "";
+const OUT = process.env.GOLDEN_OUT ?? "";
+const FEATURES = new Set((process.env.GOLDEN_FEATURES ?? "").split(",").filter(Boolean));
+
+/** A linked (referenced-in-place) file outside the project: not part of the golden folder. */
+const LINKED = "D:/Footage/drone.mp4";
+
+class GoldFs implements FsLike {
+  text = new Map<string, string>();
+  bin = new Map<string, Uint8Array>();
+  dirs = new Set<string>();
+  private k(p: string): string {
+    return joinPath(p);
+  }
+  private parents(k: string): void {
+    let i = k.lastIndexOf("/");
+    while (i > 2) {
+      this.dirs.add(k.slice(0, i));
+      i = k.lastIndexOf("/", i - 1);
+    }
+  }
+  async exists(p: string): Promise<boolean> {
+    const k = this.k(p);
+    return this.text.has(k) || this.bin.has(k) || this.dirs.has(k);
+  }
+  async readTextFile(p: string): Promise<string> {
+    const k = this.k(p);
+    const t = this.text.get(k);
+    if (t !== undefined) return t;
+    const b = this.bin.get(k);
+    if (b) return new TextDecoder().decode(b);
+    throw new Error(`ENOENT ${p}`);
+  }
+  async writeTextFile(p: string, c: string): Promise<void> {
+    const k = this.k(p);
+    this.bin.delete(k);
+    this.text.set(k, c);
+    this.parents(k);
+  }
+  async mkdir(p: string): Promise<void> {
+    const k = this.k(p);
+    this.dirs.add(k);
+    this.parents(k);
+  }
+  async readBytes(p: string): Promise<Uint8Array> {
+    const k = this.k(p);
+    const b = this.bin.get(k);
+    if (b) return b;
+    const t = this.text.get(k);
+    if (t !== undefined) return new TextEncoder().encode(t);
+    throw new Error(`ENOENT ${p}`);
+  }
+  async writeBytes(p: string, d: Uint8Array): Promise<void> {
+    const k = this.k(p);
+    this.text.delete(k);
+    this.bin.set(k, d);
+    this.parents(k);
+  }
+  async stat(p: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }> {
+    const k = this.k(p);
+    if (this.dirs.has(k)) return { isDirectory: true, size: 0 };
+    return { isDirectory: false, size: (await this.readBytes(k)).length, mtimeMs: Date.now() };
+  }
+  async rename(from: string, to: string): Promise<void> {
+    const a = this.k(from);
+    const b = this.k(to);
+    if (this.text.has(a)) {
+      this.bin.delete(b);
+      this.text.set(b, this.text.get(a)!);
+      this.text.delete(a);
+    } else if (this.bin.has(a)) {
+      this.text.delete(b);
+      this.bin.set(b, this.bin.get(a)!);
+      this.bin.delete(a);
+    } else throw new Error(`ENOENT ${from}`);
+    this.parents(b);
+  }
+  async remove(p: string): Promise<void> {
+    const k = this.k(p);
+    for (const m of [this.text, this.bin] as Map<string, unknown>[])
+      for (const key of [...m.keys()]) if (key === k || key.startsWith(`${k}/`)) m.delete(key);
+    for (const d of [...this.dirs]) if (d === k || d.startsWith(`${k}/`)) this.dirs.delete(d);
+  }
+  async readDir(p: string): Promise<DirEntry[]> {
+    const k = this.k(p);
+    const out = new Map<string, boolean>();
+    const add = (key: string, isDir: boolean) => {
+      if (!key.startsWith(`${k}/`)) return;
+      const rest = key.slice(k.length + 1);
+      const name = rest.split("/")[0];
+      out.set(name, (out.get(name) ?? false) || isDir || rest.includes("/"));
+    };
+    for (const key of this.text.keys()) add(key, false);
+    for (const key of this.bin.keys()) add(key, false);
+    for (const key of this.dirs) add(key, true);
+    return [...out].map(([name, isDirectory]) => ({ name, isDirectory }));
+  }
+  async copyFile(src: string, dst: string): Promise<void> {
+    await this.writeBytes(dst, await this.readBytes(src));
+  }
+}
+
+interface MediaSpec {
+  filename: string;
+  kind: "video" | "audio" | "image";
+  seconds: number;
+  video: boolean;
+  audio: boolean;
+  width?: number;
+  height?: number;
+  format: string;
+}
+const MEDIA: MediaSpec[] = [
+  { filename: "interview.mp4", kind: "video", seconds: 12.5, video: true, audio: true, width: 1920, height: 1080, format: "mov,mp4,m4a,3gp,3g2,mj2" },
+  { filename: "broll.mov", kind: "video", seconds: 8, video: true, audio: false, width: 3840, height: 2160, format: "mov,mp4,m4a,3gp,3g2,mj2" },
+  { filename: "music.mp3", kind: "audio", seconds: 30, video: false, audio: true, format: "mp3" },
+  { filename: "logo.png", kind: "image", seconds: 0, video: true, audio: false, width: 512, height: 512, format: "png_pipe" },
+  { filename: "drone.mp4", kind: "video", seconds: 6, video: true, audio: false, width: 1920, height: 1080, format: "mov,mp4,m4a,3gp,3g2,mj2" },
+];
+const bytesOf = (m: MediaSpec) =>
+  new TextEncoder().encode(`ArtDaddy golden fixture ${m.filename}: placeholder bytes, not media`);
+
+/** ffprobe as the old code asks it, answered from MEDIA by the file's name. */
+function runnerFor(byPath: (abs: string) => MediaSpec | undefined): CommandRunner {
+  return {
+    run: async (program: string, args: string[]) => {
+      if (program !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
+      const src = args[args.length - 1];
+      const m = byPath(src);
+      if (!m) return { code: 1, stdout: "", stderr: `${src}: No such file or directory` };
+      if (args.includes("json")) {
+        const streams = [
+          ...(m.video
+            ? [
+                {
+                  index: 0,
+                  codec_type: "video",
+                  codec_name: m.kind === "image" ? "png" : "h264",
+                  width: m.width,
+                  height: m.height,
+                  r_frame_rate: m.kind === "image" ? "25/1" : "30/1",
+                  avg_frame_rate: m.kind === "image" ? "0/0" : "30/1",
+                  ...(m.seconds > 0 ? { duration: String(m.seconds) } : {}),
+                },
+              ]
+            : []),
+          ...(m.audio
+            ? [{ index: m.video ? 1 : 0, codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 2 }]
+            : []),
+        ];
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams,
+            format: {
+              format_name: m.format,
+              ...(m.seconds > 0 ? { duration: String(m.seconds) } : {}),
+            },
+          }),
+          stderr: "",
+        };
+      }
+      const sel = args.indexOf("-select_streams");
+      if (sel >= 0) {
+        const want = args[sel + 1];
+        const has = want.startsWith("v") ? m.video : want.startsWith("a") ? m.audio : false;
+        return { code: 0, stdout: has ? "0\n" : "", stderr: "" };
+      }
+      const entries = args[args.indexOf("-show_entries") + 1] ?? "";
+      if (entries.includes("format=duration"))
+        return { code: 0, stdout: m.seconds > 0 ? `${m.seconds}\n` : "N/A\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  } as CommandRunner;
+}
+
+type Res = Record<string, unknown> & { ok?: boolean; error?: string };
+function must(step: string, r: unknown): Res {
+  const res = r as Res;
+  if (!res || res.ok === false) throw new Error(`${step} failed at ${VERSION}: ${JSON.stringify(r)}`);
+  return res;
+}
+function createdIds(res: Res): Array<{ clip_id: string; track_id?: string }> {
+  const c = (res.created ?? res.clips ?? []) as Array<Record<string, unknown>>;
+  return c.map((x) => ({ clip_id: String(x.clip_id ?? x.id), track_id: x.track_id as string | undefined }));
+}
+
+it(`generates the ${VERSION} golden projects`, async () => {
+  if (!VERSION || !OUT || !WHEN) throw new Error("set GOLDEN_VERSION, GOLDEN_REF, GOLDEN_DATE and GOLDEN_OUT");
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date(WHEN), shouldAdvanceTime: true });
+  const later = (ms: number) => vi.setSystemTime(Date.now() + ms);
+  vi.stubGlobal("fetch", async () => {
+    throw new Error("offline: the golden generator makes no network calls");
+  });
+
+  const PROJECTS = await projectsRoot();
+  const REGISTRY = await registryPath();
+  const DATA_ROOT = REGISTRY.slice(0, REGISTRY.lastIndexOf("/"));
+  if (!DATA_ROOT.startsWith(APPDATA)) throw new Error(`unexpected data root ${DATA_ROOT}`);
+  const fs = new GoldFs();
+  const reg = new ProjectRegistry(PROJECTS, REGISTRY, fs);
+
+  // ── Project 1: a 16:9 edit with every kind of clip ──────────────────────────────────────
+  const name = `Golden ${VERSION}`;
+  const { id, dir } = await reg.createProject(name, { width: 1920, height: 1080, fps: 30 }, "");
+  await reg.register({ id, name, path: dir, lastOpenedAt: new Date().toISOString() }, true);
+
+  const store = new ProjectStoreAccess(dir, fs);
+  let doc = registerTestDocument(dir);
+  await ensureStarterTimeline(store);
+
+  // The library: four owned files and one linked in place.
+  await fs.writeBytes(LINKED, bytesOf(MEDIA[4]));
+  const ids: Record<string, string> = {};
+  for (const m of MEDIA) {
+    later(1000);
+    const linked = m.filename === "drone.mp4";
+    const entry = await registerLibraryClip(store, bytesOf(m), m.filename, m.kind, undefined, linked ? LINKED : undefined);
+    ids[m.filename] = entry.id;
+  }
+  const byPath = (abs: string) => {
+    const s = abs.replace(/\\/g, "/");
+    if (s === LINKED) return MEDIA[4];
+    return MEDIA.find((m) => s.includes(ids[m.filename]));
+  };
+  const ctx = { store, runner: runnerFor(byPath) };
+  const tools = new ClientToolRegistry();
+  registerTimelineTools(tools, () => ctx as never);
+  const run = async (step: string, tool: string, args: Record<string, unknown>) =>
+    must(step, await tools.run(tool, args));
+
+  const overlay = String((await run("add overlay track", "add_track", { kind: "video" })).track_id ?? "");
+  const musicTrack = String((await run("add music track", "add_track", { kind: "audio" })).track_id ?? "");
+  if (!overlay || !musicTrack) throw new Error("add_track returned no track_id");
+
+  const interview = createdIds(
+    await run("place interview", "add_clips", {
+      entries: [{ media_ref: ids["interview.mp4"], track_id: "v1", timeline_in: 0, source_span: [2, 7] }],
+    }),
+  );
+  const broll = createdIds(
+    await run("place broll", "add_clips", {
+      entries: [{ media_ref: ids["broll.mov"], track_id: "v1", timeline_in: 150, duration: 90 }],
+    }),
+  );
+  const logo = createdIds(
+    await run("place logo", "add_clips", {
+      entries: [{ media_ref: ids["logo.png"], track_id: overlay, timeline_in: 30, duration: 120 }],
+    }),
+  );
+  const music = createdIds(
+    await run("place music", "add_clips", {
+      entries: [{ media_ref: ids["music.mp3"], track_id: musicTrack, timeline_in: 0, source_span: [0, 8] }],
+    }),
+  );
+  const drone = createdIds(
+    await run("place linked drone", "add_clips", {
+      entries: [{ media_ref: ids["drone.mp4"], track_id: "v1", timeline_in: 240, source_span: [1, 3] }],
+    }),
+  );
+  const title = createdIds(
+    await run("add title", "add_text_clips", {
+      entries: [{ content: `Golden ${VERSION}`, timeline_in: 0, duration: 75 }],
+    }),
+  );
+
+  const brollId = broll[0].clip_id;
+  const interviewVideo = interview.find((c) => c.track_id === "v1")?.clip_id ?? interview[0].clip_id;
+  await run("broll look", "set_clip_properties", {
+    clip_ids: [brollId],
+    opacity: 0.8,
+    transform: { position: { x: 0.1, y: -0.1 }, scale: 1.2 },
+  });
+  await run("music level", "set_clip_properties", {
+    clip_ids: [music[0].clip_id],
+    volume: 0.5,
+    fade: { in: 15, out: 30 },
+  });
+  await run("logo fade-in keyframes", "set_keyframes", {
+    clip_id: logo[0].clip_id,
+    property: "opacity",
+    keyframes: [
+      { t: 0, v: 0 },
+      { t: 20, v: 1, ease: "ease-out" },
+    ],
+  });
+  if (FEATURES.has("hold"))
+    await run("logo hold keyframes", "set_keyframes", {
+      clip_id: logo[0].clip_id,
+      property: "scale",
+      keyframes: [
+        { t: 0, v: 1 },
+        { t: 60, v: 1.1, ease: "hold" },
+      ],
+    });
+  if (FEATURES.has("stretch"))
+    await run("logo stretch", "set_clip_properties", { clip_ids: [logo[0].clip_id], fit: "stretch" });
+  await run("broll crossfade", "set_transition", {
+    clip_id: brollId,
+    transition_in: { kind: "crossfade", duration: 12 },
+  });
+  await run("broll vignette", "apply_effects", {
+    clip_ids: [brollId],
+    add: [{ type: "vignette", params: { vignette: 0.4 } }],
+  });
+  await run("interview grade", "apply_color", {
+    clip_ids: [interviewVideo],
+    brightness: 0.1,
+    saturation: 1.2,
+  });
+  await run("split interview", "split_clips", { splits: [{ clip_id: interviewVideo, at: 60 }] });
+  await run("mute music", "set_track", { track_id: musicTrack, mute: true });
+
+  // Close: the autosave lands timeline.json, the document goes away.
+  await doc.autosave.flush();
+  await resetTestDocuments();
+
+  // ── Project 2: made the way New Project makes one by default, with a title and nothing else ──
+  later(60_000);
+  const name2 = `Golden ${VERSION} title only`;
+  const auto = FEATURES.has("auto");
+  const second = await reg.createProject(name2, { width: 1080, height: 1920, fps: 30 }, "", undefined, auto);
+  await reg.register({ id: second.id, name: name2, path: second.dir, lastOpenedAt: new Date().toISOString() }, true);
+  const store2 = new ProjectStoreAccess(second.dir, fs);
+  doc = registerTestDocument(second.dir);
+  await ensureStarterTimeline(store2);
+  const ctx2 = { store: store2, runner: runnerFor(() => undefined) };
+  const tools2 = new ClientToolRegistry();
+  registerTimelineTools(tools2, () => ctx2 as never);
+  const title2 = createdIds(
+    must(
+      "title-only project",
+      await tools2.run("add_text_clips", { entries: [{ content: "Only words", timeline_in: 15, duration: 45 }] }),
+    ),
+  );
+  await doc.autosave.flush();
+  await resetTestDocuments();
+
+  // The person goes back to the first project: it is the one open when the app quits.
+  later(60_000);
+  await reg.setActive(id);
+
+  // Reopen with THIS build's code, as it would on the next launch, and record what it read.
+  const readBack = async (pid: string, pdir: string) => {
+    const s = new ProjectStoreAccess(pdir, fs);
+    const project = await new ProjectRegistry(PROJECTS, REGISTRY, fs).openProjectData(pid);
+    const timeline = await ensureStarterTimeline(s);
+    return { project, timeline, library: await s.listClips(), again: await loadTimeline(s) };
+  };
+  const first = await readBack(id, dir);
+  const other = await readBack(second.id, second.dir);
+  const listed = await new ProjectRegistry(PROJECTS, REGISTRY, fs).listLive();
+
+  // Write the folder exactly as the old build left it, under the OS app-data folder (so the data
+  // folder's own name, "Akaru" or "ArtDaddy", is part of the golden).
+  const rel = (k: string) => k.slice(APPDATA.length + 1);
+  const files: string[] = [];
+  const emit = (k: string, write: (target: string) => void) => {
+    if (!k.startsWith(`${DATA_ROOT}/`)) return;
+    const target = nodePath.join(OUT, "appdata", ...rel(k).split("/"));
+    nodeFs.mkdirSync(nodePath.dirname(target), { recursive: true });
+    write(target);
+    files.push(rel(k));
+  };
+  for (const [k, v] of fs.text) emit(k, (t) => nodeFs.writeFileSync(t, v, "utf8"));
+  for (const [k, v] of fs.bin) emit(k, (t) => nodeFs.writeFileSync(t, v));
+  const manifest = {
+    version: VERSION,
+    commit: REF,
+    clock: WHEN,
+    features: [...FEATURES],
+    appData: APPDATA,
+    dataRoot: DATA_ROOT,
+    linkedOutsideProject: LINKED,
+    media: Object.fromEntries(MEDIA.map((m) => [m.filename, { id: ids[m.filename], kind: m.kind, seconds: m.seconds }])),
+    projects: [
+      {
+        id,
+        dir,
+        name,
+        clips: {
+          interview: interview.map((c) => c.clip_id),
+          broll: brollId,
+          logo: logo[0].clip_id,
+          music: music[0].clip_id,
+          drone: drone[0].clip_id,
+          title: title[0].clip_id,
+          overlayTrack: overlay,
+          musicTrack,
+        },
+        readBack: first,
+      },
+      { id: second.id, dir: second.dir, name: name2, clips: { title: title2[0].clip_id }, readBack: other },
+    ],
+    listed,
+    files: files.sort(),
+  };
+  nodeFs.mkdirSync(OUT, { recursive: true });
+  nodeFs.writeFileSync(nodePath.join(OUT, "generated.json"), JSON.stringify(manifest, null, 2), "utf8");
+}, 60_000);

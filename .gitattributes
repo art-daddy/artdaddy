@@ -5,3 +5,6 @@ src-tauri/PRIVACY.txt text eol=crlf
 src/timeline/__golden.export.txt text eol=lf
 # Git hooks run under sh, where a CR at the end of a line breaks a strict shell.
 .githooks/* text eol=lf
+# Project folders written by older releases (src/tools/project.goldens.test.ts): kept byte for byte as
+# those releases wrote them, on every platform.
+src/tools/__fixtures__/goldenProjects/** -text

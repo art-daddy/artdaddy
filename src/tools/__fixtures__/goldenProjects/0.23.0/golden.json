@@ -1,0 +1,431 @@
+{
+  "release": "0.23.0",
+  "commit": "830a3b01227374adcec1dc770882a709e5b0f9ea",
+  "clock": "2026-11-04T00:41:38+05:30",
+  "sameFormatAs": [
+    "0.23.0",
+    "0.24.0",
+    "0.25.0",
+    "0.26.0",
+    "0.27.0",
+    "0.29.0",
+    "0.29.1"
+  ],
+  "features": [
+    "hold",
+    "stretch",
+    "auto"
+  ],
+  "dataFolder": "ArtDaddy",
+  "linkedOutsideProject": "D:/Footage/drone.mp4",
+  "media": {
+    "interview.mp4": {
+      "id": "media_0be386747c94",
+      "kind": "video",
+      "seconds": 12.5
+    },
+    "broll.mov": {
+      "id": "media_c532ffa5ce6b",
+      "kind": "video",
+      "seconds": 8
+    },
+    "music.mp3": {
+      "id": "media_75d2bf49e3b7",
+      "kind": "audio",
+      "seconds": 30
+    },
+    "logo.png": {
+      "id": "media_095d2dac678a",
+      "kind": "image",
+      "seconds": 0
+    },
+    "drone.mp4": {
+      "id": "media_62c4d7f0b226",
+      "kind": "video",
+      "seconds": 6
+    }
+  },
+  "projects": [
+    {
+      "id": "golden_0_23_0_a5f698",
+      "name": "Golden 0.23.0",
+      "dir": "C:/Users/golden/AppData/Roaming/ArtDaddy/projects/golden_0_23_0_a5f698",
+      "clips": {
+        "interview": [
+          "clip_4bbad6dc",
+          "aud_4a872397"
+        ],
+        "broll": "clip_d2f67b51",
+        "logo": "clip_4cac7786",
+        "music": "clip_d9644cc7",
+        "drone": "clip_66aad9ec",
+        "title": "txt_779eecda",
+        "overlayTrack": "track_5b91ede1",
+        "musicTrack": "track_6122d134"
+      },
+      "readBack": {
+        "project": {
+          "ok": true,
+          "data": {
+            "id": "golden_0_23_0_a5f698",
+            "name": "Golden 0.23.0",
+            "schemaVersion": 1,
+            "createdAt": "2026-11-03T19:11:38.000Z",
+            "modifiedAt": "2026-11-03T19:11:38.000Z",
+            "activeTimeline": "timeline.json",
+            "settings": {
+              "canvas": {
+                "width": 1920,
+                "height": 1080,
+                "fps": 30
+              },
+              "model_id": "",
+              "active_style": "",
+              "active_workflow": "",
+              "planning_mode": "beats"
+            }
+          }
+        },
+        "timeline": {
+          "units": "frames",
+          "canvas": {
+            "width": 1920,
+            "height": 1080,
+            "fps": 30
+          },
+          "tracks": [
+            {
+              "id": "v1",
+              "kind": "video",
+              "z": 0,
+              "clips": [
+                {
+                  "id": "clip_4bbad6dc",
+                  "media_ref": "media_0be386747c94",
+                  "timeline_in": 0,
+                  "timeline_out": 60,
+                  "kind": "video",
+                  "source_in": 60,
+                  "source_out": 120,
+                  "link_group": "lg_53b78ab9",
+                  "color": {
+                    "brightness": 0.1,
+                    "saturation": 1.2
+                  }
+                },
+                {
+                  "id": "clip_ca1e8ce9",
+                  "media_ref": "media_0be386747c94",
+                  "timeline_in": 60,
+                  "timeline_out": 150,
+                  "kind": "video",
+                  "source_in": 120,
+                  "source_out": 210,
+                  "link_group": "lg_1c7f7de9",
+                  "color": {
+                    "brightness": 0.1,
+                    "saturation": 1.2
+                  }
+                },
+                {
+                  "id": "clip_d2f67b51",
+                  "media_ref": "media_c532ffa5ce6b",
+                  "timeline_in": 150,
+                  "timeline_out": 240,
+                  "kind": "video",
+                  "source_in": 0,
+                  "source_out": 90,
+                  "transform": {
+                    "position": {
+                      "x": 0.1,
+                      "y": -0.1
+                    },
+                    "scale": 1.2
+                  },
+                  "opacity": 0.8,
+                  "transition_in": {
+                    "kind": "crossfade",
+                    "duration": 12
+                  },
+                  "effects": [
+                    {
+                      "type": "vignette",
+                      "params": {
+                        "vignette": 0.4
+                      }
+                    }
+                  ]
+                },
+                {
+                  "id": "clip_66aad9ec",
+                  "media_ref": "media_62c4d7f0b226",
+                  "timeline_in": 240,
+                  "timeline_out": 300,
+                  "kind": "video",
+                  "source_in": 30,
+                  "source_out": 90
+                }
+              ]
+            },
+            {
+              "id": "a1",
+              "kind": "audio",
+              "z": 0,
+              "clips": [
+                {
+                  "id": "aud_4a872397",
+                  "kind": "audio",
+                  "media_ref": "media_0be386747c94",
+                  "source_in": 60,
+                  "source_out": 120,
+                  "timeline_in": 0,
+                  "timeline_out": 60,
+                  "link_group": "lg_53b78ab9"
+                },
+                {
+                  "id": "clip_f991145f",
+                  "kind": "audio",
+                  "media_ref": "media_0be386747c94",
+                  "source_in": 120,
+                  "source_out": 210,
+                  "timeline_in": 60,
+                  "timeline_out": 150,
+                  "link_group": "lg_1c7f7de9"
+                }
+              ]
+            },
+            {
+              "id": "track_5b91ede1",
+              "kind": "video",
+              "z": 1,
+              "clips": [
+                {
+                  "id": "clip_4cac7786",
+                  "media_ref": "media_095d2dac678a",
+                  "timeline_in": 30,
+                  "timeline_out": 150,
+                  "kind": "image",
+                  "opacity": [
+                    {
+                      "t": 0,
+                      "v": 0
+                    },
+                    {
+                      "t": 20,
+                      "v": 1,
+                      "ease": "ease-out"
+                    }
+                  ],
+                  "transform": {
+                    "scale": [
+                      {
+                        "t": 0,
+                        "v": 1
+                      },
+                      {
+                        "t": 60,
+                        "v": 1.1,
+                        "ease": "hold"
+                      }
+                    ]
+                  },
+                  "fit": "stretch"
+                }
+              ]
+            },
+            {
+              "id": "track_6122d134",
+              "kind": "audio",
+              "z": 2,
+              "clips": [
+                {
+                  "id": "clip_d9644cc7",
+                  "media_ref": "media_75d2bf49e3b7",
+                  "timeline_in": 0,
+                  "timeline_out": 240,
+                  "kind": "audio",
+                  "source_in": 0,
+                  "source_out": 240,
+                  "volume": 0.5,
+                  "fade": {
+                    "in": 15,
+                    "out": 30
+                  }
+                }
+              ],
+              "mute": true
+            },
+            {
+              "id": "captions",
+              "kind": "text",
+              "z": 3,
+              "clips": [
+                {
+                  "id": "txt_779eecda",
+                  "kind": "text",
+                  "timeline_in": 0,
+                  "timeline_out": 75,
+                  "content": [
+                    {
+                      "text": "Golden 0.23.0"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "failures": []
+        },
+        "library": [
+          {
+            "id": "media_0be386747c94",
+            "filename": "interview.mp4",
+            "path": "library/media_0be386747c94.mp4",
+            "kind": "video",
+            "size_bytes": 67,
+            "added_by": "import_media",
+            "added_at": 1793733099
+          },
+          {
+            "id": "media_c532ffa5ce6b",
+            "filename": "broll.mov",
+            "path": "library/media_c532ffa5ce6b.mov",
+            "kind": "video",
+            "size_bytes": 63,
+            "added_by": "import_media",
+            "added_at": 1793733100
+          },
+          {
+            "id": "media_75d2bf49e3b7",
+            "filename": "music.mp3",
+            "path": "library/media_75d2bf49e3b7.mp3",
+            "kind": "audio",
+            "size_bytes": 63,
+            "added_by": "import_media",
+            "added_at": 1793733101
+          },
+          {
+            "id": "media_095d2dac678a",
+            "filename": "logo.png",
+            "path": "library/media_095d2dac678a.png",
+            "kind": "image",
+            "size_bytes": 62,
+            "added_by": "import_media",
+            "added_at": 1793733102
+          },
+          {
+            "id": "media_62c4d7f0b226",
+            "filename": "drone.mp4",
+            "path": "D:/Footage/drone.mp4",
+            "kind": "video",
+            "external": true,
+            "size_bytes": 63,
+            "added_by": "import_reference",
+            "added_at": 1793733103
+          }
+        ]
+      }
+    },
+    {
+      "id": "golden_0_23_0_title_only_aa5244",
+      "name": "Golden 0.23.0 title only",
+      "dir": "C:/Users/golden/AppData/Roaming/ArtDaddy/projects/golden_0_23_0_title_only_aa5244",
+      "clips": {
+        "title": "txt_b71d04ca"
+      },
+      "readBack": {
+        "project": {
+          "ok": true,
+          "data": {
+            "id": "golden_0_23_0_title_only_aa5244",
+            "name": "Golden 0.23.0 title only",
+            "schemaVersion": 1,
+            "createdAt": "2026-11-03T19:12:43.000Z",
+            "modifiedAt": "2026-11-03T19:12:43.000Z",
+            "activeTimeline": "timeline.json",
+            "settings": {
+              "canvas": {
+                "width": 1080,
+                "height": 1920,
+                "fps": 30
+              },
+              "model_id": "",
+              "active_style": "",
+              "active_workflow": "",
+              "planning_mode": "beats"
+            }
+          }
+        },
+        "timeline": {
+          "units": "frames",
+          "canvas": {
+            "width": 1080,
+            "height": 1920,
+            "fps": 30
+          },
+          "tracks": [
+            {
+              "id": "v1",
+              "kind": "video",
+              "z": 0,
+              "clips": []
+            },
+            {
+              "id": "a1",
+              "kind": "audio",
+              "z": 0,
+              "clips": []
+            },
+            {
+              "id": "captions",
+              "kind": "text",
+              "z": 1,
+              "clips": [
+                {
+                  "id": "txt_b71d04ca",
+                  "kind": "text",
+                  "timeline_in": 15,
+                  "timeline_out": 60,
+                  "content": [
+                    {
+                      "text": "Only words"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "failures": [],
+          "canvas_auto": true
+        },
+        "library": []
+      }
+    }
+  ],
+  "listed": [
+    {
+      "id": "golden_0_23_0_a5f698",
+      "name": "Golden 0.23.0",
+      "path": "C:/Users/golden/AppData/Roaming/ArtDaddy/projects/golden_0_23_0_a5f698",
+      "lastOpenedAt": "2026-11-03T19:13:43.000Z"
+    },
+    {
+      "id": "golden_0_23_0_title_only_aa5244",
+      "name": "Golden 0.23.0 title only",
+      "path": "C:/Users/golden/AppData/Roaming/ArtDaddy/projects/golden_0_23_0_title_only_aa5244",
+      "lastOpenedAt": "2026-11-03T19:12:43.000Z"
+    }
+  ],
+  "files": [
+    "ArtDaddy/projects.json",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/internals/library.json",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/internals/project.json",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/internals/timeline.json",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/library/media_095d2dac678a.png",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/library/media_0be386747c94.mp4",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/library/media_75d2bf49e3b7.mp3",
+    "ArtDaddy/projects/golden_0_23_0_a5f698/library/media_c532ffa5ce6b.mov",
+    "ArtDaddy/projects/golden_0_23_0_title_only_aa5244/internals/project.json",
+    "ArtDaddy/projects/golden_0_23_0_title_only_aa5244/internals/timeline.json"
+  ]
+}
