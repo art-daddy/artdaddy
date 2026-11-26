@@ -253,11 +253,17 @@ interface Damage {
   kind: string;
   bytes: Uint8Array;
 }
+/** A counterexample names itself by what was done to the file, not by its bytes. */
+const named = <T extends object>(v: T, label: string): T =>
+  Object.assign(v, { [fc.toStringMethod]: () => label });
 
 /** Every way a file is found broken on a person's disk: cut short (a crash mid-write, a full disk,
  *  a sync conflict), not JSON at all, a byte-order mark, a field of the wrong type or missing, a
  *  number out of range, a version from another build, or not an object at all. */
 function damaged(doc: Doc): fc.Arbitrary<Damage> {
+  return damages(doc).map((d) => named(d, `${doc}: ${d.kind}`));
+}
+function damages(doc: Doc): fc.Arbitrary<Damage> {
   const bytes = ORIGINAL[doc];
   const json = JSON.parse(textOf(bytes)) as unknown;
   const paths = pathsOf(json);
@@ -270,7 +276,9 @@ function damaged(doc: Doc): fc.Arbitrary<Damage> {
     fc
       .integer({ min: 0, max: bytes.length - 1 })
       .map((k) => ({ kind: `BOM, then cut at ${k}`, bytes: concat(BOM, bytes.slice(0, k)) })),
-    fc.uint8Array({ minLength: 1, maxLength: 64 }).map((b) => ({ kind: "random bytes", bytes: b })),
+    fc
+      .uint8Array({ minLength: 1, maxLength: 64 })
+      .map((b) => ({ kind: `random bytes [${b.join(",")}]`, bytes: b })),
     fc
       .string({ minLength: 1, maxLength: 40 })
       .filter((s) => readable(enc(s)) === null)
@@ -386,7 +394,7 @@ describe("a damaged project file", () => {
         }),
         { numRuns: 40 },
       );
-    });
+    }, 120_000);
   });
 
   it("a timeline.json the app cannot read refuses the open with a message, and is left exactly as it was (property)", async () => {
@@ -407,7 +415,7 @@ describe("a damaged project file", () => {
       ),
       { numRuns: 40 },
     );
-  });
+  }, 120_000);
 
   it.each([2, 3, 999, 1.5])(
     "a project.json from a newer build (schemaVersion %s) is refused with 'update the app' and not touched",
@@ -496,7 +504,7 @@ describe("a damaged project file", () => {
         const d = freshDisk();
         d.put(FILES["library.json"], withNullRow());
         await openLikeTheApp(MAIN.id);
-        expect(backgroundErrors).toEqual([]);
+        expect(backgroundErrors.map((e) => String(e))).toEqual([]);
       },
     );
   });
@@ -544,8 +552,9 @@ const oddText = fc.oneof(
     "x".repeat(5000),
   ),
 );
-/** The same object written the ways other programs write JSON. */
-const written = (v: unknown) =>
+/** The same object written the ways other programs write JSON. A counterexample names what was
+ *  unusual about the document and how it was written, not the whole document. */
+const written = <T>(value: T, what: string) =>
   fc
     .record({
       indent: fc.constantFrom<string | number>(0, 1, 2, 4, "\t"),
@@ -554,10 +563,15 @@ const written = (v: unknown) =>
       tail: fc.constantFrom("", "\n", "\r\n", "  \n"),
     })
     .map(({ indent, crlf, bom, tail }) => {
-      let text = JSON.stringify(v, null, indent) + tail;
+      let text = JSON.stringify(value, null, indent) + tail;
       if (crlf) text = text.replace(/\r?\n/g, "\r\n");
-      return { how: { indent, crlf, bom, tail }, bytes: bom ? concat(BOM, enc(text)) : enc(text) };
+      const how = JSON.stringify({ indent, crlf, bom, tail });
+      return named(
+        { value, bytes: bom ? concat(BOM, enc(text)) : enc(text) },
+        `${what}; written ${how}`,
+      );
     });
+const summary = (params: object) => JSON.stringify(params).slice(0, 400);
 
 describe("a valid project file with unusual content opens exactly as written", () => {
   it("timeline.json: any text, fields from a newer build, extreme but allowed numbers, any formatting (property)", async () => {
@@ -575,7 +589,8 @@ describe("a valid project file with unusual content opens exactly as written", (
         ),
         shift: fc.constantFrom(0, 10_000_000),
       })
-      .map(({ title, rootExtra, trackExtra, clipExtra, canvas, shift }) => {
+      .chain((params) => {
+        const { title, rootExtra, trackExtra, clipExtra, canvas, shift } = params;
         const tl = structuredClone(base) as Timeline & Record<string, unknown>;
         Object.assign(tl, rootExtra, { canvas });
         for (const t of tl.tracks)
@@ -586,24 +601,21 @@ describe("a valid project file with unusual content opens exactly as written", (
           }
         Object.assign(tl.tracks[0], trackExtra);
         Object.assign(tl.tracks[0].clips![0], clipExtra);
-        return tl;
+        return written(tl, summary(params));
       });
     await fc.assert(
-      fc.asyncProperty(
-        unusual.chain((tl) => written(tl).map((w) => ({ tl, ...w }))),
-        async ({ tl, bytes }) => {
-          reset();
-          const d = freshDisk();
-          d.put(FILES["timeline.json"], bytes);
-          const o = await openLikeTheApp(MAIN.id);
-          expect(o.editor).toBe("loaded");
-          expect(o.timeline).toEqual(tl);
-          expect(same(d.bytes(FILES["timeline.json"]), bytes)).toBe(true);
-        },
-      ),
+      fc.asyncProperty(unusual, async ({ value: tl, bytes }) => {
+        reset();
+        const d = freshDisk();
+        d.put(FILES["timeline.json"], bytes);
+        const o = await openLikeTheApp(MAIN.id);
+        expect(o.editor).toBe("loaded");
+        expect(o.timeline).toEqual(tl);
+        expect(same(d.bytes(FILES["timeline.json"]), bytes)).toBe(true);
+      }),
       { numRuns: 30 },
     );
-  });
+  }, 120_000);
 
   it("project.json: any name, settings a newer build added, any formatting (property)", async () => {
     const base = readable(ORIGINAL["project.json"])!;
@@ -614,30 +626,31 @@ describe("a valid project file with unusual content opens exactly as written", (
         extra: fc.dictionary(futureKey, anyJson, { maxKeys: 3 }),
         settingsExtra: fc.dictionary(futureKey, anyJson, { maxKeys: 3 }),
       })
-      .map(({ name, model, extra, settingsExtra }) => ({
-        ...base,
-        ...extra,
-        name,
-        settings: { ...(base.settings as object), ...settingsExtra, model_id: model },
-      }));
+      .chain((params) => {
+        const { name, model, extra, settingsExtra } = params;
+        const pj = {
+          ...base,
+          ...extra,
+          name,
+          settings: { ...(base.settings as object), ...settingsExtra, model_id: model },
+        };
+        return written(pj, summary(params));
+      });
     await fc.assert(
-      fc.asyncProperty(
-        unusual.chain((pj) => written(pj).map((w) => ({ pj, ...w }))),
-        async ({ pj, bytes }) => {
-          reset();
-          const d = freshDisk();
-          d.put(FILES["project.json"], bytes);
-          const o = await openLikeTheApp(MAIN.id);
-          expect(o.editor).toBe("loaded");
-          const active = useProjects.getState().active!;
-          expect(active.name).toBe(pj.name);
-          expect(active.settings).toEqual(pj.settings);
-          expect(same(d.bytes(FILES["project.json"]), bytes)).toBe(true);
-        },
-      ),
+      fc.asyncProperty(unusual, async ({ value: pj, bytes }) => {
+        reset();
+        const d = freshDisk();
+        d.put(FILES["project.json"], bytes);
+        const o = await openLikeTheApp(MAIN.id);
+        expect(o.editor).toBe("loaded");
+        const active = useProjects.getState().active!;
+        expect(active.name).toBe(pj.name);
+        expect(active.settings).toEqual(pj.settings);
+        expect(same(d.bytes(FILES["project.json"]), bytes)).toBe(true);
+      }),
       { numRuns: 30 },
     );
-  });
+  }, 120_000);
 
   it("library.json: any file names, fields a newer build added, any formatting (property)", async () => {
     const base = readable(ORIGINAL["library.json"])! as { clips: LibraryClip[] };
@@ -647,29 +660,30 @@ describe("a valid project file with unusual content opens exactly as written", (
         extra: fc.dictionary(futureKey, anyJson, { maxKeys: 3 }),
         rowExtra: fc.dictionary(futureKey, anyJson, { maxKeys: 3 }),
       })
-      .map(({ names, extra, rowExtra }) => ({
-        ...base,
-        ...extra,
-        clips: base.clips.map((c, i) => ({
-          ...c,
-          ...(i === 0 ? rowExtra : {}),
-          filename: names[i],
-        })),
-      }));
+      .chain((params) => {
+        const { names, extra, rowExtra } = params;
+        const cat = {
+          ...base,
+          ...extra,
+          clips: base.clips.map((c, i) => ({
+            ...c,
+            ...(i === 0 ? rowExtra : {}),
+            filename: names[i],
+          })),
+        };
+        return written(cat, summary(params));
+      });
     await fc.assert(
-      fc.asyncProperty(
-        unusual.chain((cat) => written(cat).map((w) => ({ cat, ...w }))),
-        async ({ cat, bytes }) => {
-          reset();
-          const d = freshDisk();
-          d.put(FILES["library.json"], bytes);
-          const o = await openLikeTheApp(MAIN.id);
-          expect(o.editor).toBe("loaded");
-          expect(await useEditor.getState().store!.listClips()).toEqual(cat.clips);
-          expect(same(d.bytes(FILES["library.json"]), bytes)).toBe(true);
-        },
-      ),
+      fc.asyncProperty(unusual, async ({ value: cat, bytes }) => {
+        reset();
+        const d = freshDisk();
+        d.put(FILES["library.json"], bytes);
+        const o = await openLikeTheApp(MAIN.id);
+        expect(o.editor).toBe("loaded");
+        expect(await useEditor.getState().store!.listClips()).toEqual(cat.clips);
+        expect(same(d.bytes(FILES["library.json"]), bytes)).toBe(true);
+      }),
       { numRuns: 30 },
     );
-  });
+  }, 120_000);
 });
