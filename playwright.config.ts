@@ -107,6 +107,23 @@ export default defineConfig({
           },
         ]
       : []),
+    // TEMPORARY (work/agent-flake, removed before merge): the agent lane's Stop tests 30 times on
+    // each engine on Linux CI, where WebKit failed one of them, beside the old silent-stream
+    // version of that test (control.before.stress.ts).
+    ...(process.env.CI && process.platform === "linux"
+      ? (["chromium", "webkit"] as const).map((engine) => ({
+          name: `stress-${engine}`,
+          testMatch: /agent-and-models[\\/](control\.spec|control\.before\.stress)\.ts$/,
+          repeatEach: 30,
+          use:
+            engine === "chromium"
+              ? {
+                  ...devices["Desktop Chrome"],
+                  launchOptions: { channel: "chrome", args: ["--enable-unsafe-swiftshader"] },
+                }
+              : { ...devices["Desktop Safari"] },
+        }))
+      : []),
   ],
   webServer: {
     // A dedicated port so the lane never collides with a dev server the user has open.
