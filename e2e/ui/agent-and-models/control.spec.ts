@@ -158,10 +158,10 @@ test.describe("steering a turn", () => {
     qa,
   }) => {
     const { id, before, owed } = await stopDuringTool(qa);
-    // The ffmpeg the tool started was killed rather than left to run out its minute, and the edit
-    // queued behind it never ran.
+    // The ffmpeg the tool started was killed, and ends long before its minute (on Linux it exits
+    // about half a second after the signal); the edit queued behind it never ran.
     expect(holdRun(qa)?.killed).toBe(true);
-    expect(holdRun(qa)?.ended).toBeDefined();
+    await expect.poll(() => holdRun(qa)?.ended !== undefined, { timeout: 15_000 }).toBe(true);
     expect(JSON.stringify(await qa.savedTimeline(id))).toBe(before);
     expect((await qa.savedAssets(id)).some((a) => JSON.stringify(a).includes("long_hold"))).toBe(
       false,
