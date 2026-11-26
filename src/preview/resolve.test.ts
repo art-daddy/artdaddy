@@ -254,6 +254,22 @@ describe("resolvePreviewUrl", () => {
     );
   });
 
+  // The preview hub's known mismatch 8 (art-daddy/backlog#83): a source the webview cannot decode
+  // faithfully (HEVC, ProRes, WebM, Matroska) is previewed from its copy, at most 720 px high, while
+  // the export reads the original. Goes red the day the preview plays such a source itself.
+  it.fails(
+    "row 8: a source with a preview copy previews the original the export reads (it plays the copy)",
+    async () => {
+      const { store } = previewStore(
+        (p) => p.includes("cache/proxies/"),
+        (r) => (r === "inputs/uploads/phone.mov" ? "/proj/inputs/uploads/phone.mov" : null),
+      );
+      expect(await resolvePreviewUrl(store, "inputs/uploads/phone.mov")).toBe(
+        "asset:///proj/inputs/uploads/phone.mov",
+      );
+    },
+  );
+
   it("does not present an unverified original or an obsolete proxy on a failing runtime", async () => {
     vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
     const source = "/proj/library/a.mp4";

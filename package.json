@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "smoke": "vitest run --config vitest.smoke.config.ts --exclude src/timeline/exportFast.smoke.e2e.ts && vitest run --config vitest.smoke.config.ts src/timeline/exportFast.smoke.e2e.ts",
+    "smoke:speech": "node scripts/smokeSpeech.mjs",
     "test:audio": "node --experimental-websocket scripts/audiolane/run.mjs",
     "e2e:ui": "playwright test",
     "e2e:desktop": "wdio run e2e/desktop/wdio.conf.mjs",

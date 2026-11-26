@@ -643,3 +643,33 @@ describe("preview audio — no ffmpeg to conform with", () => {
     expect(ctx.sources.length).toBeGreaterThan(0);
   });
 });
+
+// The preview hub's known mismatch 13 (art-daddy/backlog#83): the export keeps the pitch of a clip
+// played at another speed, or stretched to its slot (atempo); the preview plays the samples faster
+// or slower, which moves the pitch by the same factor (an octave up at speed 2). Goes red the day
+// the preview keeps the pitch.
+describe("preview audio — known mismatch with the export (row 13)", () => {
+  const twice = { kind: "audio", timeline_in: 0, timeline_out: 60, source_in: 0, source_out: 120 };
+
+  it("plays a clip at speed 2, or stretched to twice its slot, by playing its samples twice as fast", async () => {
+    await play({ ...twice, speed: 2 });
+    expect(ctx.sources.map((s) => s.playbackRate.value)).toEqual([2]);
+    ctx = new FakeCtx();
+    decoded = false;
+    await play({ ...twice, stretch: true });
+    expect(ctx.sources.map((s) => s.playbackRate.value)).toEqual([2]);
+  });
+
+  it.fails("row 13: a clip at speed 2 keeps its pitch, as the export does", async () => {
+    await play({ ...twice, speed: 2 });
+    expect(ctx.sources.map((s) => s.playbackRate.value)).toEqual([1]);
+  });
+
+  it.fails(
+    "row 13: a clip stretched to twice its slot keeps its pitch, as the export does",
+    async () => {
+      await play({ ...twice, stretch: true });
+      expect(ctx.sources.map((s) => s.playbackRate.value)).toEqual([1]);
+    },
+  );
+});

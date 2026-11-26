@@ -40,47 +40,19 @@ function paeth(a: number, b: number, c: number): number {
   return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
 
-/** `picture` as a PNG file (8-bit RGB). Each row takes the filter that leaves the smallest sum. */
+/** `picture` as a PNG file (8-bit RGB). Every row is stored against the row above (PNG's "Up"
+ *  filter): a reference is flat regions and ramps, which that keeps small. */
 export function encodePng(picture: Picture): Buffer {
   const { w, h, rgb } = picture;
   if (rgb.length !== w * h * 3) throw new Error(`png: ${rgb.length} bytes for ${w}x${h} RGB`);
   const stride = w * 3;
   const raw = Buffer.alloc((stride + 1) * h);
-  const candidate = new Uint8Array(stride);
   for (let y = 0; y < h; y++) {
-    const row = rgb.subarray(y * stride, (y + 1) * stride);
-    const up = y > 0 ? rgb.subarray((y - 1) * stride, y * stride) : new Uint8Array(stride);
-    let best = 0;
-    let bestCost = Infinity;
-    let bestRow: Uint8Array = row;
-    for (let filter = 0; filter < 5; filter++) {
-      let cost = 0;
-      for (let i = 0; i < stride; i++) {
-        const a = i >= 3 ? row[i - 3] : 0;
-        const b = up[i];
-        const c = i >= 3 ? up[i - 3] : 0;
-        const predicted =
-          filter === 0
-            ? 0
-            : filter === 1
-              ? a
-              : filter === 2
-                ? b
-                : filter === 3
-                  ? (a + b) >> 1
-                  : paeth(a, b, c);
-        const v = (row[i] - predicted) & 0xff;
-        candidate[i] = v;
-        cost += v < 128 ? v : 256 - v;
-      }
-      if (cost < bestCost) {
-        bestCost = cost;
-        best = filter;
-        bestRow = Uint8Array.from(candidate);
-      }
+    raw[y * (stride + 1)] = 2; // Up
+    for (let i = 0; i < stride; i++) {
+      const above = y > 0 ? rgb[(y - 1) * stride + i] : 0;
+      raw[y * (stride + 1) + 1 + i] = (rgb[y * stride + i] - above) & 0xff;
     }
-    raw[y * (stride + 1)] = best;
-    Buffer.from(bestRow).copy(raw, y * (stride + 1) + 1);
   }
   const header = Buffer.alloc(13);
   header.writeUInt32BE(w, 0);

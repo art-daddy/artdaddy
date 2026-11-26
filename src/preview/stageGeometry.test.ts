@@ -859,3 +859,55 @@ describe("rotation geometry", () => {
     );
   });
 });
+
+// The preview hub's known mismatch 15 (art-daddy/backlog#83), deliberate: the overlay outlines the
+// whole turned rectangle of a rotated clip so a person sees what they turn, while both painters clip
+// the turned picture to its unrotated box (the compositor's scissor, ffmpeg's rotate ow=iw:oh=ih).
+// Goes red the day the outline follows the drawn picture.
+describe("the outline of a rotated clip against the picture drawn (row 15)", () => {
+  const W = 1000;
+  const H = 1000;
+  const turned = (): Timeline =>
+    ({
+      units: "frames",
+      canvas: { width: W, height: H, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: [
+            {
+              id: "c",
+              kind: "image",
+              media_ref: "p.png",
+              timeline_in: 0,
+              timeline_out: 30,
+              rotate: 30,
+              transform: { position: { x: 0.5, y: 0.5 }, scale: 0.5 },
+            },
+          ],
+        },
+      ],
+    }) as unknown as Timeline;
+  const drawn = () =>
+    buildScene(turned(), 0, new Map<string, AssetDims>([["p.png", { w: 500, h: 500 }]])).layers[0];
+  const outline = () => {
+    const b = normBoxOf(turned().tracks[0].clips![0] as Clip, 0);
+    const stage = { x: 0, y: 0, w: W, h: H };
+    return Object.values(handlePositions(normBoxToView(b, stage), stage, b.rotate));
+  };
+  const inside = (p: { x: number; y: number }, r: { x: number; y: number; w: number; h: number }) =>
+    p.x >= r.x - 1e-6 && p.x <= r.x + r.w + 1e-6 && p.y >= r.y - 1e-6 && p.y <= r.y + r.h + 1e-6;
+
+  it("the painters draw the turned picture only inside its unrotated box", () => {
+    const layer = drawn();
+    expect(layer.rotate).toBeCloseTo(Math.PI / 6, 9);
+    expect(layer.clipBox).toEqual({ x: 250, y: 250, w: 500, h: 500 });
+  });
+
+  it.fails("row 15: the outline of a turned clip stays on the picture the painters draw", () => {
+    const box = drawn().clipBox;
+    for (const corner of outline()) expect(inside(corner, box)).toBe(true);
+  });
+});
