@@ -173,6 +173,34 @@ export const nodeRunner: CommandRunner = {
   },
 };
 
+/** How long a rename refused because something else has the destination open is tried again. */
+const COMMIT_PATIENCE_MS = 10_000;
+const HELD_OPEN = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** Move `src` onto `dst`, replacing it, as the app's own commit does. The app renames with Rust's
+ *  std::fs::rename, which on Windows replaces a file another handle still has open (it falls back
+ *  to POSIX rename semantics). Node's fs.rename refuses with EPERM while anything reads the
+ *  destination, and ProjectStoreAccess then writes the file in place, so a reader at that moment
+ *  finds it empty: in a parallel smoke run the library catalog read empty while an export entered
+ *  itself in the library, and the next export found its clip's media "not on disk"
+ *  (exportRungs.smoke.e2e.ts). A refusal is tried again until the reader has let go, which is the
+ *  same end the app reaches; any other error, or a refusal that outlasts the patience, still throws. */
+export async function commitRename(src: string, dst: string): Promise<void> {
+  await fsp.mkdir(path.dirname(dst), { recursive: true });
+  const deadline = Date.now() + COMMIT_PATIENCE_MS;
+  for (let wait = 1; ; wait = Math.min(wait * 2, 50)) {
+    try {
+      await fsp.rename(src, dst);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      const retry = process.platform === "win32" && HELD_OPEN.has(code) && Date.now() < deadline;
+      if (!retry) throw e;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
 export const nodeFs: FsLike = {
   async exists(p) {
     try {
@@ -234,10 +262,7 @@ export const nodeFs: FsLike = {
       await fh.close();
     }
   },
-  async rename(src, dst) {
-    await fsp.mkdir(path.dirname(dst), { recursive: true });
-    await fsp.rename(src, dst);
-  },
+  rename: commitRename,
   async readDir(p) {
     const entries = await fsp.readdir(p, { withFileTypes: true });
     return entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
