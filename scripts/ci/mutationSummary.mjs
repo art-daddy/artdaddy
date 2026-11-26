@@ -7,9 +7,13 @@
 //   - the ten weakest files (the places where a test would not notice a bug).
 //
 //   node scripts/ci/mutationSummary.mjs reports/mutation/mutation.json
+//   node scripts/ci/mutationSummary.mjs --shards '["tools-01","rest"]' reports/shards/*/mutation.json
+//
+// The second form is the last job of the run: it puts the shards' reports together, and names every shard the run
+// started that sent no report.
 //
 // A report job, not a gate: it exits 0 whatever the score is. A report it cannot read, or one with no mutants in
-// it, is an error: an empty result must never look like a clean one.
+// it, is an error: an empty result must never look like a clean one. So is a shard that sent no report.
 //
 // The score is Stryker's own: detected (killed or timed out) over valid (detected plus survived plus no coverage).
 // Mutants that did not compile, crashed the runner, or were ignored are not valid and are left out.
@@ -101,26 +105,45 @@ export function summaryMarkdown(s, { title = "Mutation report" } = {}) {
   return lines.join("\n") + "\n";
 }
 
-/** Several Stryker reports as one: the shards of a run write one report each, over files that do not overlap. */
+/** Several Stryker reports as one: the shards of a run write one report each. A file too big for one shard is cut into
+ *  parts (stryker.ci.mjs), so it is in several reports, each with the mutants of its own part: those are put together,
+ *  never one report's in place of another's. */
 export function mergeReports(reports) {
-  return { files: Object.assign({}, ...reports.map((r) => r?.files ?? {})) };
+  const files = {};
+  for (const report of reports)
+    for (const [path, file] of Object.entries(report?.files ?? {})) {
+      const seen = files[path];
+      files[path] = seen
+        ? { ...seen, mutants: [...(seen.mutants ?? []), ...(file?.mutants ?? [])] }
+        : file;
+    }
+  return { files };
 }
+
+/** The shard a report came from: the workflow downloads each shard's report into a folder `mutation-<shard>`. */
+export const shardOfReport = (path) =>
+  String(path)
+    .split(/[\\/]/)
+    .slice(-2, -1)[0]
+    ?.replace(/^mutation-/, "");
 
 /**
  * Read the report file(s) and put their summary on the page. Returns the exit code: 0, or 1 when a report is
- * missing, unreadable or empty, or when fewer than `expect` reports arrived (a shard that hits its time limit
- * writes none). Whatever did arrive is still summarised, so a partial week is visible and not silent.
+ * missing, unreadable or empty, or when one of the `shards` the run started sent no report (a shard that hits its
+ * time limit writes none): those are named. Whatever did arrive is still summarised, so a partial week is visible
+ * and not silent.
  */
 export function reportMutation(
   paths,
   {
     out = (text) => process.stdout.write(text),
     summaryFile = process.env.GITHUB_STEP_SUMMARY,
-    expect = 0,
+    shards = [],
   } = {},
 ) {
   const list = [].concat(paths ?? []).filter(Boolean);
   const reports = [];
+  const arrived = new Set();
   const problems = list.length === 0 ? ["no report path was given"] : [];
   for (const path of list) {
     if (!existsSync(path)) {
@@ -129,33 +152,58 @@ export function reportMutation(
     }
     try {
       reports.push(JSON.parse(readFileSync(path, "utf8")));
+      arrived.add(shardOfReport(path));
     } catch (e) {
       problems.push(`${path} is not readable JSON (${e.message})`);
     }
   }
+  const missing = shards.filter((shard) => !arrived.has(shard));
   const s = summarize(mergeReports(reports));
   if (s.total.total === 0) {
-    const lines = [...problems, "the reports hold no mutants, so the run tested nothing"];
+    const lines = [
+      ...problems,
+      ...(missing.length ? [`no report from ${missing.join(", ")}`] : []),
+      "the reports hold no mutants, so the run tested nothing",
+    ];
     out(lines.map((p) => `mutationSummary: ${p}\n`).join(""));
     return 1;
   }
-  const short = expect > reports.length;
   let md = summaryMarkdown(s);
-  if (short) {
-    md += `\n**Only ${reports.length} of ${expect} reports arrived** (a shard that hits its time limit or crashes writes none), so this covers part of the scope.\n`;
+  if (missing.length) {
+    md += `\n**${missing.length} of ${shards.length} shards sent no report: ${missing.join(", ")}** (a shard that hits its time limit or crashes writes none), so this covers part of the scope.\n`;
   }
   out(md + problems.map((p) => `mutationSummary: ${p}\n`).join(""));
   if (summaryFile) appendFileSync(summaryFile, md + "\n");
-  return short || problems.length ? 1 : 0;
+  return missing.length || problems.length ? 1 : 0;
+}
+
+/** The shards a run started, as the workflow hands them over: a JSON list of names. Anything else is an error. */
+export function parseShards(text) {
+  const shards = JSON.parse(text);
+  if (
+    !Array.isArray(shards) ||
+    shards.length === 0 ||
+    !shards.every((s) => typeof s === "string" && s)
+  ) {
+    throw new Error(`--shards needs a JSON list of shard names, not ${text}`);
+  }
+  return shards;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
-  let expect = 0;
-  const at = args.indexOf("--expect");
+  let shards = [];
+  const at = args.indexOf("--shards");
   if (at >= 0) {
-    expect = Number(args[at + 1]);
+    try {
+      shards = parseShards(args[at + 1]);
+    } catch (e) {
+      process.stdout.write(
+        `mutationSummary: the list of shards the run started is missing or wrong (${e.message})\n`,
+      );
+      process.exit(1);
+    }
     args.splice(at, 2);
   }
-  process.exit(reportMutation(args, { expect }));
+  process.exit(reportMutation(args, { shards }));
 }

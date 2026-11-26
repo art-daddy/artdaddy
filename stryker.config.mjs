@@ -3,7 +3,7 @@
 // and checks whether a test fails — surviving mutants = weak assertions.
 //
 //   npm run mutation                               full scope (timeline + tools)
-//   (the weekly run on GitHub uses stryker.ci.mjs, in three shards: .github/workflows/mutation-weekly.yml)
+//   (the weekly run on GitHub uses stryker.ci.mjs, cut into shards: .github/workflows/mutation-weekly.yml)
 //   npx stryker run --mutate "src/timeline/clamp.ts"   one file (fast, for a baseline)
 //
 // Note: src/tools/** is heavy on ffmpeg/network IO that is E2E-covered (not in the
