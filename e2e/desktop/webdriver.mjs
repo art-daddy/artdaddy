@@ -146,8 +146,7 @@ export async function startDriver() {
 export const ATTACH_PORT = Number(process.env.ARTDADDY_WEBVIEW2_DEBUG_PORT || 0);
 
 /** The switches the Edge WebDriver starts the app's WebView2 with (read from its browser process, msedgedriver 158),
- *  so an app started for attach runs as one the driver starts. Without them an app on a fresh profile sat on
- *  about:blank for over 100 s on the lab PC. */
+ *  so an app started for attach on a normal machine runs as one the driver starts: the budgets were timed on those. */
 const DRIVER_SWITCHES = [
   "--allow-pre-commit-input",
   "--disable-background-networking",
@@ -171,11 +170,9 @@ const DRIVER_SWITCHES = [
 const DRIVER_DISABLED_FEATURES = ["IgnoreDuplicateNavs", "Prewarm"];
 
 /** The WebView2 arguments for an app started for attach: the app's own (tauri.conf.json; whatever sets arguments
- *  replaces them), the Edge WebDriver's, and the debugging port. The desktop-e2e job in ci.yml sets the same through
- *  policy. */
+ *  replaces them), the Edge WebDriver's, and the debugging port. */
 export function attachBrowserArgs(port = ATTACH_PORT) {
-  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
-  const own = ((conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "").split(/\s+/).filter(Boolean);
+  const own = ownBrowserArgs();
   const ownDisabled = own.find((a) => a.startsWith("--disable-features="))?.slice("--disable-features=".length);
   const disabled = [...(ownDisabled ? ownDisabled.split(",") : []), ...DRIVER_DISABLED_FEATURES];
   return [
@@ -187,15 +184,27 @@ export function attachBrowserArgs(port = ATTACH_PORT) {
   ].join(" ");
 }
 
+/** The arguments for an ELEVATED machine, which takes them only from HKLM policy (the desktop-e2e job in ci.yml sets
+ *  this): the app's own and the debugging port. On GitHub's runner WebView2 ignored the whole policy value once it also
+ *  held the driver's switches (about 640 characters) and started with no port. */
+export function policyBrowserArgs(port = ATTACH_PORT) {
+  return [...ownBrowserArgs(), `--remote-debugging-port=${port}`, "--remote-allow-origins=*"].join(" ");
+}
+
+function ownBrowserArgs() {
+  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
+  return ((conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "").split(/\s+/).filter(Boolean);
+}
+
 /** Starts the app with its WebView2 debugging port open, for the Edge WebDriver to attach to (`debuggerAddress`).
  *
- *  The Edge WebDriver opens that port with WEBVIEW2_* variables when it starts the app, and an ELEVATED WebView2
- *  ignores those ("session not created: DevToolsActivePort file doesn't exist"). GitHub's Windows runners are
- *  elevated, so there the arguments come from HKLM policy instead (the desktop-e2e job in .github/workflows/ci.yml
- *  sets them, as scripts/qa/windowsUpdateCanary.mjs does) and the variables below serve a normal machine. Like the
- *  driver, each launch gets a fresh WebView2 profile: the app's own one keeps what earlier sessions stored (on the lab
- *  PC an `artdaddy.api_base` override sent the app's first call to a closed port). An elevated WebView2 ignores that
- *  variable too, which a runner's new machine makes harmless. Returns the app's process once a page exists. */
+ *  The Edge WebDriver opens that port with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS when it starts the app, and an
+ *  ELEVATED WebView2 ignores that variable ("session not created: DevToolsActivePort file doesn't exist"). GitHub's
+ *  Windows runners are elevated, so there the port comes from HKLM policy instead (policyBrowserArgs; the desktop-e2e
+ *  job in .github/workflows/ci.yml sets it) and the variable serves a normal machine. Like the driver, each launch gets
+ *  a fresh WebView2 profile through WEBVIEW2_USER_DATA_FOLDER, which an elevated WebView2 does honour: the app's own
+ *  profile keeps what earlier sessions stored (on the lab PC an `artdaddy.api_base` override sent the app's first call
+ *  to a closed port). Returns the app's process once a page exists. */
 export async function launchForAttach(application, port = ATTACH_PORT) {
   const profile = mkdtempSync(path.join(os.tmpdir(), "artdaddy-attach-"));
   const app = spawn(application, [], {
