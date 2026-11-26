@@ -508,15 +508,18 @@ jobs:
           VITE_API_BASE_URL: http://127.0.0.1:8790
           VITE_E2E_AUTH_BYPASS: "1"
           VITE_SENTRY_DSN: ""
+        # vite listens on 127.0.0.1, which Chromium always tries for "localhost". Left to itself, Node puts vite's
+        # "localhost" on ::1 only, and on the runner the app's page never loaded: probably because a Chromium with no
+        # IPv6 route looks localhost up as 127.0.0.1 only. The probe asks 127.0.0.1 for the same reason.
         run: |
           Start-Process -FilePath node -ArgumentList 'scripts/qa/standInServer.mjs', '--port', '8790', '--log', "$env:RUNNER_TEMP\service.log" `
             -RedirectStandardOutput "$env:RUNNER_TEMP\service.out.log" -RedirectStandardError "$env:RUNNER_TEMP\service.err.log"
-          Start-Process -FilePath node -ArgumentList 'node_modules/vite/bin/vite.js', '--port', '5173', '--strictPort' `
+          Start-Process -FilePath node -ArgumentList 'node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort' `
             -RedirectStandardOutput "$env:RUNNER_TEMP\vite.log" -RedirectStandardError "$env:RUNNER_TEMP\vite.err.log"
           for ($i = 0; $i -lt 120; $i++) {
-            try { if ((Invoke-WebRequest http://localhost:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { exit 0 } } catch { Start-Sleep -Seconds 1 }
+            try { if ((Invoke-WebRequest http://127.0.0.1:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { exit 0 } } catch { Start-Sleep -Seconds 1 }
           }
-          throw 'vite did not serve http://localhost:5173 within 2 minutes'
+          throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes'
       # GitHub's Windows runners are elevated, and an elevated WebView2 ignores the WEBVIEW2_* variables the Edge
       # WebDriver opens the app's debugging port with ("DevToolsActivePort file doesn't exist"); HKLM policy reaches it,
       # as scripts/qa/windowsUpdateCanary.mjs found. So the port is opened here, with the app's own WebView2 arguments
