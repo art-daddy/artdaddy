@@ -501,25 +501,6 @@ jobs:
       # Kept out of the lockfile, like Playwright in the browser job: only this lane uses it.
       - name: WebdriverIO
         run: npm i --no-save @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/spec-reporter@9
-      - name: serve the page (vite on 5173) and the stand-in service (8790)
-        id: page
-        shell: pwsh
-        env:
-          VITE_API_BASE_URL: http://127.0.0.1:8790
-          VITE_E2E_AUTH_BYPASS: "1"
-          VITE_SENTRY_DSN: ""
-        # vite listens on 127.0.0.1, which Chromium always tries for "localhost". Left to itself, Node puts vite's
-        # "localhost" on ::1 only, and on the runner the app's page never loaded: probably because a Chromium with no
-        # IPv6 route looks localhost up as 127.0.0.1 only. The probe asks 127.0.0.1 for the same reason.
-        run: |
-          Start-Process -FilePath node -ArgumentList 'scripts/qa/standInServer.mjs', '--port', '8790', '--log', "$env:RUNNER_TEMP\service.log" `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\service.out.log" -RedirectStandardError "$env:RUNNER_TEMP\service.err.log"
-          Start-Process -FilePath node -ArgumentList 'node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort' `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\vite.log" -RedirectStandardError "$env:RUNNER_TEMP\vite.err.log"
-          for ($i = 0; $i -lt 120; $i++) {
-            try { if ((Invoke-WebRequest http://127.0.0.1:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { exit 0 } } catch { Start-Sleep -Seconds 1 }
-          }
-          throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes'
       # GitHub's Windows runners are elevated, and an elevated WebView2 ignores the WEBVIEW2_* variables the Edge
       # WebDriver starts the app with ("DevToolsActivePort file doesn't exist"); HKLM policy reaches it, as
       # scripts/qa/windowsUpdateCanary.mjs found. So the arguments the driver would give it, plus a debugging port, are
@@ -535,11 +516,36 @@ jobs:
           "WebView2 arguments for $($exe): $browserArgs"
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments" /v $exe /t REG_SZ /d "$browserArgs" /f
           "ARTDADDY_WEBVIEW2_DEBUG_PORT=9223" >> $env:GITHUB_ENV
-      - name: WebdriverIO lane (npm run e2e:desktop)
-        run: npm run e2e:desktop
-      - name: timed real-app lanes
-        if: always() && steps.page.outcome == 'success'
-        run: node scripts/qa/timingBudgets.mjs run --lanes desktop --runs 1
+      # The page (vite on 5173) and the stand-in service (8790) start in the step that uses them. Started in a step of
+      # their own, they were not running when the app loaded its page ("localhost refused to connect"; the job's orphan
+      # cleanup found neither). vite listens on both loopbacks (::, dual-stack), whichever one localhost becomes here.
+      - name: the real app (npm run e2e:desktop, then the timed lanes)
+        shell: pwsh
+        env:
+          VITE_API_BASE_URL: http://127.0.0.1:8790
+          VITE_E2E_AUTH_BYPASS: "1"
+          VITE_SENTRY_DSN: ""
+        run: |
+          $service = Start-Process -FilePath node -PassThru -ArgumentList 'scripts/qa/standInServer.mjs', '--port', '8790', '--log', "$env:RUNNER_TEMP\service.log" `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\service.out.log" -RedirectStandardError "$env:RUNNER_TEMP\service.err.log"
+          $vite = Start-Process -FilePath node -PassThru -ArgumentList 'node_modules/vite/bin/vite.js', '--host', '::', '--port', '5173', '--strictPort' `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\vite.log" -RedirectStandardError "$env:RUNNER_TEMP\vite.err.log"
+          $served = $false
+          for ($i = 0; $i -lt 120 -and -not $served; $i++) {
+            try { $served = (Invoke-WebRequest http://127.0.0.1:5173/ -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $served) { throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes' }
+          foreach ($url in 'http://127.0.0.1:5173/', 'http://[::1]:5173/', 'http://127.0.0.1:8790/') {
+            try { $code = (Invoke-WebRequest $url -UseBasicParsing -TimeoutSec 5 -SkipHttpErrorCheck).StatusCode } catch { $code = $_.Exception.Message }
+            "$url -> $code"
+          }
+          "localhost is $([System.Net.Dns]::GetHostAddresses('localhost') -join ', ')"
+          npm run e2e:desktop
+          $wdio = $LASTEXITCODE
+          node scripts/qa/timingBudgets.mjs run --lanes desktop --runs 1
+          $lanes = $LASTEXITCODE
+          Stop-Process -Id $vite.Id, $service.Id -ErrorAction SilentlyContinue
+          if ($wdio -ne 0 -or $lanes -ne 0) { throw "npm run e2e:desktop exited $wdio; the timed lanes exited $lanes" }
       - name: times against the lab budgets (report only)
         if: always()
         shell: pwsh
