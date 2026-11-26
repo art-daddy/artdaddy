@@ -1,10 +1,13 @@
 /**
  * Which pushes run the whole local gate. A push of main runs all of it (build + vitest, the Node exporter QA controls,
  * cargo test, the real-ffmpeg goldens and the server's tool-contract test); any other push runs a quick check (the
- * spend check, prettier and the type check on what changed, and the tests of the changed files), because CI runs the
- * suite on the pull request. The real hook runs in a real POSIX shell against a sandbox git repository, with stand-ins
- * for npm, npx, node, cargo, ffmpeg, ffprobe and python that write down the command they were given and do nothing
- * else. What is asserted is what the push ran, and whether it was stopped.
+ * spend check, prettier and the type check on what changed, and the tests of the changed files, each under the runner
+ * that owns it), because CI runs the suite on the pull request. The real hook runs in a real POSIX shell against a
+ * sandbox git repository, with stand-ins for npm, npx, node, cargo, ffmpeg, ffprobe and python that write down the
+ * command they were given and do nothing else, except one: `npx vitest list`, the hook's question to vitest about which
+ * test files are its own, goes to the real vitest with this repository's real vitest.config.ts, rooted in the sandbox.
+ * So the routing is checked against the config that decides it, not against a copy of the rule. What is asserted is
+ * what the push ran, and whether it was stopped.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -25,6 +28,8 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const HOOK = resolve(process.cwd(), ".githooks", "pre-push");
+const VITEST_BIN = resolve(process.cwd(), "node_modules", "vitest", "vitest.mjs");
+const VITEST_CONFIG = resolve(process.cwd(), "vitest.config.ts");
 const ZEROS = "0".repeat(40);
 const SLOW = 120_000;
 const STAND_INS = ["npm", "npx", "node", "cargo", "ffmpeg", "ffprobe", "python", "python3"];
@@ -62,7 +67,8 @@ function posixShell(): string | null {
 
 const SHELL = posixShell();
 
-// Writes "<name>\t<arguments>\t<ARTDADDY_SPEND_KEYS or unset>" and fails when the call matches HOOK_TEST_FAIL.
+// Writes "<name>\t<arguments>\t<ARTDADDY_SPEND_KEYS or unset>" and fails when the call matches HOOK_TEST_FAIL. The npx
+// stand-in hands `vitest list` to the real vitest, with the real config and the sandbox as its root.
 const standIn = (name: string): string => `#!/bin/sh
 printf '%s\\t%s\\t%s\\n' "${name}" "$*" "\${ARTDADDY_SPEND_KEYS-unset}" >> "$HOOK_TEST_LOG"
 if [ -n "$HOOK_TEST_FAIL" ]; then
@@ -70,7 +76,15 @@ if [ -n "$HOOK_TEST_FAIL" ]; then
     $HOOK_TEST_FAIL) exit 1 ;;
   esac
 fi
-exit 0
+${
+  name === "npx"
+    ? `if [ "$1" = "vitest" ] && [ "$2" = "list" ]; then
+  shift 2
+  exec "$HOOK_TEST_NODE" "$HOOK_TEST_VITEST" list "$@" --root "$HOOK_TEST_ROOT" --config "$HOOK_TEST_VITEST_CONFIG"
+fi
+`
+    : ""
+}exit 0
 `;
 
 interface Call {
@@ -144,7 +158,13 @@ function build(top: string): void {
     "src/feature/lonely.ts": "export const lonely = 1;\n",
     "src/styles/app.css": "body {}\n",
     "scripts/qa/tool.mjs": "export {};\n",
-    "scripts/qa/tool.test.mjs": "export {};\n",
+    // the repository's two kinds of script test: a vitest one under scripts/ci, a node:test one under scripts/qa
+    "scripts/qa/tool.test.mjs": 'import { test } from "node:test";\n\ntest("tool", () => {});\n',
+    // the config leaves only scripts/qa's *.test.mjs out of vitest: a .test.ts there is still vitest's
+    "scripts/qa/probe.test.ts": 'import { it } from "vitest";\n\nit("probe", () => {});\n',
+    "scripts/ci/gate.mjs": "export {};\n",
+    "scripts/ci/gate.test.mjs":
+      'import { expect, it } from "vitest";\n\nit("gate", () => expect(1).toBe(1));\n',
     "e2e/ui/area/flow.spec.ts": "export {};\n",
     "docs/notes.md": "notes\n",
     "src-tauri/Cargo.toml": "\n",
@@ -195,11 +215,21 @@ class Sandbox {
   push(lines: string[], environment: Record<string, string> = {}): Pushed {
     const env: Record<string, string> = {};
     for (const [name, value] of Object.entries(isolated(this.top))) {
-      if (/^path$/i.test(name) || /^(ARTDADDY_|HOOK_TEST_)/i.test(name)) continue;
+      // what this test runner sets for itself (VITEST*, TEST, NODE_ENV) is not in a shell that pushes
+      if (
+        /^path$/i.test(name) ||
+        /^(ARTDADDY_|HOOK_TEST_|VITEST)/i.test(name) ||
+        /^(TEST|NODE_ENV)$/i.test(name)
+      )
+        continue;
       env[name] = value;
     }
     env.PATH = this.shim + delimiter + (process.env.PATH ?? process.env.Path ?? "");
     env.HOOK_TEST_LOG = posix(this.log);
+    env.HOOK_TEST_NODE = posix(process.execPath);
+    env.HOOK_TEST_VITEST = posix(VITEST_BIN);
+    env.HOOK_TEST_VITEST_CONFIG = posix(VITEST_CONFIG);
+    env.HOOK_TEST_ROOT = posix(this.repo);
     env.ARTDADDY_WIKI_DIR = posix(this.wiki);
     env.ARTDADDY_SERVER_DIR = posix(this.server);
     Object.assign(env, environment);
@@ -286,12 +316,61 @@ describe.skipIf(SHELL === null)(
           "npx prettier --check src/feature/thing.ts src/styles/app.css",
         ]);
         expect(ran(pushed, "npx tsc")).toHaveLength(1);
-        const vitest = ran(pushed, "npx vitest");
+        const vitest = ran(pushed, "npx vitest run");
         expect(vitest).toHaveLength(1);
         expect(
           vitest[0]?.split(" ").slice(4).sort(),
           "not the tests beside the changed file",
         ).toEqual(["src/feature/thing.property.test.ts", "src/feature/thing.test.ts"]);
+        expect(ran(pushed, "node")).toEqual(["node --test scripts/qa/tool.test.mjs"]);
+      },
+      SLOW,
+    );
+
+    it(
+      "a changed script test runs under the runner the config gives it, not the one its folder suggests",
+      () => {
+        // scripts/ci's tests import vitest and vitest.config.ts includes them; scripts/qa's import node:test and the
+        // config leaves them out of vitest. Sending the first kind to node --test failed every such push (26 Nov).
+        const box = sandbox();
+        const tip = box.change("both kinds", {
+          "scripts/ci/gate.test.mjs":
+            readFileSync(join(box.repo, "scripts/ci/gate.test.mjs"), "utf8") + "\n",
+          "scripts/qa/tool.test.mjs":
+            readFileSync(join(box.repo, "scripts/qa/tool.test.mjs"), "utf8") + "\n",
+          "scripts/qa/probe.test.ts":
+            readFileSync(join(box.repo, "scripts/qa/probe.test.ts"), "utf8") + "\n",
+        });
+
+        const pushed = box.push([line("refs/heads/work/x", tip)]);
+
+        expect(pushed.status, pushed.output).toBe(0);
+        const vitest = ran(pushed, "npx vitest run");
+        expect(vitest).toHaveLength(1);
+        expect(
+          vitest[0]?.split(" ").slice(4).sort(),
+          "the config's own files, not a folder's",
+        ).toEqual(["scripts/ci/gate.test.mjs", "scripts/qa/probe.test.ts"]);
+        expect(ran(pushed, "node")).toEqual(["node --test scripts/qa/tool.test.mjs"]);
+      },
+      SLOW,
+    );
+
+    it(
+      "the test beside a changed script runs under the runner that owns that test, whatever the script's folder",
+      () => {
+        const box = sandbox();
+        const tip = box.change("both scripts", {
+          "scripts/ci/gate.mjs": "export const gate = 1;\n",
+          "scripts/qa/tool.mjs": "export const tool = 1;\n",
+        });
+
+        const pushed = box.push([line("refs/heads/work/x", tip)]);
+
+        expect(pushed.status, pushed.output).toBe(0);
+        expect(ran(pushed, "npx vitest run")).toEqual([
+          "npx vitest run --passWithNoTests scripts/ci/gate.test.mjs",
+        ]);
         expect(ran(pushed, "node")).toEqual(["node --test scripts/qa/tool.test.mjs"]);
       },
       SLOW,
@@ -338,7 +417,7 @@ describe.skipIf(SHELL === null)(
 
         expect(pushed.status, pushed.output).toBe(0);
         expect(
-          ran(pushed, "npx vitest"),
+          ran(pushed, "npx vitest run"),
           "the sandbox's hook read another repository",
         ).toHaveLength(1);
         expect(snapshot(), "a sandbox's git reached the decoy repository").toEqual(before);
@@ -425,7 +504,7 @@ describe.skipIf(SHELL === null)(
 
         expect(pushed.status, pushed.output).toBe(0);
         expect(ranWholeGate(pushed)).toEqual([]);
-        expect(ran(pushed, "npx vitest")).toHaveLength(1);
+        expect(ran(pushed, "npx vitest run")).toHaveLength(1);
       },
       SLOW,
     );
@@ -453,10 +532,15 @@ describe.skipIf(SHELL === null)(
         const pushed = box.push([line("refs/heads/work/qa", tip)]);
 
         expect(pushed.status, pushed.output).toBe(0);
-        expect(ran(pushed, "npx")).toEqual([]);
+        expect(ran(pushed, "npx vitest run")).toEqual([]);
+        expect(ran(pushed, "npx tsc")).toEqual([]);
+        expect(ran(pushed, "npx prettier")).toEqual([]);
         expect(ran(pushed, "node")).toEqual([]);
         expect(ranWholeGate(pushed)).toEqual([]);
         expect(pushed.output).toContain("type check skipped");
+        expect(pushed.output, "the spec Playwright owns is not said to be left to CI").toContain(
+          "no runner in this check for: e2e/ui/area/flow.spec.ts",
+        );
       },
       SLOW,
     );
@@ -498,7 +582,8 @@ describe.skipIf(SHELL === null)(
       ["the spend check", "python3 */spend_guard.py*", ["npx", "node"]],
       ["the format check", "npx prettier*", ["npx tsc", "npx vitest", "node"]],
       ["the type check", "npx tsc*", ["npx vitest", "node"]],
-      ["a unit test", "npx vitest*", ["node"]],
+      ["vitest's list of its own test files", "npx vitest list*", ["npx vitest run", "node"]],
+      ["a unit test", "npx vitest run*", ["node"]],
       ["a Node test", "node --test*", []],
     ])(
       "a failure of %s stops the push before the steps after it",
@@ -533,7 +618,7 @@ describe.skipIf(SHELL === null)(
         expect(pushed.status, pushed.output).toBe(0);
         expect(pushed.output).toContain("spend check skipped");
         expect(ran(pushed, "python")).toEqual([]);
-        expect(ran(pushed, "npx vitest")).toHaveLength(1);
+        expect(ran(pushed, "npx vitest run")).toHaveLength(1);
       },
       SLOW,
     );
