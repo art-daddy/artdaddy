@@ -29,10 +29,38 @@ export const VIRTUAL_ROOT = "/qa-home";
 
 type Args = Record<string, unknown>;
 
+/** The commands that change files. They take turns with the test's reads (`inFileTurn`). */
+const FILE_CHANGES = new Set([
+  "plugin:fs|write_text_file",
+  "plugin:fs|write_file",
+  "plugin:fs|mkdir",
+  "plugin:fs|copy_file",
+  "plugin:fs|remove",
+  "plugin:fs|rename",
+  "commit_file",
+  "remove_file",
+  "trash_path",
+]);
+
 export interface ShellCall {
   cmd: string;
   at: number;
   error?: string;
+}
+
+/** One shipped sidecar the app ran (`sidecar_run`), so a test can wait for a specific process to be
+ *  running instead of for a time. */
+export interface SidecarRun {
+  program: string;
+  /** The arguments as the page sent them (page paths). */
+  args: string[];
+  at: number;
+  /** The process has started (its `spawn` event). */
+  running: boolean;
+  /** The app asked for it to be killed (`sidecar_kill`). */
+  killed: boolean;
+  /** It has ended, with this exit code (null when a signal ended it). */
+  ended?: { at: number; code: number | null };
 }
 
 /** The host the shell reports (host_platform), mirroring the machine the test runs on. */
@@ -53,6 +81,8 @@ function hostTriple(): string {
 export class QaShell {
   /** Every command the app sent, in order. */
   readonly calls: ShellCall[] = [];
+  /** Every sidecar run the app started, in order. */
+  readonly sidecarRuns: SidecarRun[] = [];
   /** Commands the shell does not know: each is refused, as a command the app lacks would be. */
   readonly unknown = new Set<string>();
   /** Internet origins the page tried to reach (all refused: the shell's desktop is offline). */
@@ -62,7 +92,8 @@ export class QaShell {
   private appVersion = "0.0.0";
   private readonly picks: Array<string[] | null> = [];
   private readonly answers: boolean[] = [];
-  private readonly runs = new Map<string, ChildProcess>();
+  private readonly runs = new Map<string, { child: ChildProcess; run: SidecarRun }>();
+  private fileTurn: Promise<unknown> = Promise.resolve();
 
   private constructor(readonly root: string) {}
 
@@ -108,7 +139,10 @@ export class QaShell {
   /** A saved project file, parsed (`internals/timeline.json`...), or null when it is not there. */
   async readProjectJson<T = Record<string, unknown>>(id: string, rel: string): Promise<T | null> {
     try {
-      return JSON.parse(await fsp.readFile(path.join(this.projectDir(id), rel), "utf8")) as T;
+      const text = await this.inFileTurn(() =>
+        fsp.readFile(path.join(this.projectDir(id), rel), "utf8"),
+      );
+      return JSON.parse(text) as T;
     } catch {
       return null;
     }
@@ -157,7 +191,7 @@ export class QaShell {
 
   /** Stop every process a sidecar run started that is still running. */
   dispose(): void {
-    for (const child of this.runs.values()) child.kill();
+    for (const { child } of this.runs.values()) child.kill();
     this.runs.clear();
   }
 
@@ -166,7 +200,10 @@ export class QaShell {
     const call: ShellCall = { cmd, at: performance.now() };
     this.calls.push(call);
     try {
-      const out = await this.dispatch(cmd, (JSON.parse(json) ?? {}) as Args);
+      const args = (JSON.parse(json) ?? {}) as Args;
+      const out = await (FILE_CHANGES.has(cmd)
+        ? this.inFileTurn(() => this.dispatch(cmd, args))
+        : this.dispatch(cmd, args));
       if (out instanceof Uint8Array)
         return JSON.stringify({ ok: true, bytes: Buffer.from(out).toString("base64") });
       return JSON.stringify({ ok: true, value: out === undefined ? null : out });
@@ -181,6 +218,17 @@ export class QaShell {
         .replace(/\\/g, "/");
       return JSON.stringify({ ok: false, error: call.error });
     }
+  }
+
+  /** The app's file changes and the test's reads of saved files take turns. The app saves by writing a
+   *  temp file and renaming it over the old one (`commit_file`); on Windows a read that lands during
+   *  that rename fails, or makes the rename fail so the app falls back to writing the file in place,
+   *  and the read sees half of it. That would be a race between the test and this stand-in, not
+   *  something the app does, so neither waits for a time: each waits for the other to finish. */
+  private inFileTurn<T>(work: () => Promise<T>): Promise<T> {
+    const turn = this.fileTurn.then(work, work);
+    this.fileTurn = turn.catch(() => undefined);
+    return turn;
   }
 
   private async dispatch(cmd: string, a: Args): Promise<unknown> {
@@ -294,9 +342,14 @@ export class QaShell {
       // ── the shipped sidecars, on the shell's real files ────────────────────
       case "sidecar_run":
         return this.runSidecar(a);
-      case "sidecar_kill":
-        this.runs.get(String(a.runId))?.kill();
+      case "sidecar_kill": {
+        const live = this.runs.get(String(a.runId));
+        if (live) {
+          live.run.killed = true;
+          live.child.kill();
+        }
         return null;
+      }
       // ── the OS dialogs: what the test queued ───────────────────────────────
       case "plugin:dialog|open": {
         const pick = this.picks.length ? this.picks.shift()! : null;
@@ -393,20 +446,33 @@ export class QaShell {
     const toPage = (s: string): string => s.replace(/\\/g, "/").split(realRoot).join(VIRTUAL_ROOT);
     const args = (Array.isArray(a.args) ? a.args : []).map((x) => toReal(String(x)));
     const cwd = typeof a.cwd === "string" && a.cwd ? this.real(a.cwd) : undefined;
+    const run: SidecarRun = {
+      program,
+      args: (Array.isArray(a.args) ? a.args : []).map(String),
+      at: performance.now(),
+      running: false,
+      killed: false,
+    };
+    this.sidecarRuns.push(run);
     return new Promise((resolve) => {
       const child = spawn(bin, args, { cwd, windowsHide: true });
       const runId = String(a.runId ?? "");
-      this.runs.set(runId, child);
+      this.runs.set(runId, { child, run });
       let stdout = "";
       let stderr = "";
+      child.on("spawn", () => (run.running = true));
       child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
       child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
       child.on("error", (e) => {
         this.runs.delete(runId);
+        run.running = false;
+        run.ended = { at: performance.now(), code: -1 };
         resolve({ code: -1, stdout: "", stderr: `spawn failed: ${e.message}`, progress_sent: 0 });
       });
       child.on("close", (code) => {
         this.runs.delete(runId);
+        run.running = false;
+        run.ended = { at: performance.now(), code };
         resolve({ code, stdout: toPage(stdout), stderr: toPage(stderr), progress_sent: 0 });
       });
     });
