@@ -7,12 +7,16 @@
   1. -Refresh first moves this checkout to the newest origin/staging (only when no tracked file is changed) and
      reinstalls the packages from the npm cache when package-lock.json changed.
   2. -ReadyCheck names a gate script that must print READY: a time taken on a busy or battery-powered PC is noise.
-  3. Desktop lanes (the timed e2e/desktop/*.desktop.mjs): takes the real-app lock (-LockFile), checks that MCP port
-     19787, the page port 5173 and the app itself are free (an installed ArtDaddy would receive the lanes' calls),
-     finds an Edge WebDriver matching WebView2 (edgeDriver.ps1), builds the dev app (cargo build, debug: it loads its
-     page from vite), starts the stand-in service (standInServer.mjs on -ServicePort: it answers the app's build check
-     and refuses everything else, so nothing can reach a real server or a model), serves the page on 5173 pointed at it
-     with the sign-in bypass, runs the lanes -Runs times, then stops what it started and releases the lock.
+  3. Desktop lanes (the timed e2e/desktop/*.desktop.mjs). They start the real app, so the script belongs inside the
+     real-app slot (qa skill rule 8; see the examples); -LockFile also takes the older lock file, for a run that
+     cannot use the slot. Checks that MCP port 19787, the page's port and the app itself are free (an installed
+     ArtDaddy would receive the lanes' calls), finds an Edge WebDriver matching WebView2 (edgeDriver.ps1), builds the
+     dev app (cargo build, debug: it loads its page from vite) under the lanes' own identifier and sign-in link scheme
+     (e2e/desktop/timing/identity.mjs through TAURI_CONFIG; qa skill rule 12: a build with the shipped identity takes
+     over the owner's artdaddy:// sign-in link), starts the stand-in service (standInServer.mjs on -ServicePort: it
+     answers the app's build check and refuses everything else, so nothing can reach a real server or a model), serves
+     the page where that identity's devUrl points, with the sign-in bypass, runs the lanes -Runs times, stops what it
+     started, and reports a problem if the artdaddy:// link changed meanwhile.
   4. Browser lane (the timed e2e/ui specs): Playwright starts its own page server; no lock.
   5. Compares with the budgets and writes <ReportRoot>\<date_time>\report.txt (also latest.txt and the console), with
      results.jsonl and run.log beside it.
@@ -22,11 +26,11 @@
   comparing; it never changes a budget that exists (scripts/qa/timingBudgets.mjs says why).
 
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\qa\nightlyTiming.ps1 -Runs 3 -LockFile <lock file> -ReadyCheck <gate script>
+  python <wiki>\scripts\dispatch.py slot real-app --item <item> -- powershell -NoProfile -ExecutionPolicy Bypass -File scripts\qa\nightlyTiming.ps1 -Runs 3 -ReadyCheck <gate script>
 
 .EXAMPLE
-  # Daily at 02:00 as the signed-in user (the app needs a desktop), from a checkout kept for this run:
-  $a = New-ScheduledTaskAction -Execute powershell.exe -WorkingDirectory <checkout> -Argument '-NoProfile -ExecutionPolicy Bypass -File <checkout>\scripts\qa\nightlyTiming.ps1 -Refresh -LockFile <lock file>'
+  # Daily at 02:00 as the signed-in user (the app needs a desktop), from a checkout kept for this run, in the slot:
+  $a = New-ScheduledTaskAction -Execute python.exe -WorkingDirectory <checkout> -Argument '<wiki>\scripts\dispatch.py slot real-app --item nightly-timing --wait 120 -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File <checkout>\scripts\qa\nightlyTiming.ps1 -Refresh -ReadyCheck <gate script>'
   Register-ScheduledTask -TaskName 'ArtDaddy nightly timing' -Action $a -Trigger (New-ScheduledTaskTrigger -Daily -At 02:00) -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 3) -MultipleInstances IgnoreNew)
 #>
 param(
@@ -99,6 +103,13 @@ function Stop-Tree([int]$ProcessId) {
   & taskkill.exe /PID $ProcessId /T /F 2>&1 | Out-Null
 }
 
+# Where Windows sends artdaddy:// links (the owner's sign-in link). A run under the lanes' own identity leaves it alone.
+function Get-SignInLink {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\artdaddy\shell\open\command')
+  if (-not $key) { return '(none)' }
+  try { return [string]$key.GetValue('') } finally { $key.Close() }
+}
+
 Write-Log "nightly timing in $repo, $Runs run(s) per test$(if ($Calibrate) { ', calibrating' })"
 
 # --- 1. the checkout -------------------------------------------------------------------------------------------
@@ -148,6 +159,7 @@ try {
     $name = if ($conf.PSObject.Properties['mainBinaryName'] -and $conf.mainBinaryName) { $conf.mainBinaryName } else { $conf.productName }
     $target = if ($CargoTargetDir) { $CargoTargetDir } else { Join-Path $repo 'src-tauri\target' }
     $binary = Join-Path $target "debug\$name.exe"
+    $linkBefore = Get-SignInLink
     $haveLock = $false
     $vite = $null
     $service = $null
@@ -178,7 +190,7 @@ try {
           }
         }
       } else {
-        Write-Log 'no -LockFile: running the real app without the lab lock'
+        Write-Log 'no -LockFile: the real-app slot this runs in (dispatch.py slot real-app) keeps other real-app runs out'
       }
 
       $mcp = Get-ListenerPid 19787
@@ -186,8 +198,14 @@ try {
         $holder = Get-Process -Id $mcp -ErrorAction SilentlyContinue
         throw "MCP port 19787 is held by process $($mcp) ($(if ($holder) { $holder.Path })): the lanes would drive that app"
       }
-      $page = Get-ListenerPid 5173
-      if ($page) { throw "port 5173 is held by process $($page): the app would load another checkout's page" }
+      # The app is built under the lanes' own identifier and sign-in link scheme, never the installed app's (qa skill,
+      # rule 12), and loads its page from where that identity's devUrl points.
+      $identity = Join-Path $repo 'e2e\desktop\timing\identity.mjs'
+      $tauriConfig = ((& node $identity) | Out-String).Trim()
+      $pagePort = [int](((& node $identity --port) | Out-String).Trim())
+      if (-not $tauriConfig -or -not $pagePort) { throw "could not read the lanes' identity from $identity" }
+      $page = Get-ListenerPid $pagePort
+      if ($page) { throw "port $pagePort is held by process $($page): the app would load another checkout's page" }
       $taken = Get-ListenerPid $ServicePort
       if ($taken) { throw "port $ServicePort (the stand-in service) is held by process $($taken)" }
       $running = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
@@ -197,9 +215,16 @@ try {
       $env:MSEDGEDRIVER = $driver
 
       if ($CargoTargetDir) { $env:CARGO_TARGET_DIR = $CargoTargetDir }
-      Write-Log "building the dev app into $target"
-      $build = Invoke-Native 'cargo' @('build', '--locked', '--manifest-path', (Join-Path $repo 'src-tauri\Cargo.toml'))
+      Write-Log "building the dev app into $target under its own identity: $tauriConfig"
+      $env:TAURI_CONFIG = $tauriConfig
+      try {
+        $build = Invoke-Native 'cargo' @('build', '--locked', '--manifest-path', (Join-Path $repo 'src-tauri\Cargo.toml'))
+      } finally {
+        Remove-Item Env:TAURI_CONFIG -ErrorAction SilentlyContinue
+      }
       if ($build.Code -ne 0 -or -not (Test-Path $binary)) { throw "cargo build exited $($build.Code)" }
+      # No model key may reach the app or anything it starts: an AI request must fail, never bill.
+      Get-ChildItem Env: | Where-Object { $_.Name -match 'AZURE|GOOGLE|OPENAI|VERTEX|ANTHROPIC' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
       # The app checks its build with the service before it opens anything; the stand-in answers that check and
       # refuses every other request, so nothing can reach a real server (scripts/qa/standInServer.mjs).
@@ -210,20 +235,18 @@ try {
       $env:VITE_API_BASE_URL = "http://127.0.0.1:$ServicePort"
       $env:VITE_E2E_AUTH_BYPASS = '1'
       $viteLog = Join-Path $outDir 'vite.log'
-      # On 127.0.0.1, which WebView2 always tries for "localhost". Node's own choice here is ::1, which a WebView2 with
-      # no IPv6 route may skip.
       $vite = Start-Process -FilePath 'node' -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
-        -ArgumentList @('node_modules\vite\bin\vite.js', '--host', '127.0.0.1', '--port', '5173', '--strictPort') `
+        -ArgumentList @('node_modules\vite\bin\vite.js', '--host', '127.0.0.1', '--port', "$pagePort", '--strictPort') `
         -RedirectStandardOutput $viteLog -RedirectStandardError "$viteLog.err"
       $served = $false
       for ($i = 0; $i -lt 120 -and -not $served; $i++) {
         try {
-          $served = (Invoke-WebRequest -Uri 'http://127.0.0.1:5173/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+          $served = (Invoke-WebRequest -Uri "http://127.0.0.1:$pagePort/" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
         } catch {
           Start-Sleep -Seconds 1
         }
       }
-      if (-not $served) { throw 'vite did not serve http://127.0.0.1:5173 within 2 minutes (see vite.log)' }
+      if (-not $served) { throw "vite did not serve http://127.0.0.1:$pagePort within 2 minutes (see vite.log)" }
       if (-not (Get-ListenerPid $ServicePort)) { throw "the stand-in service did not start on port $ServicePort (see service.err.log)" }
 
       $env:ARTDADDY_APP_BINARY = $binary
@@ -248,6 +271,11 @@ try {
       if ($haveLock) {
         Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
         Write-Log 'released the real-app lock'
+      }
+      $linkAfter = Get-SignInLink
+      if ($linkAfter -ne $linkBefore) {
+        $problems.Add("the artdaddy:// sign-in link changed during the run (was $linkBefore, now $linkAfter)")
+        Write-Log "the artdaddy:// sign-in link changed during the run (was $linkBefore, now $linkAfter)"
       }
     }
   }

@@ -21,7 +21,7 @@ const port = Number(arg("port", "8790"));
 const logFile = arg("log", "");
 
 function cors(req, res) {
-  // The dev app's page (http://localhost:5173) calls this from another origin, with its own headers.
+  // The dev app's page (served by vite) calls this from another origin, with its own headers.
   res.setHeader("access-control-allow-origin", req.headers.origin || "*");
   res.setHeader("access-control-allow-credentials", "true");
   res.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");

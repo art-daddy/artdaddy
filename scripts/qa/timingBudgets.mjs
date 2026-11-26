@@ -22,8 +22,9 @@
 // RUN finds the timed tests, the Playwright specs under e2e/ui and the node lanes `*.desktop.mjs` under e2e/desktop that
 // import e2e/lib/timing, and runs each of them --runs times, round by round, into one results file. A test that fails,
 // times out or passes without recording a timing is a failed run (exit 1). The browser specs need @playwright/test
-// installed (playwright.config.ts says how); the desktop lanes need what their headers say (a dev build, vite serving
-// on 5173, tauri-driver, msedgedriver). scripts/qa/nightlyTiming.ps1 sets all of it up on the lab PC.
+// installed (playwright.config.ts says how); the desktop lanes need what their headers say (a dev build under the lanes'
+// own identity, vite serving where it points, tauri-driver, msedgedriver). scripts/qa/nightlyTiming.ps1 sets all of it
+// up on the lab PC.
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
