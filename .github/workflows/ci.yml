@@ -557,6 +557,8 @@ jobs:
           # its timers ran and it could reach the stand-in). They pass on the lab PC, whose nightly run is the check.
           if ($lanes -ne 0) { "::warning title=timed real-app lanes did not finish::exit $lanes. Known bug: with no saved sign-in the app waits on 'Verifying ArtDaddy' even under the e2e bypass (the screenshot is in this job's artifact)." }
           if ($wdio -ne 0) { throw "npm run e2e:desktop exited $wdio" }
+          # GitHub's pwsh step ends with `exit $LASTEXITCODE`, which would turn the lanes' warning back into a failure.
+          exit 0
       - name: times against the lab budgets (report only)
         if: always()
         shell: pwsh
