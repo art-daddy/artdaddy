@@ -1,0 +1,8 @@
+# Secret scan settings for CI (gitleaks): the default rules, none removed.
+# A reviewed false positive goes into .gitleaksignore by its fingerprint (the job summary prints it), never as a path
+# or a pattern here: an allowlist here would also hide every future secret it matches. Edits need a maintainer's review.
+# CI's canary scans a planted fake token with this file, so a change here that stops detection fails the job.
+title = "ArtDaddy secret scan"
+
+[extend]
+useDefault = true
