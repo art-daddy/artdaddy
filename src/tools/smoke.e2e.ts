@@ -32,6 +32,7 @@ import { buildRenderCommand, renderTimelineTool } from "../timeline/render";
 import { toSecondsView } from "../timeline/frames";
 import { PARITY_CANVAS, PARITY_PROBE_FRAME, parityTimeline } from "../preview/__parity";
 import {
+  commitRename,
   installE2EDocuments,
   resetE2EDocuments,
   flushE2EDoc,
@@ -64,10 +65,7 @@ const nodeFs: FsLike = {
     await fsp.mkdir(path.dirname(p), { recursive: true });
     await fsp.writeFile(p, bytes);
   },
-  async rename(src, dst) {
-    await fsp.mkdir(path.dirname(dst), { recursive: true });
-    await fsp.rename(src, dst);
-  },
+  rename: commitRename,
   async readDir(p) {
     const entries = await fsp.readdir(p, { withFileTypes: true });
     return entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
