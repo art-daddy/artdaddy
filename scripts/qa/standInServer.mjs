@@ -6,6 +6,11 @@
 // app presents, and refuses every other request with 503: nothing here can reach a model or spend money. Each request
 // is logged (method, path, status) so a run can show which routes the app tried.
 //
+// Never answer an /auth/ route with 401 and never log a body. Every build of the app, whatever its identifier, keeps its
+// saved sign-in under the installed app's keychain entry (KEYCHAIN_SERVICE in src-tauri/src/lib.rs), so on a PC where
+// the owner is signed in the app sends HIS refresh token to POST /auth/desktop/refresh here, and a 401 makes it clear
+// that entry: his installed app would be signed out. 503 leaves it alone (the app goes offline and carries on).
+//
 //   node scripts/qa/standInServer.mjs [--port 8790] [--log <file>]
 //
 // Then serve the app's page with VITE_API_BASE_URL=http://127.0.0.1:<port> (scripts/qa/nightlyTiming.ps1 and the
