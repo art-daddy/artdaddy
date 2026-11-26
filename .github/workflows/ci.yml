@@ -68,6 +68,11 @@ jobs:
       - run: npm i --no-save @playwright/test@1.61.1
       - run: npx playwright install --with-deps chromium webkit
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      # The specs append their waits to ARTDADDY_TIMING_FILE (next step) as they run, and a recorder that does not
+      # make the folder itself fails on the first one: the folder exists before any spec starts.
+      - name: Folder for the browser results and times
+        run: |
+          node -e "require('node:fs').mkdirSync('reports/qa/browser', { recursive: true })"
       - name: Real browser UI and compositor pixels
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: reports/qa/browser/results.json
