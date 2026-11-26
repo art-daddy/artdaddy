@@ -1,5 +1,10 @@
 // The person steering a running turn: Stop it, let it go on after the automatic pause, try a
 // failed one again. The waits recorded here are the ones a person feels at those buttons.
+//
+// Every step waits for a state the app shows or an event the stand-ins saw (the words the server
+// has written, the ffmpeg process running, the stopped call's answer saved, a request arriving),
+// never for a time: these run on two engines and four systems, and a time that suits one is a
+// flake on another.
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -8,7 +13,7 @@ import { manyReads } from "./fixtures/replies/manyReads";
 import { plainText } from "./fixtures/replies/plainText";
 import { serverError } from "./fixtures/replies/serverError";
 import { callTools, type Round } from "./lib/reply";
-import { expect, test, type AgentRig } from "./lib/qa";
+import { expect, knownBug, test, type AgentRig } from "./lib/qa";
 import { inBrowser, record, startTimer } from "./lib/waits";
 
 const STILL = path.resolve("e2e/ui/agent-and-models/fixtures/media/still.png");
@@ -22,6 +27,17 @@ test.describe("steering a turn", () => {
     qa.server.script(hangs());
     const id = await qa.openProject();
     await qa.send("Check every clip for black frames");
+    // The server has written every word and holds the line open, and the person sees the words:
+    // the answer is still coming when they press Stop.
+    await expect
+      .poll(
+        () => {
+          const round = qa.server.modelRounds()[0];
+          return round?.holding ? round.written?.trim() : null;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(HANGING_WORDS);
     await expect(qa.reply(HANGING_WORDS)).toBeVisible({ timeout: 15_000 });
 
     const clicked = performance.now();
@@ -52,12 +68,16 @@ test.describe("steering a turn", () => {
     await expect
       .poll(() => qa.savedTranscriptText(id), { timeout: 10_000 })
       .toContain("OK, I stopped. What should I do instead?");
-    const saved = await qa.savedTranscript(id);
-    expect(saved?.requests?.map((r) => r.message?.text)).toEqual([
-      "Check every clip for black frames",
-      "Never mind",
-    ]);
+    await expect
+      .poll(() => qa.savedMessages(id), { timeout: 10_000 })
+      .toEqual(["Check every clip for black frames", "Never mind"]);
   });
+
+  /** The scripted ffmpeg run: paced to real time (`-re`), so it runs a minute unless it is killed.
+   *  The app runs ffmpeg under its packaged name (`artdaddy-ffmpeg`, src/tools/sidecar.ts). */
+  function holdRun(qa: AgentRig) {
+    return qa.shell.sidecarRuns.find((r) => /ffmpeg$/.test(r.program) && r.args.includes("-re"));
+  }
 
   /** Start a turn whose first call is a long ffmpeg job (paced to real time: a minute, no CPU)
    *  with an edit queued behind it, Stop it while ffmpeg runs, then send one more message.
@@ -65,9 +85,20 @@ test.describe("steering a turn", () => {
   async function stopDuringTool(qa: AgentRig) {
     const id = await qa.openProject();
     await qa.attach(STILL);
-    const ref = String(
-      (await qa.savedAssets(id)).find((a) => JSON.stringify(a).includes("still.png"))?.id ?? "",
-    );
+    let ref = "";
+    await expect
+      .poll(
+        async () => {
+          const still = (await qa.savedAssets(id)).find((a) =>
+            JSON.stringify(a).includes("still.png"),
+          );
+          ref = String(still?.id ?? "");
+          return ref;
+        },
+        { timeout: 15_000 },
+      )
+      .not.toBe("");
+    await expect.poll(() => qa.savedTimeline(id), { timeout: 15_000 }).not.toBeNull();
     const before = JSON.stringify(await qa.savedTimeline(id));
     qa.server.script(
       callTools(
@@ -99,13 +130,16 @@ test.describe("steering a turn", () => {
       ),
     );
     await qa.send("Make a one minute hold of this picture, then add a text track");
-    await expect
-      .poll(() => qa.shell.calls.some((c) => c.cmd === "sidecar_run"), { timeout: 15_000 })
-      .toBe(true);
+    // Stop lands while ffmpeg runs: its process has started and has not ended.
+    await expect.poll(() => holdRun(qa)?.running ?? false, { timeout: 15_000 }).toBe(true);
     const stopped = startTimer(inBrowser("Stop taking effect while a tool runs"));
     await qa.stopButton.click();
     await expect(qa.sendButton).toBeVisible({ timeout: 15_000 });
     stopped.stop();
+    // Stop hands the composer back at once while the call it ended winds down (ffmpeg is killed and
+    // the call answers). The next message is written once that answer is saved, so what it owes the
+    // model is the same on every run.
+    await expect.poll(() => qa.savedAnswers("run_ffmpeg", id), { timeout: 15_000 }).toBe(1);
 
     let owed: Round["toolResults"] = [];
     qa.server.script((round: Round) => {
@@ -124,8 +158,10 @@ test.describe("steering a turn", () => {
     qa,
   }) => {
     const { id, before, owed } = await stopDuringTool(qa);
-    // The ffmpeg the tool started was killed, and the edit queued behind it never ran.
-    expect(qa.shell.calls.some((c) => c.cmd === "sidecar_kill")).toBe(true);
+    // The ffmpeg the tool started was killed rather than left to run out its minute, and the edit
+    // queued behind it never ran.
+    expect(holdRun(qa)?.killed).toBe(true);
+    expect(holdRun(qa)?.ended).toBeDefined();
     expect(JSON.stringify(await qa.savedTimeline(id))).toBe(before);
     expect((await qa.savedAssets(id)).some((a) => JSON.stringify(a).includes("long_hold"))).toBe(
       false,
@@ -140,9 +176,9 @@ test.describe("steering a turn", () => {
   });
 
   test("a tool that Stop ended is answered as stopped, not as a failure to fix", async ({ qa }) => {
-    test.fail(
-      true,
-      'BUG: Stop during run_ffmpeg shows "Couldn\'t run ffmpeg" and tells the model to fix its args',
+    knownBug(
+      'art-daddy/backlog#81: Stop during run_ffmpeg says "Couldn\'t run ffmpeg" and tells the model to fix its args',
+      /"error": "ffmpeg failed \(code=-?\d+\)\. Read stderr_tail and fix your args\."/,
     );
     const { owed } = await stopDuringTool(qa);
     // src/lib/stopped.ts: a call Stop ended answers `cancelled`, and the chat never says "Couldn't".
@@ -154,19 +190,21 @@ test.describe("steering a turn", () => {
   test("after 40 steps the turn pauses and asks; Continue sends the paused results and the agent finishes", async ({
     qa,
   }) => {
-    let resumed: Round | null = null;
-    qa.server.script(manyReads(40), (round: Round) => {
-      resumed = round;
-      return plainText("All 40 checks are done; the timeline is consistent.");
-    });
+    qa.server.script(manyReads(40));
     await qa.openProject();
     await qa.send("Check the timeline thoroughly");
     const ask = qa.pane.getByText(/has been running for a long time — continue to iterate\?/);
     await expect(ask).toBeVisible({ timeout: 30_000 });
-    // Paused means paused: no round goes out until the person answers.
-    await qa.page.waitForTimeout(1500);
+    // Paused means paused. The next reply is scripted only now, just before Continue: a round the
+    // app sent by itself would find none and fail the test (lib/qa.ts), whenever it came.
     expect(qa.server.modelRounds()).toHaveLength(1);
+    let resumed: Round | null = null;
+    qa.server.script((round: Round) => {
+      resumed = round;
+      return plainText("All 40 checks are done; the timeline is consistent.");
+    });
 
+    const clicked = performance.now();
     const resumedWait = startTimer(inBrowser("Continue to the next answer"));
     await qa.pane.getByRole("button", { name: "▶ Continue" }).click();
     await expect(qa.reply("All 40 checks are done; the timeline is consistent.")).toBeVisible({
@@ -174,7 +212,9 @@ test.describe("steering a turn", () => {
     });
     resumedWait.stop();
     await qa.idle();
-    expect(qa.server.modelRounds()).toHaveLength(2);
+    const rounds = qa.server.modelRounds();
+    expect(rounds).toHaveLength(2);
+    expect(rounds[1].at).toBeGreaterThan(clicked);
     expect(resumed).not.toBeNull();
     const results = (resumed as Round | null)?.toolResults ?? [];
     expect(results).toHaveLength(40);
@@ -184,7 +224,7 @@ test.describe("steering a turn", () => {
   test("a failed turn offers Try again, which sends the same message once and gets the answer", async ({
     qa,
   }) => {
-    qa.server.script(serverError(), plainText("Here it is, second time lucky."));
+    qa.server.script(serverError());
     const id = await qa.openProject();
     await qa.send("Summarise the project");
     await expect(
@@ -192,10 +232,12 @@ test.describe("steering a turn", () => {
     ).toBeVisible({ timeout: 15_000 });
     const again = qa.pane.getByRole("button", { name: "↻ Try again" });
     await expect(again).toBeVisible();
-    // Nothing is sent again by itself.
-    await qa.page.waitForTimeout(1500);
+    // Nothing is sent again by itself. The answer is scripted only now, just before the click: a
+    // round the app sent on its own would find none and fail the test (lib/qa.ts), whenever it came.
     expect(qa.server.modelRounds()).toHaveLength(1);
+    qa.server.script(plainText("Here it is, second time lucky."));
 
+    const clicked = performance.now();
     const retried = startTimer(inBrowser("Try again to the answer"));
     await again.click();
     await expect(qa.reply("Here it is, second time lucky.")).toBeVisible({ timeout: 15_000 });
@@ -203,14 +245,16 @@ test.describe("steering a turn", () => {
     await qa.idle();
     const rounds = qa.server.modelRounds();
     expect(rounds).toHaveLength(2);
+    expect(rounds[1].at).toBeGreaterThan(clicked);
     const textOf = (b: unknown) =>
       String((b as { round_input?: { user_text?: string } }).round_input?.user_text ?? "");
     expect(textOf(rounds[1].body)).toBe(textOf(rounds[0].body));
     // One message in the record, not two, and the answer that came on the second try is kept.
     await expect
-      .poll(async () => qa.savedTranscriptText(id), { timeout: 10_000 })
+      .poll(() => qa.savedTranscriptText(id), { timeout: 10_000 })
       .toContain("Here it is, second time lucky.");
-    const saved = await qa.savedTranscript(id);
-    expect(saved?.requests?.map((r) => r.message?.text)).toEqual(["Summarise the project"]);
+    await expect
+      .poll(() => qa.savedMessages(id), { timeout: 10_000 })
+      .toEqual(["Summarise the project"]);
   });
 });

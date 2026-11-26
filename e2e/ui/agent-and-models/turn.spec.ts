@@ -8,7 +8,7 @@ import { LONG_REPLY_LAST_LINE, longReply } from "./fixtures/replies/longReply";
 import { plainText } from "./fixtures/replies/plainText";
 import { slowFirstToken } from "./fixtures/replies/slowFirstToken";
 import { say } from "./lib/reply";
-import { expect, test } from "./lib/qa";
+import { expect, knownBug, test } from "./lib/qa";
 import { inBrowser, startTimer } from "./lib/waits";
 
 const STILL = path.resolve("e2e/ui/agent-and-models/fixtures/media/still.png");
@@ -186,9 +186,9 @@ test.describe("starting a turn", () => {
   test("an attached picture is named to the agent by its library ref, never its path on disk", async ({
     qa,
   }) => {
-    test.fail(
-      true,
-      "BUG: a file attached in the desktop app is sent to the agent as its absolute path on disk, not its media ref",
+    knownBug(
+      "art-daddy/backlog#80: a file attached in the desktop app reaches the agent as its full path on disk, not its media ref",
+      /image \(still\.png\): \/qa-home\/media\/still\.png/,
     );
     qa.server.script(plainText("It is a test card with colour bars."));
     const id = await qa.openProject();

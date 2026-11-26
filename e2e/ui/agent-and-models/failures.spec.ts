@@ -57,6 +57,8 @@ test.describe("when the turn cannot happen", () => {
     await qa.openProject();
     await qa.send("Describe my project");
     await expect(qa.reply(new RegExp(`^${FIRST_WORD}`))).toBeVisible({ timeout: 15_000 });
+    // The person has seen the first word: now the connection dies.
+    qa.server.release();
     // Chromium reports the cut socket (TypeError "network error") and the app names a lost
     // connection. Playwright's WebKit ends a cut stream as if it were complete, so the app only sees
     // a stream that ended without its result, which has no sentence of its own and reads as
