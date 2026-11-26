@@ -24,12 +24,13 @@ test.describe("when the turn cannot happen", () => {
     // The connection to ArtDaddy drops (the app's own page keeps running).
     const offline = `${qa.server.origin}/**`;
     await qa.page.route(offline, (route) => route.abort("internetdisconnected"));
+    await qa.watchStatus();
     const said = startTimer(inBrowser("no connection to the message saying so"));
     await qa.send("Tighten the cuts");
-    // It tries the connection once more before giving up, and says that it is.
-    await expect(qa.pane.getByRole("status")).toHaveText(/Reconnecting/, { timeout: 5000 });
     await expect(qa.pane.getByText(CANT_REACH).first()).toBeVisible({ timeout: 15_000 });
     said.stop();
+    // It tried the connection once more before giving up, and said that it was.
+    expect(await qa.statusesSeen()).toContainEqual(expect.stringMatching(/^Reconnecting/));
     expect(qa.server.modelRounds()).toHaveLength(0);
     await expect(tryAgain(qa)).toBeVisible();
 

@@ -34,19 +34,24 @@ test.describe("starting a turn", () => {
     const id = await qa.openProject();
 
     await qa.composer.fill("What can I cut?");
+    await qa.watchAnswer("Your timeline");
     const firstWord = startTimer(inBrowser("first visible reply"));
     const finished = startTimer(inBrowser("turn finished, a short streamed reply"));
     await qa.composer.press("Enter");
 
-    // The prompt shows at once, and the answer forms word by word: the first words are on screen
-    // while the rest of the sentence has not arrived yet.
+    // The prompt shows at once, and the answer forms word by word on screen.
     await expect(qa.pane.getByText("What can I cut?", { exact: true })).toBeVisible();
     await expect(qa.reply(/^Your timeline/)).toBeVisible({ timeout: 15_000 });
     firstWord.stop();
-    await expect(qa.reply(answer)).toHaveCount(0);
     await expect(qa.reply(answer)).toBeVisible({ timeout: 15_000 });
     await qa.idle();
     finished.stop();
+    const grew = await qa.answerLengths();
+    expect(grew.at(-1)).toBe(answer.length);
+    expect(
+      grew.filter((n) => n < answer.length).length,
+      "the answer appeared whole instead of forming as it streamed",
+    ).toBeGreaterThanOrEqual(5);
     await expect(qa.composer).toHaveValue("");
 
     // What the agent was sent: the person's words, then the project the app read for it.
@@ -78,15 +83,16 @@ test.describe("starting a turn", () => {
     qa.server.script(slowFirstToken(delay));
     await qa.openProject();
     await qa.composer.fill("Is my project ready to export?");
+    await qa.watchStatus();
     const firstWord = startTimer(inBrowser("first visible reply after a 3 s first token"));
     const t0 = Date.now();
     await qa.sendButton.click();
 
-    // While the socket is silent the pane says what it is waiting on, and Stop is offered.
-    await expect(qa.pane.getByRole("status")).toHaveText(/Thinking/, { timeout: 2000 });
+    // While the socket is silent Stop is offered, and the pane says what it is waiting on.
     await expect(qa.stopButton).toBeVisible();
     await expect(qa.reply(/Sorry for the wait/)).toBeVisible({ timeout: delay + 10_000 });
     const waited = firstWord.stop().ms;
+    expect(await qa.statusesSeen()).toContainEqual(expect.stringMatching(/^Thinking/));
     expect(
       Date.now() - t0,
       "the first word appeared before the server sent it",

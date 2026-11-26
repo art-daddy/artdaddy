@@ -151,6 +151,67 @@ export class AgentRig {
     await expect(this.stopButton).toHaveCount(0, { timeout });
   }
 
+  /** From now on, note every line the assistant's status shows ("Thinking…", "Reconnecting…"),
+   *  however briefly: a one-second line can fall between two polls of an assertion. */
+  async watchStatus(): Promise<void> {
+    await this.page.evaluate(() => {
+      const w = window as unknown as { __qaStatuses?: string[] };
+      const seen: string[] = [];
+      w.__qaStatuses = seen;
+      const note = () => {
+        for (const el of document.querySelectorAll(
+          'section[aria-label="Assistant"] [role="status"]',
+        )) {
+          const text = (el.textContent ?? "").trim();
+          if (text && seen[seen.length - 1] !== text) seen.push(text);
+        }
+      };
+      new MutationObserver(note).observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+      note();
+    });
+  }
+
+  /** The status lines noted since `watchStatus()`, in order. */
+  async statusesSeen(): Promise<string[]> {
+    return this.page.evaluate(
+      () => (window as unknown as { __qaStatuses?: string[] }).__qaStatuses ?? [],
+    );
+  }
+
+  /** From now on, note each length the assistant's answer starting with `prefix` has on screen, so a
+   *  test can tell an answer that formed word by word from one that appeared whole. */
+  async watchAnswer(prefix: string): Promise<void> {
+    await this.page.evaluate((start) => {
+      const w = window as unknown as { __qaLengths?: number[] };
+      const lengths: number[] = [];
+      w.__qaLengths = lengths;
+      const note = () => {
+        for (const el of document.querySelectorAll('section[aria-label="Assistant"] div')) {
+          if (el.children.length) continue;
+          const text = el.textContent ?? "";
+          if (text.startsWith(start) && lengths[lengths.length - 1] !== text.length)
+            lengths.push(text.length);
+        }
+      };
+      new MutationObserver(note).observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+    }, prefix);
+  }
+
+  /** The lengths noted since `watchAnswer()`, in order. */
+  async answerLengths(): Promise<number[]> {
+    return this.page.evaluate(
+      () => (window as unknown as { __qaLengths?: number[] }).__qaLengths ?? [],
+    );
+  }
+
   async savedTimeline(id = this.projectId()): Promise<SavedTimeline | null> {
     return this.shell.readProjectJson<SavedTimeline>(id, "internals/timeline.json");
   }
