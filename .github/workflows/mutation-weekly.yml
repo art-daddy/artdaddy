@@ -11,8 +11,9 @@
 #
 # So the scope is cut into many shards that run side by side, each planned to test its mutants in no more than about
 # four hours (stryker.ci.mjs; the files, and the parts of the biggest files, of each shard are in
-# scripts/ci/mutationShards.json, sized from that run). The first job lists the shards from stryker.ci.mjs, so the list
-# lives in one place; the last job puts their reports together and names any shard that sent none.
+# scripts/ci/mutationShards.json, sized from measured runs: its note says which). The first job lists the shards from
+# stryker.ci.mjs, so the list lives in one place; the last job puts their reports together and names any shard that
+# sent none.
 #
 #   gh workflow run mutation-weekly.yml                                       the full run now
 #   gh workflow run mutation-weekly.yml -f shard=tools-01                     one shard (its name, from stryker.ci.mjs)

@@ -240,6 +240,21 @@ describe("reading a report", () => {
     expect(said).toContain("| src/tools | 10.0% |");
   });
 
+  it("counts every mutant of a file that several shards each tested a part of, as one file", () => {
+    const d = tmp();
+    const parts = [{ Killed: 5, Survived: 1 }, { Killed: 2, Survived: 2 }, { NoCoverage: 2 }];
+    const paths = parts.map((counts, i) => {
+      const path = join(d, `part${i}.json`);
+      writeFileSync(path, JSON.stringify(reportOf({ "src/timeline/render.ts": fileOf(counts) })));
+      return path;
+    });
+    const { code, said } = run(paths);
+    expect(code).toBe(0);
+    expect(said).toContain(
+      "**Mutation score 58.3%** over 1 files: 7 caught, 3 survived, 2 not covered by any test.",
+    );
+  });
+
   it("names every shard the run started that sent no report, is an error, and still shows what arrived", () => {
     const d = tmp();
     const shardReport = (shard, files) => {

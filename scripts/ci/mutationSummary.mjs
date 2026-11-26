@@ -105,9 +105,19 @@ export function summaryMarkdown(s, { title = "Mutation report" } = {}) {
   return lines.join("\n") + "\n";
 }
 
-/** Several Stryker reports as one: the shards of a run write one report each, over files that do not overlap. */
+/** Several Stryker reports as one: the shards of a run write one report each. A file too big for one shard is cut into
+ *  parts (stryker.ci.mjs), so it is in several reports, each with the mutants of its own part: those are put together,
+ *  never one report's in place of another's. */
 export function mergeReports(reports) {
-  return { files: Object.assign({}, ...reports.map((r) => r?.files ?? {})) };
+  const files = {};
+  for (const report of reports)
+    for (const [path, file] of Object.entries(report?.files ?? {})) {
+      const seen = files[path];
+      files[path] = seen
+        ? { ...seen, mutants: [...(seen.mutants ?? []), ...(file?.mutants ?? [])] }
+        : file;
+    }
+  return { files };
 }
 
 /** The shard a report came from: the workflow downloads each shard's report into a folder `mutation-<shard>`. */
