@@ -6,7 +6,7 @@
 // input delivered to the app window only — unlike synthetic OS-level mouse events, it cannot
 // land in another application if the app loses focus.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -256,7 +256,7 @@ export function attachCapabilities(port = ATTACH_PORT) {
 }
 
 /** The webview's address, title and the start of its text, for a failure message. */
-async function describePage(s) {
+export async function describePage(s) {
   try {
     const [href, title, text] = await s.exec(
       'return [location.href, document.title, (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().slice(0, 300)];',
@@ -264,6 +264,31 @@ async function describePage(s) {
     return `${href} ("${title}"): ${text || "(no text)"}`;
   } catch (error) {
     return `nothing readable (${error.message})`;
+  }
+}
+
+/** Polls `script` in the webview until it returns something truthy, as waitFor does. When it never does, the error says
+ *  what the webview shows and a screenshot of the app's window goes beside the run's times (the folder of
+ *  ARTDADDY_TIMING_FILE, which CI uploads): a lane that stops before its screen says where it stopped. */
+export async function waitInApp(s, script, options = {}) {
+  try {
+    return await waitFor(() => s.exec(script), options);
+  } catch (error) {
+    const shot = await saveScreenshot(s, options.label ?? "wait");
+    throw new Error(`${error.message}; the webview shows ${await describePage(s)}${shot ? `; screenshot ${shot}` : ""}`);
+  }
+}
+
+async function saveScreenshot(s, label) {
+  try {
+    const png = await s.screenshot();
+    const dir = process.env.ARTDADDY_TIMING_FILE ? path.dirname(path.resolve(process.env.ARTDADDY_TIMING_FILE)) : os.tmpdir();
+    const file = path.join(dir, `${label.replace(/[^\w-]+/g, "_").slice(0, 60)}-${Date.now()}.png`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, Buffer.from(png, "base64"));
+    return file;
+  } catch {
+    return null;
   }
 }
 
@@ -326,6 +351,8 @@ function session(id) {
     quit: () => call("DELETE", s("")).catch(() => {}),
     /** Run JS in the webview. `body` is a function source string; args are JSON. */
     exec: (script, args = []) => call("POST", s("/execute/sync"), { script, args }),
+    /** The app's window as a base64 PNG (the webview only, never the desktop around it). */
+    screenshot: () => call("GET", s("/screenshot")),
     findAll: (css) => call("POST", s("/elements"), { using: "css selector", value: css }),
     async find(css) {
       const els = await self.findAll(css);

@@ -23,6 +23,7 @@ import {
   sleep,
   startDriver,
   waitFor,
+  waitInApp,
 } from "./webdriver.mjs";
 
 const STAMP = Date.now().toString().slice(-5);
@@ -120,10 +121,9 @@ const driver = await startDriver();
 let s;
 try {
   s = await newSession(appBinary());
-  await waitFor(
-    () => s.exec("return [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'File');"),
-    { label: "the app to boot" },
-  );
+  await waitInApp(s, "return [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'File');", {
+    label: "the app to boot",
+  });
   await waitFor(async () => !!(await rpc("ping", {})), { label: "the MCP port" });
   await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "expdest", version: "1" } });
 

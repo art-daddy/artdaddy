@@ -17,11 +17,12 @@
 // the dev app shares the real projects folder, so it never opens another one. Only one app can hold the MCP port, so
 // it refuses to start while something else listens there (an installed ArtDaddy).
 //
-// PREREQUISITES: tauri-driver + msedgedriver on PATH (or MSEDGEDRIVER=<path>), a debug build
-// (`cargo build` in src-tauri; ARTDADDY_APP_BINARY=<exe> when CARGO_TARGET_DIR put it elsewhere) and
-// `npx vite --port 5173` running with VITE_E2E_AUTH_BYPASS=1 and VITE_API_BASE_URL at a service that answers the
-// app's build check (a real local one, or scripts/qa/standInServer.mjs); without one the app stops on "Verifying
-// ArtDaddy". scripts/qa/nightlyTiming.ps1 sets all of this up.
+// PREREQUISITES: tauri-driver + msedgedriver on PATH (or MSEDGEDRIVER=<path>), a debug build under the lanes' own
+// identity (`cargo build` in src-tauri with TAURI_CONFIG from e2e/desktop/timing/identity.mjs, never the shipped
+// identity: qa skill rule 12; ARTDADDY_APP_BINARY=<exe> when CARGO_TARGET_DIR put it elsewhere) and vite serving the
+// page where that identity's devUrl points, with VITE_E2E_AUTH_BYPASS=1 and VITE_API_BASE_URL at a service that
+// answers the app's build check (a real local one, or scripts/qa/standInServer.mjs); without one the app stops on
+// "Verifying ArtDaddy". scripts/qa/nightlyTiming.ps1 sets all of this up, inside the real-app slot.
 //
 //   node e2e/desktop/previewColdStart.desktop.mjs
 import { copyFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
@@ -38,6 +39,7 @@ import {
   sleep,
   startDriver,
   waitFor,
+  waitInApp,
 } from "./webdriver.mjs";
 
 const NAME = `sweep_coldstart${Date.now().toString().slice(-6)}`;
@@ -113,7 +115,7 @@ async function main() {
     copyFileSync(path.join(root, "public", "test-clip.mp4"), MEDIA);
     // Launch 1, not timed: vite transforms the code on first request, and the project to open is made here.
     s = await newSession(appBinary());
-    await waitFor(() => s.exec(USABLE), {
+    await waitInApp(s, USABLE, {
       label: "the start screen (first launch)",
       timeout: 240_000,
       interval: 250,
@@ -161,7 +163,7 @@ async function main() {
 
     // Launch 2, timed.
     s = await newSession(appBinary());
-    const usable = await waitFor(() => s.exec(USABLE), {
+    const usable = await waitInApp(s, USABLE, {
       label: "the start screen",
       timeout: 120_000,
       interval: 50,
