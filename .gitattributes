@@ -3,3 +3,5 @@
 src-tauri/PRIVACY.txt text eol=crlf
 *.snap text eol=lf
 src/timeline/__golden.export.txt text eol=lf
+# Git hooks run under sh, where a CR at the end of a line breaks a strict shell.
+.githooks/* text eol=lf
