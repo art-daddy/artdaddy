@@ -1,11 +1,11 @@
-// Dev-only probe for e2e/ui/parity.spec.ts (art-daddy/backlog#83). Draws every parity case of
-// __parityCases.ts with the preview's OWN client - createPreviewClient: the real source resolution
-// (resolvePreviewUrl, with its H.264 calibration), the runtime the preview worker runs
-// (startPreviewRuntime, here on the main thread, which is where the app runs it when the worker has
-// no WebGL2), the main thread's text rasteriser and the bundled fonts - at each compared frame, and
-// reports what the canvas SHOWS, pooled into the same block means the export's references hold.
-// Nothing is read back from the code under test: the answer is read off the pixels. Not part of the
-// production build.
+// Dev-only probe for e2e/ui/parity.spec.ts (art-daddy/backlog#83). Draws a parity case of
+// __parityCases.ts, on demand (window.__parityDraw), with the preview's OWN client -
+// createPreviewClient: the real source resolution (resolvePreviewUrl, with its H.264 calibration), the
+// runtime the preview worker runs (startPreviewRuntime, here on the main thread, which is where the app
+// runs it when the worker has no WebGL2), the main thread's text rasteriser and the bundled fonts - at
+// one compared frame, and reports what the canvas SHOWS, pooled into the same block means the export's
+// references hold. Nothing is read back from the code under test: the answer is read off the pixels.
+// Not part of the production build.
 import {
   ALL_PARITY_CASES,
   PARITY_BLOCK,
@@ -175,20 +175,16 @@ async function shoot(c: ParityCase, frame: number): Promise<ParityShot> {
   }
 }
 
-void (async () => {
+/** What the spec calls: draw one case at one frame, on demand, so a failed test costs one picture. */
+async function draw(name: string, frame: number): Promise<ParityShot> {
+  const c = ALL_PARITY_CASES.find((p) => p.name === name);
+  if (!c) throw new Error(`no parity case named ${name}`);
+  stage(`${name}@${frame}`);
   try {
-    const only = new URLSearchParams(location.search).get("cases")?.split(",");
-    const shots: ParityShot[] = [];
-    for (const c of ALL_PARITY_CASES) {
-      if (only && !only.includes(c.name)) continue;
-      for (const frame of c.frames) {
-        stage(`${c.name}@${frame}`);
-        shots.push(await shoot(c, frame));
-      }
-    }
-    stage("complete");
-    (window as unknown as { __parity: unknown }).__parity = { shots };
-  } catch (e) {
-    (window as unknown as { __parity: unknown }).__parity = { error: String(e) };
+    return await shoot(c, frame);
+  } finally {
+    stage("idle");
   }
-})();
+}
+
+Object.assign(window, { __parityDraw: draw, __parityReady: true });
