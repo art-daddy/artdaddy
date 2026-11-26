@@ -501,17 +501,17 @@ jobs:
       # Kept out of the lockfile, like Playwright in the browser job: only this lane uses it.
       - name: WebdriverIO
         run: npm i --no-save @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/spec-reporter@9
-      # GitHub's Windows runners are elevated, and an elevated WebView2 ignores the WEBVIEW2_* variables the Edge
-      # WebDriver starts the app with ("DevToolsActivePort file doesn't exist"); HKLM policy reaches it, as
-      # scripts/qa/windowsUpdateCanary.mjs found. So the arguments the driver would give it, plus a debugging port, are
-      # set here (the policy replaces the app's own, so attachBrowserArgs repeats them), and the lanes start the app and
-      # attach to it (e2e/desktop/webdriver.mjs).
+      # GitHub's Windows runners are elevated, and an elevated WebView2 ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,
+      # which the Edge WebDriver opens the app's debugging port with ("DevToolsActivePort file doesn't exist"); HKLM
+      # policy reaches it. So the port is set here with the app's own arguments, which the policy replaces
+      # (policyBrowserArgs; a longer value holding the driver's switches too was ignored whole), and the lanes start the
+      # app and attach to it, each launch on a fresh profile (e2e/desktop/webdriver.mjs launchForAttach).
       - name: open the app's WebView2 debugging port through policy (the runner is elevated)
         shell: pwsh
         run: |
           $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
           $exe = $(if ($conf.PSObject.Properties['mainBinaryName'] -and $conf.mainBinaryName) { $conf.mainBinaryName } else { $conf.productName }) + '.exe'
-          $browserArgs = node --input-type=module -e "const m = await import('./e2e/desktop/webdriver.mjs'); console.log(m.attachBrowserArgs(9223));"
+          $browserArgs = node --input-type=module -e "const m = await import('./e2e/desktop/webdriver.mjs'); console.log(m.policyBrowserArgs(9223));"
           if ($LASTEXITCODE -ne 0 -or -not $browserArgs) { throw 'could not work out the WebView2 arguments' }
           "WebView2 arguments for $($exe): $browserArgs"
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments" /v $exe /t REG_SZ /d "$browserArgs" /f
