@@ -21,7 +21,7 @@ import { useProjectNotice } from "../store/projectNotice";
 import { useProjects } from "../store/projects";
 import type { Clip, Timeline, Track } from "../timeline/model";
 import { validateTimeline } from "../timeline/validate";
-import { ProjectDisk } from "../test/projectDisk";
+import { ProjectDisk, quietMediaLogs } from "../test/projectDisk";
 import { INTERNAL_DIR, joinPath, ProjectStoreAccess } from "./store";
 
 const APPDATA = "C:/Users/golden/AppData/Roaming";
@@ -120,6 +120,7 @@ async function openInEditor(id: string): Promise<{ outcome: string; timeline: Ti
 }
 
 beforeEach(() => {
+  quietMediaLogs();
   setProjectStoreFactory((dir) => new ProjectStoreAccess(dir, disk.current as ProjectDisk));
   setRunnerFactory(() => ({
     run: async () => ({ code: 1, stdout: "", stderr: "no media tools in this test" }),

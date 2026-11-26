@@ -5,8 +5,23 @@
 // A fake that kept JS strings would answer a different question about a file someone else wrote.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { vi } from "vitest";
 
 import { joinPath, type DirEntry, type FsLike } from "../tools/store";
+
+/** Opening a project starts the media indexing, which prints a line for each file it looks at and,
+ *  with no ffmpeg in the unit lane, one more for each poster it could not make. Call in beforeEach to
+ *  keep those lines out of the run's log; anything else still prints. */
+export function quietMediaLogs(): void {
+  const noisy = /^\[(mediaProxy|transcode)\]/;
+  for (const level of ["debug", "log", "info", "warn", "error"] as const) {
+    const print = console[level].bind(console);
+    vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+      if (typeof args[0] === "string" && noisy.test(args[0])) return;
+      print(...args);
+    });
+  }
+}
 
 export class ProjectDisk implements FsLike {
   readonly files = new Map<string, Uint8Array>();

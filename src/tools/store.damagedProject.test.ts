@@ -18,7 +18,7 @@ import { IndexCoordinator } from "../store/indexCoordinator";
 import { useProjectNotice } from "../store/projectNotice";
 import { useProjects } from "../store/projects";
 import type { Timeline } from "../timeline/model";
-import { ProjectDisk } from "../test/projectDisk";
+import { ProjectDisk, quietMediaLogs } from "../test/projectDisk";
 import { reconcilePendingMedia } from "./import";
 import { INTERNAL_DIR, joinPath, ProjectStoreAccess, type LibraryClip } from "./store";
 
@@ -200,6 +200,7 @@ function reset(): void {
 const backgroundErrors: unknown[] = [];
 
 beforeEach(() => {
+  quietMediaLogs();
   setProjectStoreFactory((dir) => new ProjectStoreAccess(dir, disk.current as ProjectDisk));
   setRunnerFactory(() => ({
     run: async () => ({ code: 1, stdout: "", stderr: "no media tools in this test" }),
