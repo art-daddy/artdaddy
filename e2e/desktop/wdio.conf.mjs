@@ -97,8 +97,8 @@ export const config = {
     });
     if (ATTACH_PORT) attached = await launchForAttach(binary);
   },
-  onComplete: () => {
-    attached?.stop();
+  onComplete: async () => {
+    await attached?.stop();
     driver?.kill();
   },
 };

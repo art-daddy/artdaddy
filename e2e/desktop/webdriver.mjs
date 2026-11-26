@@ -6,8 +6,9 @@
 // input delivered to the app window only — unlike synthetic OS-level mouse events, it cannot
 // land in another application if the app loses focus.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -144,24 +145,80 @@ export async function startDriver() {
  *  launchForAttach); 0 when unset, the usual way. */
 export const ATTACH_PORT = Number(process.env.ARTDADDY_WEBVIEW2_DEBUG_PORT || 0);
 
+/** The switches the Edge WebDriver starts the app's WebView2 with (read from its browser process, msedgedriver 158),
+ *  so an app started for attach runs as one the driver starts. Without them an app on a fresh profile sat on
+ *  about:blank for over 100 s on the lab PC. */
+const DRIVER_SWITCHES = [
+  "--allow-pre-commit-input",
+  "--disable-background-networking",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-client-side-phishing-detection",
+  "--disable-default-apps",
+  "--disable-hang-monitor",
+  "--disable-popup-blocking",
+  "--disable-prompt-on-repost",
+  "--disable-sync",
+  "--enable-automation",
+  "--enable-logging",
+  "--log-level=0",
+  "--no-first-run",
+  "--no-service-autorun",
+  "--password-store=basic",
+  "--test-type=webdriver",
+  "--use-mock-keychain",
+];
+const DRIVER_DISABLED_FEATURES = ["IgnoreDuplicateNavs", "Prewarm"];
+
+/** The WebView2 arguments for an app started for attach: the app's own (tauri.conf.json; whatever sets arguments
+ *  replaces them), the Edge WebDriver's, and the debugging port. The desktop-e2e job in ci.yml sets the same through
+ *  policy. */
+export function attachBrowserArgs(port = ATTACH_PORT) {
+  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
+  const own = ((conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "").split(/\s+/).filter(Boolean);
+  const ownDisabled = own.find((a) => a.startsWith("--disable-features="))?.slice("--disable-features=".length);
+  const disabled = [...(ownDisabled ? ownDisabled.split(",") : []), ...DRIVER_DISABLED_FEATURES];
+  return [
+    ...own.filter((a) => !a.startsWith("--disable-features=")),
+    `--disable-features=${disabled.join(",")}`,
+    ...DRIVER_SWITCHES,
+    `--remote-debugging-port=${port}`,
+    "--remote-allow-origins=*",
+  ].join(" ");
+}
+
 /** Starts the app with its WebView2 debugging port open, for the Edge WebDriver to attach to (`debuggerAddress`).
  *
  *  The Edge WebDriver opens that port with WEBVIEW2_* variables when it starts the app, and an ELEVATED WebView2
  *  ignores those ("session not created: DevToolsActivePort file doesn't exist"). GitHub's Windows runners are
- *  elevated, so there the port comes from HKLM policy instead (the desktop-e2e job in .github/workflows/ci.yml sets
- *  it, as scripts/qa/windowsUpdateCanary.mjs does) and the variable below serves a normal machine. Whatever opens the
- *  port replaces the app's own WebView2 arguments (tauri.conf.json), so they are repeated. Returns the app's process
- *  once the port answers. */
+ *  elevated, so there the arguments come from HKLM policy instead (the desktop-e2e job in .github/workflows/ci.yml
+ *  sets them, as scripts/qa/windowsUpdateCanary.mjs does) and the variables below serve a normal machine. Like the
+ *  driver, each launch gets a fresh WebView2 profile: the app's own one keeps what earlier sessions stored (on the lab
+ *  PC an `artdaddy.api_base` override sent the app's first call to a closed port). An elevated WebView2 ignores that
+ *  variable too, which a runner's new machine makes harmless. Returns the app's process once a page exists. */
 export async function launchForAttach(application, port = ATTACH_PORT) {
-  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
-  const own = (conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "";
+  const profile = mkdtempSync(path.join(os.tmpdir(), "artdaddy-attach-"));
   const app = spawn(application, [], {
     env: {
       ...process.env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `${own} --remote-debugging-port=${port} --remote-allow-origins=*`.trim(),
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: attachBrowserArgs(port),
+      WEBVIEW2_USER_DATA_FOLDER: profile,
     },
     stdio: "ignore",
   });
+  const stop = async () => {
+    stopTree(app);
+    for (let i = 0; i < 40 && app.exitCode === null; i++) await sleep(250);
+    // WebView2 lets go of its profile a moment after the app ends.
+    for (let i = 0; i < 20; i++) {
+      try {
+        rmSync(profile, { recursive: true, force: true });
+        return;
+      } catch {
+        await sleep(500);
+      }
+    }
+  };
   try {
     // The browser answers before the app's window exists, and an attach then finds no page to drive.
     let targets = [];
@@ -177,10 +234,10 @@ export async function launchForAttach(application, port = ATTACH_PORT) {
       throw new Error(`${error.message} (targets: ${seen})`);
     });
   } catch (error) {
-    stopTree(app);
+    await stop();
     throw error;
   }
-  return { app, stop: () => stopTree(app) };
+  return { app, stop };
 }
 
 /** The capabilities that attach the Edge WebDriver to a WebView2 whose debugging port is `port`. tauri-driver passes a
@@ -228,14 +285,13 @@ export async function newSession(application) {
       await waitForPage(attached);
     } catch (error) {
       await attached?.quit();
-      launched.stop();
+      await launched.stop();
       throw error;
     }
     const detach = attached.quit;
     attached.quit = async () => {
       await detach();
-      launched.stop();
-      for (let i = 0; i < 40 && launched.app.exitCode === null; i++) await sleep(250);
+      await launched.stop();
     };
     return attached;
   }
