@@ -26,6 +26,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import * as updateFeed from "./updateFeed.mjs";
+
 const { describe, it } = process.env.VITEST ? await import("vitest") : await import("node:test");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -184,4 +186,121 @@ describe("the landing site's writer", () => {
       }
     },
   );
+});
+
+// The staged feed the update canary serves for a candidate (scripts/qa/stagedFeed.mjs) is written by
+// scripts/updateFeed.mjs. It must be the live feed's format to the byte, or the canary would prove an update path
+// no installed app ever takes.
+describe("the canary's staged feed is written exactly as the live one", () => {
+  const inputs = {
+    repository: REPOSITORY,
+    version: FEED.version,
+    notes: FEED.notes,
+    pubDate: FEED.pub_date,
+    signatures: Object.fromEntries(
+      Object.entries(FEED.platforms).map(([platform, entry]) => [platform, `${entry.signature}\n`]),
+    ),
+  };
+
+  it("writes the live feed's bytes from the live feed's version, notes, date and signatures", () => {
+    const written = Buffer.from(updateFeed.feedText(inputs));
+    assert.equal(written.toString("utf8"), GOLDEN.toString("utf8"));
+    assert.ok(written.equals(GOLDEN));
+  });
+
+  it("offers the platforms and assets the live feed offers", () => {
+    const fromLive = Object.fromEntries(
+      Object.entries(FEED.platforms).map(([platform, entry]) => [
+        platform,
+        entry.url.split("/").pop(),
+      ]),
+    );
+    assert.deepEqual({ ...updateFeed.PLATFORMS }, fromLive);
+    assert.equal(updateFeed.FEED_URL, CONF.plugins.updater.endpoints[0]);
+  });
+
+  it("refuses to write a feed no app could read, or one that leaves a system without its update", () => {
+    const refusals = [
+      ["a version that is not x.y.z", { version: "0.30" }],
+      ["a date without a time", { pubDate: "2026-11-21" }],
+      ["a date that is not one", { pubDate: "soon" }],
+      [
+        "a platform without its signature",
+        { signatures: { ...inputs.signatures, "linux-x86_64": undefined } },
+      ],
+      [
+        "a signature that is not one",
+        { signatures: { ...inputs.signatures, "darwin-aarch64": "abc" } },
+      ],
+    ];
+    for (const [label, change] of refusals) {
+      assert.throws(() => updateFeed.feedText({ ...inputs, ...change }), Error, label);
+    }
+  });
+});
+
+describe("the release an installed app updates from", () => {
+  const release = (version, more = {}) => ({
+    tag_name: `v${version}`,
+    draft: false,
+    prerelease: false,
+    ...more,
+  });
+
+  it("is the latest shipped release older than the candidate", () => {
+    const releases = [
+      release("0.29.1", { prerelease: true }),
+      release("0.29.0"),
+      release("0.27.0"),
+      release("0.28.0", { draft: true }),
+    ];
+    assert.equal(updateFeed.previousRelease(releases, "0.29.1"), "0.29.0");
+    assert.equal(updateFeed.previousRelease(releases, "0.29.0"), "0.27.0");
+    assert.equal(updateFeed.previousRelease(releases, "0.27.0"), null);
+    assert.equal(
+      updateFeed.previousRelease([release("0.9.0"), release("0.10.0")], "0.11.0"),
+      "0.10.0",
+    );
+    assert.equal(
+      updateFeed.previousRelease([{ tag_name: "nightly" }, release("1.0.0")], "2.0.0"),
+      "1.0.0",
+    );
+  });
+
+  it("is never the candidate, a later release, a draft or a pre-release, and no shipped release lies between", () => {
+    let state = 0x1d872b41;
+    const next = (n) => {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return (state >>> 0) % n;
+    };
+    for (let run = 0; run < 300; run++) {
+      const releases = Array.from({ length: next(12) }, () =>
+        release(`${next(2)}.${next(15)}.${next(4)}`, {
+          draft: next(5) === 0,
+          prerelease: next(5) === 0,
+        }),
+      );
+      const before = `${next(2)}.${next(15)}.${next(4)}`;
+      const chosen = updateFeed.previousRelease(releases, before);
+      const shipped = releases
+        .filter((r) => !r.draft && !r.prerelease)
+        .map((r) => r.tag_name.slice(1));
+      const older = shipped.filter((v) => updateFeed.newer(before, v));
+      if (chosen === null) {
+        assert.deepEqual(older, [], `run ${run}`);
+        continue;
+      }
+      assert.ok(shipped.includes(chosen), `run ${run}: ${chosen} was not shipped`);
+      assert.ok(
+        updateFeed.newer(before, chosen),
+        `run ${run}: ${chosen} is not older than ${before}`,
+      );
+      assert.ok(
+        !older.some((v) => updateFeed.newer(v, chosen)),
+        `run ${run}: a later release than ${chosen} was skipped`,
+      );
+    }
+  });
 });

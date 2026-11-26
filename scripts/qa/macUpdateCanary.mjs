@@ -1,7 +1,8 @@
 // In-place update canary for macOS. Installs a PUBLIC release's .app on a disposable CI runner, starts it,
-// and updates it through the LIVE updater manifest the way a user's app would be: the signed tarball is
-// downloaded, verified against the key committed in tauri.conf.json and installed over the running bundle.
-// It reads the public release and the public manifest only; nothing is published or changed.
+// and updates it through the update feed the way a user's app would be (the live feed, or with TO_VERSION the
+// candidate's staged feed this job serves at the live feed's address: scripts/qa/stagedFeed.mjs): the signed
+// tarball is downloaded, verified against the key committed in tauri.conf.json and installed over the running
+// bundle. It reads public releases and the feed only; nothing is published or changed.
 //
 // What differs from the Windows and Linux canaries, and why. Those call the app's own updater commands
 // through the webview. WKWebView has no remote debugging port, tauri-driver has no macOS backend, and a
@@ -22,22 +23,34 @@ import { closeSync, mkdirSync, openSync, readdirSync, rmSync, statSync, writeFil
 import path from "node:path";
 
 import { describeTree, diffTrees, manifestOffer, parseCanaryOutput } from "../updateCanaryChecks.mjs";
+import {
+  STAGED_FEED,
+  feedTheAppReads,
+  releaseToUpdateFrom,
+  stagedFeedRequests,
+  updaterReadTheStagedFeed,
+} from "./canaryFeed.mjs";
 
 if (process.platform !== "darwin" || process.arch !== "arm64" || process.env.GITHUB_ACTIONS !== "true") {
   throw new Error("The update canary runs only on a disposable GitHub-hosted Apple Silicon runner");
 }
 
 const REPOSITORY = process.env.GITHUB_REPOSITORY;
-const FROM = process.env.FROM_VERSION;
+// Chosen once the feed is read, unless given: the latest shipped release older than the one updated to.
+let FROM = process.env.FROM_VERSION ?? "";
+// A candidate, updated to through the staged feed this job serves for it (scripts/qa/stagedFeed.mjs) before the
+// live feed offers it; without one, the live feed. The harness asks the address in tauri.conf.json either way.
+const TO = process.env.TO_VERSION ?? "";
 const TEMP = process.env.RUNNER_TEMP;
-const MANIFEST_URL = "https://artdaddy.app/updates/latest.json";
 const PLATFORM = "darwin-aarch64";
 const DMG = "ArtDaddy-macos-arm64.dmg";
 const STAY_ALIVE_SECONDS = 20;
 const OUT = path.resolve("reports/qa/updater-canary");
-if (!REPOSITORY || !/^\d+\.\d+\.\d+$/.test(FROM ?? "") || !TEMP) {
-  throw new Error("GITHUB_REPOSITORY, RUNNER_TEMP and FROM_VERSION (x.y.z) are required");
+if (!REPOSITORY || !TEMP) {
+  throw new Error("GITHUB_REPOSITORY and RUNNER_TEMP are required");
 }
+if (TO && !/^\d+\.\d+\.\d+$/.test(TO)) throw new Error("TO_VERSION must be x.y.z when given");
+if (TO && !STAGED_FEED) throw new Error("TO_VERSION needs the staged feed: run node scripts/qa/stagedFeed.mjs serve first");
 mkdirSync(OUT, { recursive: true });
 
 // A request that never answers must fail the step, not hold the runner until its job timeout.
@@ -117,11 +130,16 @@ async function main() {
   const applications = path.join(work, "Applications");
   mkdirSync(applications);
 
-  // 1. What the live manifest offers, and that it is something an app of this version could take.
-  const manifest = await (await fetch(MANIFEST_URL, { headers: { "cache-control": "no-cache" } })).json();
+  // 1. What the feed the app reads offers (a candidate's staged feed, or the live one), and that it is something an
+  // app of this version could take.
+  const manifest = await feedTheAppReads();
+  FROM = releaseToUpdateFrom(REPOSITORY, TO || manifest.version);
+  evidence.from = FROM;
+  evidence.feed = TO ? "staged" : "live";
   const offer = manifestOffer(manifest, PLATFORM, FROM, REPOSITORY);
-  note("live manifest", { version: offer.version, url: offer.url, problems: offer.problems });
-  if (!offer.ok) throw new Error(`the live manifest is not an offer to ${FROM}: ${offer.problems.join("; ")}`);
+  note(TO ? "staged feed" : "live manifest", { version: offer.version, url: offer.url, from: FROM, problems: offer.problems });
+  if (TO && manifest.version !== TO) throw new Error(`the staged feed offers ${manifest.version}, not ${TO}`);
+  if (!offer.ok) throw new Error(`the feed is not an offer to ${FROM}: ${offer.problems.join("; ")}`);
 
   // 2. Install the previous release as a user does: the dmg's app copied to a folder the user owns.
   const dmgFile = path.join(work, DMG);
@@ -164,6 +182,11 @@ async function main() {
   if (harness.status !== 0 || !result.installed) throw new Error("the updater did not install the update: see updater-harness.log");
   if (result.offered?.version !== offer.version) throw new Error(`the updater was offered ${result.offered?.version}, the manifest says ${offer.version}`);
   if (!(result.downloadedBytes > 0)) throw new Error("the updater downloaded nothing");
+  if (TO) {
+    // Proof that the updater read THIS runner's staged feed: it asked the server for it.
+    note("staged feed requests", { requests: stagedFeedRequests() });
+    if (!updaterReadTheStagedFeed()) throw new Error("the updater never asked this runner's staged feed");
+  }
 
   // 5. What the old process did when its bundle was replaced under it: evidence, then it is stopped.
   note("the previous release's process after its bundle was replaced", { stillRunning: !exited(old) });

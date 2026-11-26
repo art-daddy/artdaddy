@@ -343,6 +343,19 @@ jobs:
           echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
           echo "deb=$DEB" >> "$GITHUB_OUTPUT"
 
+      # A .sig that exists proves only that the signer ran. Every installed app accepts an update only if its
+      # signature verifies against the public key compiled into it (tauri.conf.json): one made with any other key
+      # leaves every user where they are, silently. So check that, on the very AppImage that is uploaded.
+      - name: The updater signature must verify against the shipped key
+        if: inputs.enable_auto_update
+        run: |
+          APPIMAGE="${{ steps.artifact.outputs.appimage }}"
+          test -s "$APPIMAGE.sig" || { echo "::error::the signed AppImage has no .sig"; exit 1; }
+          node scripts/verify-release-signature.mjs "$APPIMAGE" "$APPIMAGE.sig" || {
+            echo "::error::the AppImage's updater signature does not verify against the public key in tauri.conf.json"
+            exit 1
+          }
+
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:

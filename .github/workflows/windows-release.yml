@@ -134,6 +134,19 @@ jobs:
           "size=$($installer.Length)" >> $env:GITHUB_OUTPUT
           Get-FileHash $asset -Algorithm SHA256
 
+      # A .sig that exists proves only that the signer ran. Every installed app accepts an update only if its
+      # signature verifies against the public key compiled into it (tauri.conf.json): one made with any other key
+      # leaves every user where they are, silently. So check that, on the very bytes that are uploaded.
+      - name: The updater signature must verify against the shipped key
+        if: inputs.enable_auto_update
+        shell: pwsh
+        run: |
+          node scripts/verify-release-signature.mjs "${{ steps.verify.outputs.path }}" "${{ steps.updater.outputs.path }}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::the installer's updater signature does not verify against the public key in tauri.conf.json"
+            exit 1
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: artdaddy-windows-x64
