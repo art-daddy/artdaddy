@@ -310,8 +310,10 @@ interface ScenarioBase {
    *  project lifecycle, library, inspection) under the same no-spend rule. */
   /** Tier 1 for a workflow: assert on what the model DID — sequencing, the
    *  deliverable, no duplicated work — not just the final geometry. Throw on
-   *  mismatch. Runs in addition to `expect`. */
-  expectTrace?: (trace: Trace) => void;
+   *  mismatch. Runs in addition to `expect`. `final` is the timeline as the run ended, for a
+   *  check that needs both (which clip holds a file is only in the trace when the app names
+   *  media by their bytes); absent where a test grades the trace alone. */
+  expectTrace?: (trace: Trace, final?: Timeline) => void;
   /** Inefficiency threshold (rounds). Default derived if omitted. */
   maxRounds?: number;
   /** Tool errors allowed before Tier 0 fails. DEFAULT 0 — a wasted call is itself a

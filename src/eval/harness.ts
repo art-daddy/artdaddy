@@ -8,6 +8,7 @@
 // Timeline-only tool surface (like synclock): guarantees ZERO surprise generation/
 // network spend. A non-timeline tool the model reaches for is recorded as
 // `notRunInHarness` (a signal), not a real error.
+import { randomBytes } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -116,6 +117,37 @@ const probeRunner: CommandRunner = {
  *  rule through it (if its answers stop matching what the size owner asks, every scenario silently
  *  loses that rule). */
 export const harnessProbeRunner: CommandRunner = probeRunner;
+
+/** The stand-in ffprobe, plus how long the media the import stand-in brought in runs. Without it a
+ *  file placed whole got the 5 s that a source of unknown length defaults to, while the import had
+ *  told the model it runs 10 s. */
+function probeWithImports(
+  imported: () => readonly { media_ref: string; duration_s: number }[],
+): CommandRunner {
+  return {
+    run: async (program, args) => {
+      if (program === "ffprobe" && args.includes("format=duration")) {
+        const source = String(args[args.length - 1] ?? "");
+        const hit = imported().find((m) => m.media_ref === source);
+        if (hit) return { code: 0, stdout: String(hit.duration_s), stderr: "" };
+      }
+      return probeRunner.run(program, args);
+    },
+  };
+}
+
+/** What every eval project is called, as a person's own project would be. Named after the case,
+ *  it told the model what the task was before it read the request. */
+export const EVAL_PROJECT_NAME = "My project";
+
+/** Make a run's project folder inside its temp folder, named the way the app names a new project
+ *  (its name's slug and six hex digits, tools/project.ts). The folder's name is the project id the
+ *  model is shown; the case's id stays on the temp folder above it. */
+async function evalProjectDir(root: string): Promise<string> {
+  const dir = path.join(root, `my_project_${randomBytes(3).toString("hex")}`);
+  await fsp.mkdir(dir, { recursive: true });
+  return dir;
+}
 
 /** The JSON body of one /inference round, as the harness sends it. */
 export interface InferenceRequest {
@@ -266,7 +298,7 @@ export async function driveScenario(
     );
     const realContext =
       scenario.surface === "recovery" ? recoveryContext(recoveryProjectDir(dir)) : null;
-    const store = realContext?.store ?? new ProjectStoreAccess(dir, nodeFs);
+    const store = realContext?.store ?? new ProjectStoreAccess(await evalProjectDir(dir), nodeFs);
     await ensureTimeline(store);
     // Seed by WRITING timeline.json, not via replaceTimeline: that path restores
     // into an open ProjectDocument's live session and is a documented no-op for a
@@ -288,7 +320,7 @@ export async function driveScenario(
     // bare store with "no open project for this store"), so the harness must open one
     // exactly like the app does — otherwise EVERY editing scenario fails on the
     // harness rather than on the model.
-    // Keyed by the temp dir's BASENAME: that is how the coordinator maps a store's
+    // Keyed by the project folder's BASENAME: that is how the coordinator maps a store's
     // projectDir onto a document id.
     const projectId = asProjectId(path.basename(store.projectDir));
     const doc = new ProjectDocument(projectId, {
@@ -301,7 +333,11 @@ export async function driveScenario(
       setOpenDocumentResolver(() => undefined);
       await doc.close().catch(() => undefined);
     };
-    const ctx = realContext ?? ({ store, runner: probeRunner } as ClientToolContext);
+    // What the journey and studio stand-ins record (imports among it), read by the probe below.
+    const studio: StudioState = emptyStudioState();
+    const ctx =
+      realContext ??
+      ({ store, runner: probeWithImports(() => studio.imported) } as ClientToolContext);
 
     const registry = new ClientToolRegistry();
     registerTimelineTools(registry, () => ctx);
@@ -317,7 +353,7 @@ export async function driveScenario(
       return {
         ok: true,
         project_id: String(projectId),
-        name: scenario.title,
+        name: EVAL_PROJECT_NAME,
         canvas: tl.canvas ?? null,
         library: [],
         library_count: 0,
@@ -328,7 +364,6 @@ export async function driveScenario(
     // beyond the model itself and cannot touch the network. The "studio" surface
     // widens that to the WHOLE non-timeline catalog (see studio.ts) — same rule:
     // no network, no paid inference, no ffmpeg.
-    const studio: StudioState = emptyStudioState();
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
     else if (scenario.surface === "studio")
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));

@@ -141,7 +141,7 @@ export function evalTier1(scenario: Scenario, final: Timeline, trace?: Trace): T
   }
   if (scenario.expectTrace && trace) {
     try {
-      scenario.expectTrace(trace);
+      scenario.expectTrace(trace, final);
     } catch (e) {
       violations.push(`tier1(trace): ${msg(e)}`);
     }

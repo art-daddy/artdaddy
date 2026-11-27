@@ -15,6 +15,7 @@ import {
   STUDIO_BBOX,
   STUDIO_CROP_REF,
   STUDIO_DOWNLOAD_REF,
+  STUDIO_FOOTAGE_REF,
   STUDIO_IMAGE_REF,
   STUDIO_MOMENT_FRAMES,
   STUDIO_MUSIC_REF,
@@ -36,6 +37,16 @@ function called(trace: Trace, name: string) {
 }
 function mustCall(trace: Trace, name: string): void {
   if (called(trace, name).length === 0) throw new Error(`never called ${name}`);
+}
+/** Some look at the footage happened, free or paid: what a cut or an answer about it rests on. */
+function mustLook(trace: Trace): void {
+  const looks = ["inspect_media", "inspect_timeline", "video_ask", "video_find_moment"];
+  if (!looks.some((name) => called(trace, name).length > 0))
+    throw new Error("acted on the footage without looking at it");
+}
+/** The clips that play the studio footage. */
+function footageOf(final: ReturnType<Scenario["seed"]>) {
+  return allClips(final).filter((c) => String(c.media_ref ?? "") === STUDIO_FOOTAGE_REF);
 }
 /** The asset really landed on the timeline — the outcome, not the instruction. */
 function placed(final: ReturnType<Scenario["seed"]>, ref: string) {
@@ -197,12 +208,22 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     paidTools: ["video_ask", "video_find_moment"],
     maxRounds: 10,
     expect: (final) => {
-      const c = clipsOf(final, "v1")[0];
-      if (!c) throw new Error("the clip is gone");
-      const span = Number(c.timeline_out) - Number(c.timeline_in);
-      if (span >= 300) throw new Error("nothing was trimmed");
-      if (span < 30) throw new Error(`trimmed to almost nothing (${span}f)`);
+      const kept = footageOf(final);
+      if (kept.length === 0) throw new Error("the shot is gone");
+      // Every look says nothing moves until the vehicle rises at 3 s and clears the tower at 4 s
+      // (studioShotAt): the cut goes somewhere in that opening, and keeps the vehicle clearing it.
+      const from = Math.min(...kept.map((c) => Number(c.source_in ?? 0)));
+      if (from < FPS)
+        throw new Error(`the opening was not cut: the shot still starts ${from} frames in`);
+      if (from > STUDIO_MOMENT_FRAMES.peak)
+        throw new Error(
+          `cut into the launch: the shot now starts ${from} frames in, after the vehicle clears the tower (frame ${STUDIO_MOMENT_FRAMES.peak})`,
+        );
+      const span = kept.reduce((n, c) => n + Number(c.timeline_out) - Number(c.timeline_in), 0);
+      if (span < FPS) throw new Error(`trimmed to almost nothing (${span}f)`);
     },
+    // "Have a look": a cut without one (say, the first two seconds) only fits the footage by luck.
+    expectTrace: (t) => mustLook(t),
   },
 
   // ── media in: find it, fetch it, place it ─────────────────────────────────
@@ -290,35 +311,59 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     surface: "studio",
     seed: oneClip,
     prompt: "Find the moment the rocket clears the tower and cut this down to just that.",
-    expectTools: ["video_find_moment"],
-    // Finding a moment by what happens in it is a paid look, and the request asks for one.
+    // Graded on the cut, not on the look that found it: the free look's frames show the moment
+    // (studioShotAt), so the paid moment search is allowed and not required.
+    expectTools: ["inspect_media", "video_find_moment", "video_ask"],
     paidTools: ["video_find_moment", "video_ask"],
     maxRounds: 12,
     expect: (final) => {
-      const clips = allClips(final).filter((c) => c.kind !== "text");
-      if (clips.length === 0) throw new Error("the timeline is empty");
-      const total = clips.reduce((n, c) => n + (Number(c.timeline_out) - Number(c.timeline_in)), 0);
+      const kept = footageOf(final);
+      if (kept.length === 0) throw new Error("the shot is gone");
+      const total = kept.reduce((n, c) => n + (Number(c.timeline_out) - Number(c.timeline_in)), 0);
       const want = STUDIO_MOMENT_FRAMES.end - STUDIO_MOMENT_FRAMES.start;
-      // The reported moment is 60 frames. Generous, but a model that ignored the
-      // search result and kept all 300 frames — or deleted everything — fails.
+      // The moment is 60 frames. Generous, but a model that kept all 300 frames — or deleted
+      // everything — fails.
       if (Math.abs(total - want) > 25)
-        throw new Error(`kept ${total}f; the moment the search returned is ${want}f`);
+        throw new Error(`kept ${total}f; the moment the rocket clears the tower is ${want}f`);
+      // ...and what is kept is that moment, not any 60 frames of the shot.
+      const peak = STUDIO_MOMENT_FRAMES.peak;
+      if (!kept.some((c) => Number(c.source_in ?? 0) <= peak && peak < Number(c.source_out ?? 0)))
+        throw new Error(
+          `kept ${total}f, but not the moment the rocket clears the tower (frame ${peak} of the shot)`,
+        );
     },
-    expectTrace: (t) => mustCall(t, "video_find_moment"),
+    // Any look will do; a cut made without one only holds the moment by luck.
+    expectTrace: (t) => mustLook(t),
   },
   {
     id: "video_ask_question",
     scope: {},
-    title: "Answer a question about the footage without editing",
-    tags: ["studio", "vision", "read-only"],
+    title: "Answer what only listening to the shot can tell, without editing",
+    tags: ["studio", "vision", "audio", "read-only"],
     surface: "studio",
     seed: oneClip,
-    prompt: "What happens in this shot? Don't change anything, I'm just asking.",
+    // A sound that is not speech: the free look's frames, loudness and speech transcript cannot
+    // say what it is, so this is the case that needs the paid look, which hears the shot.
+    prompt:
+      "Is there music under this shot, or is it just the sound of the launch? " +
+      "Don't change anything, I'm just asking.",
     expectTools: ["video_ask"],
     paidTools: ["video_ask"],
     maxRounds: 6,
     expect: untouched(oneClip),
-    expectTrace: (t) => mustCall(t, "video_ask"),
+    expectTrace: (t) => {
+      if (!called(t, "video_ask").some((c) => (c.args ?? {}).visual_only !== true))
+        throw new Error("answered without a look that hears the shot (video_ask)");
+      // The answer the look gave (STUDIO_SOUND): the engines, and no music.
+      const said = t.finalText;
+      if (!/engine|roar/i.test(said))
+        throw new Error("the answer does not name the sound the look heard (the engines' roar)");
+      if (
+        /music/i.test(said) &&
+        !/(\bno\b|\bnot\b|\bwithout\b|n't\b|\bnone\b)[^.]{0,30}\bmusic/i.test(said)
+      )
+        throw new Error("the answer says there is music; the look heard none");
+    },
   },
   {
     id: "compare_two_images",

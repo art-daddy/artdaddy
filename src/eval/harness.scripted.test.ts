@@ -10,15 +10,19 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
 import { catalogIdentity } from "../contract";
 import { DEFAULT_EFFORT, DEFAULT_MODEL } from "../store/chatControls";
-import { driveScenario, type InferenceRequest } from "./harness";
+import { driveScenario, EVAL_PROJECT_NAME, type InferenceRequest } from "./harness";
 import { runStatus } from "./oracle";
 import { Budget } from "./pricing";
 import { ALL_SCENARIOS } from "./scenarios";
 import type { CampaignSetup } from "./setup";
 import type { Scenario } from "./types";
 
+type Calls = [string, Record<string, unknown>][];
+/** One scripted round: a reply, or tool calls (fixed, or made from the request the model got, for
+ *  a call that needs an id an earlier tool minted). */
 type Step =
-  { text: string; usage?: Usage } | { calls: [string, Record<string, unknown>][]; usage?: Usage };
+  | { text: string; usage?: Usage }
+  | { calls: Calls | ((req: InferenceRequest) => Calls); usage?: Usage };
 
 const USAGE: Usage & { cached_tokens: number } = {
   input_tokens: 1000,
@@ -46,7 +50,8 @@ function scripted(steps: Step[], delayMs = 0) {
         usage,
         provider_snapshot: {},
       };
-    const pending: PendingCall[] = step.calls.map(([name, args], k) => ({
+    const calls = typeof step.calls === "function" ? step.calls(req) : step.calls;
+    const pending: PendingCall[] = calls.map(([name, args], k) => ({
       call_id: `c${i}_${k}`,
       name,
       arguments: args,
@@ -184,6 +189,8 @@ describe("a run records its setup and its clocks", () => {
 });
 
 describe("the cases that could never pass now run to a verdict", () => {
+  // The destination the case's own request names.
+  const named = byId("export_named_destination").prompt.match(/[A-Za-z]:\/\S+\.mp4/)![0];
   const plans: Record<string, Step[]> = {
     export_once: [{ calls: [["export", {}]] }, { text: "Exporting." }],
     export_no_verify_loop: [
@@ -198,10 +205,7 @@ describe("the cases that could never pass now run to a verdict", () => {
     ],
     export_settings_not_guessed: [{ calls: [["export", { resolution: "720p" }]] }, { text: "Ok." }],
     export_default_destination: [{ calls: [["export", {}]] }, { text: "Ok." }],
-    export_named_destination: [
-      { calls: [["export", { output_path: "C:/Users/eval/Videos/promo.mp4" }]] },
-      { text: "Ok." },
-    ],
+    export_named_destination: [{ calls: [["export", { output_path: named }]] }, { text: "Ok." }],
     export_redo_with_new_settings: [
       { calls: [["export", {}]] },
       { text: "Exporting." },
@@ -240,13 +244,8 @@ describe("the cases that could never pass now run to a verdict", () => {
 
   it("journey_transcript_captions warns on a trim that cuts the last word", async () => {
     const steps = plans.journey_transcript_captions.map((s) =>
-      "calls" in s && s.calls[0][0] === "set_clip_properties"
-        ? {
-            calls: [["set_clip_properties", { clip_ids: ["narration"], duration: 210 }]] as [
-              string,
-              Record<string, unknown>,
-            ][],
-          }
+      "calls" in s && Array.isArray(s.calls) && s.calls[0][0] === "set_clip_properties"
+        ? { calls: [["set_clip_properties", { clip_ids: ["narration"], duration: 210 }]] as Calls }
         : s,
     );
     const { result } = await drive(byId("journey_transcript_captions"), steps);
@@ -315,5 +314,242 @@ describe("a known failure is carried onto its result", () => {
     ]);
     expect(runStatus(passing.result)).toBe("fixed");
     expect(runStatus((await drive(byId("trim_to_2s"), [{ text: "Done." }])).result)).toBe("fail");
+  });
+});
+
+describe("the model is not told which case it is in", () => {
+  it("calls every project the same plain name, with an id shaped like the app's", async () => {
+    // With the read the app does before the first round on, so the name reaches the model unasked.
+    vi.stubEnv("ARTDADDY_EVAL_PRELOAD", "1");
+    try {
+      const s = byId("remove_last");
+      const { result, requests } = await drive(s, [
+        { calls: [["get_project_state", {}]] },
+        { calls: [["remove_clips", { clip_ids: ["c"] }]] },
+        { text: "Removed it." },
+      ]);
+      expect(result.trace.setup?.preload).toBe(true);
+      const state = requests[1].round_input.tool_results![0].result;
+      expect(state.name).toBe(EVAL_PROJECT_NAME);
+      expect(state.project_id).toMatch(/^my_project_[0-9a-f]{6}$/);
+      const sent = JSON.stringify(requests);
+      expect(sent).toContain(EVAL_PROJECT_NAME);
+      // "Delete the last clip (no ripple)" told the model what to do, and how.
+      expect(sent).not.toContain(s.title);
+      expect(sent).not.toContain(s.id);
+      expect(result.passed).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+// The studio cases a look decides: graded on the outcome, so the free look and the paid one both
+// pass where both can know the answer, and only a look that can know it passes where one cannot.
+describe("the look cases are graded on the outcome, not the route", () => {
+  const cut = (...ranges: [number, number][]): Step => ({
+    calls: [
+      ["ripple_delete", { track_id: "v1", ranges: ranges.map(([start, end]) => ({ start, end })) }],
+    ],
+  });
+  const freeLook: Step = { calls: [["inspect_media", { clip_id: "a" }]] };
+  const findMoment: Step = {
+    calls: [["video_find_moment", { clip_id: "a", query: "the rocket clears the tower" }]],
+  };
+  const askAbout = (prompt: string, extra: Record<string, unknown> = {}): Step => ({
+    calls: [["video_ask", { clip_id: "a", prompt, ...extra }]],
+  });
+  const grade = async (id: string, steps: Step[], answer = "Done.") => {
+    const { result } = await drive(byId(id), [...steps, { text: answer }]);
+    return { passed: result.passed, why: [...result.tier1.violations, ...result.tier0.violations] };
+  };
+
+  describe("inspect_media_before_place", () => {
+    const id = "inspect_media_before_place";
+
+    it("tells a look at the footage what its pictures show", async () => {
+      const { result, requests } = await drive(byId(id), [
+        {
+          calls: [
+            ["inspect_media", { clip_id: "a" }],
+            ["inspect_media", { media_ref: "a.mp4" }],
+          ],
+        },
+        cut([0, 75]),
+        {
+          text: "A launch: the pad sits still, then the vehicle lifts off. I cut the still start.",
+        },
+      ]);
+      const notes = requests[1].round_input.tool_results!.map((r) => String(r.result.note));
+      const byClip = notes.find((n) => n.includes("at frame ")) ?? "";
+      const byRef = notes.find((n) => n.includes("at 1 s")) ?? "";
+      expect(byClip).toMatch(/frame 30, a wide shot of the launch pad, nothing moving yet/);
+      expect(byClip).toMatch(/frame 90, the vehicle rising off the pad and clearing the tower/);
+      expect(byRef).toMatch(/at 1 s, a wide shot of the launch pad.*at 3 s, the vehicle rising/);
+      expect(result.tier1.violations).toEqual([]);
+      expect(result.passed).toBe(true);
+    });
+
+    it("passes the free look and the paid looks, each followed by the cut they show", async () => {
+      expect(await grade(id, [freeLook, cut([0, 75])])).toEqual({ passed: true, why: [] });
+      expect(await grade(id, [findMoment, cut([0, 90])])).toEqual({ passed: true, why: [] });
+      expect(await grade(id, [askAbout("What is in this shot?"), cut([0, 90])])).toEqual({
+        passed: true,
+        why: [],
+      });
+    });
+
+    it("fails doing nothing, a blind cut, a cut at the end, and a cut past the moment", async () => {
+      expect((await grade(id, [])).why.join()).toMatch(/the opening was not cut/);
+      expect((await grade(id, [cut([0, 60])])).why.join()).toMatch(/without looking/);
+      expect((await grade(id, [freeLook, cut([225, 300])])).why.join()).toMatch(
+        /the opening was not cut/,
+      );
+      expect((await grade(id, [freeLook, cut([0, 150])])).why.join()).toMatch(
+        /cut into the launch/,
+      );
+    });
+
+    it("tells a look at anything else nothing about the launch", async () => {
+      const { requests } = await drive(byId("crop_to_wordmark"), [
+        {
+          calls: [
+            ["inspect_media", { media_ref: "logo.png" }],
+            ["inspect_media", { clip_id: "logo" }],
+          ],
+        },
+        { text: "Done." },
+      ]);
+      const notes = requests[1].round_input.tool_results!.map((r) => r.result.note);
+      expect(notes).toEqual([
+        "(eval) frames were not attached in this harness",
+        "(eval) frames were not attached in this harness",
+      ]);
+    });
+  });
+
+  describe("find_moment_and_trim", () => {
+    const id = "find_moment_and_trim";
+    const toTheMoment = cut([0, 90], [150, 300]);
+
+    it("passes the free look and the paid moment search, each followed by the cut", async () => {
+      expect(await grade(id, [freeLook, toTheMoment])).toEqual({ passed: true, why: [] });
+      expect(await grade(id, [findMoment, toTheMoment])).toEqual({ passed: true, why: [] });
+    });
+
+    it("fails doing nothing, 60 frames from the wrong place, and the right cut made blind", async () => {
+      expect((await grade(id, [])).why.join()).toMatch(/kept 300f/);
+      expect((await grade(id, [freeLook, cut([60, 300])])).why.join()).toMatch(
+        /not the moment the rocket clears the tower/,
+      );
+      // "The middle two seconds", guessed: it holds the moment, and no look found it.
+      expect(await grade(id, [cut([0, 120], [180, 300])])).toEqual({
+        passed: false,
+        why: ["tier1(trace): acted on the footage without looking at it"],
+      });
+    });
+  });
+
+  describe("video_ask_question: a sound only a look that hears the shot can name", () => {
+    const id = "video_ask_question";
+    const right = "No music, just the roar of the engines.";
+
+    it("passes the paid look that hears the shot, answered from what it heard", async () => {
+      expect(await grade(id, [askAbout("Is there music in this shot?")], right)).toEqual({
+        passed: true,
+        why: [],
+      });
+    });
+
+    it("fails doing nothing, the free look, and the paid look told not to listen", async () => {
+      expect((await grade(id, [])).passed).toBe(false);
+      // The frames, loudness and speech transcript cannot say what the sound is: this is a guess.
+      expect((await grade(id, [freeLook], right)).why.join()).toMatch(
+        /without a look that hears the shot/,
+      );
+      expect(
+        (await grade(id, [askAbout("Is there music?", { visual_only: true })], right)).why.join(),
+      ).toMatch(/without a look that hears the shot/);
+    });
+  });
+});
+
+describe("journey_import_edit_export grades the whole request", () => {
+  const imports: Step = {
+    calls: [
+      ["import_media", { source: { path: "C:/media/intro.mp4" }, name: "intro" }],
+      ["import_media", { source: { path: "C:/media/outro.mp4" }, name: "outro" }],
+    ],
+  };
+  // The crossfade goes on the clip that comes in second; its id is the tool's to mint.
+  const crossfade: Step = {
+    calls: (req) => {
+      const created = (req.round_input.tool_results ?? [])
+        .filter((r) => r.name === "add_clips")
+        .flatMap((r) => r.result.created as { clip_id: string; kind?: string }[])
+        .filter((c) => c.kind !== "audio");
+      const incoming = created.find((c) => c.clip_id !== created[0]?.clip_id);
+      return [
+        [
+          "set_transition",
+          { clip_id: incoming?.clip_id, transition_in: { kind: "crossfade", duration: 15 } },
+        ],
+      ];
+    },
+  };
+  const place = (entries: Record<string, unknown>[]): Step => ({
+    calls: [["add_clips", { entries }]],
+  });
+  const run = async (placing: Step) =>
+    (
+      await drive(byId("journey_import_edit_export"), [
+        imports,
+        placing,
+        crossfade,
+        { calls: [["export", {}]] },
+        { text: "Exported." },
+      ])
+    ).result;
+
+  it("passes the two files placed whole, in order, with a crossfade", async () => {
+    // Placed with no length: a file runs what the import said (10 s), not the 5 s an unknown length gets.
+    const result = await run(
+      place([
+        { media_ref: "media_intro", timeline_in: 0 },
+        { media_ref: "media_outro", timeline_in: 300 },
+      ]),
+    );
+    expect(result.harnessError).toBeUndefined();
+    expect([...result.tier0.violations, ...result.tier1.violations]).toEqual([]);
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails half of each file, the run that passed every check before", async () => {
+    const result = await run(
+      place([
+        { media_ref: "media_intro", timeline_in: 0, source_span: [0, 5] },
+        { media_ref: "media_outro", timeline_in: 150, source_span: [0, 5] },
+      ]),
+    );
+    expect(result.tier0.violations).toEqual([]);
+    expect(result.tier1.violations.join()).toMatch(/plays 150 of its file's 300 frames/);
+    expect(result.passed).toBe(false);
+  });
+
+  it("fails the files in the wrong order", async () => {
+    const result = await run(
+      place([
+        { media_ref: "media_outro", timeline_in: 0 },
+        { media_ref: "media_intro", timeline_in: 300 },
+      ]),
+    );
+    expect(result.tier1.violations.join()).toMatch(/outro\.mp4 plays first/);
+    expect(result.passed).toBe(false);
+  });
+
+  it("fails doing nothing", async () => {
+    const { result } = await drive(byId("journey_import_edit_export"), [{ text: "Done." }]);
+    expect(result.tier1.violations.join()).toMatch(/expected 2 clips on the timeline, got 0/);
+    expect(result.passed).toBe(false);
   });
 });

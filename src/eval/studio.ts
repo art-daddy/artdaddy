@@ -71,6 +71,24 @@ export function emptyStudioState(): StudioState {
 export const STUDIO_MOMENT_FRAMES = { start: 90, end: 150, peak: 120 } as const;
 export const STUDIO_MOMENT_SECONDS = { start: 3, end: 5, peak: 4 } as const;
 
+/** The footage the studio seeds place (clip `a`): the launch every look at it describes. Nothing
+ *  moves until the vehicle rises at the moment's start, it clears the tower at the peak, and it
+ *  climbs away after the moment's end. */
+export const STUDIO_FOOTAGE_REF = "a.mp4";
+
+/** What a frame of the footage shows, `seconds` into it, in words: the stand-in for the picture a
+ *  real look attaches, and the same story video_ask and video_find_moment tell. */
+export function studioShotAt(seconds: number): string {
+  if (seconds < STUDIO_MOMENT_SECONDS.start)
+    return "a wide shot of the launch pad, nothing moving yet";
+  if (seconds <= STUDIO_MOMENT_SECONDS.end)
+    return "the vehicle rising off the pad and clearing the tower";
+  return "the vehicle climbing away on a column of smoke";
+}
+
+/** What the footage sounds like: only a look that hears it (video_ask) can say. */
+export const STUDIO_SOUND = "The only sound is the roar of the engines: no music, no voices.";
+
 /** The one bbox `find_content` ever reports. `crop_image` must be handed THIS. */
 export const STUDIO_BBOX = { x: 120, y: 80, w: 240, h: 160 } as const;
 export const STUDIO_IMAGE_SIZE = { w: 1080, h: 1920 } as const;
@@ -115,6 +133,21 @@ function num(v: unknown, fallback: number): number {
  *  eval would reward the model for doing fps math it must never do. */
 function isClipSubject(a: Record<string, unknown>): boolean {
   return typeof a.clip_id === "string" && !!a.clip_id;
+}
+
+/** Whether a look is at the studio footage: by its media_ref, or by the clip that plays it. */
+async function looksAtFootage(
+  a: Record<string, unknown>,
+  timeline?: () => Promise<Timeline>,
+): Promise<boolean> {
+  const isFootage = (ref: unknown) =>
+    String(ref ?? "")
+      .split("/")
+      .pop() === STUDIO_FOOTAGE_REF;
+  if (!isClipSubject(a)) return isFootage(a.media_ref);
+  if (!timeline) return false;
+  const clips = ((await timeline()).tracks ?? []).flatMap((t) => t.clips ?? []);
+  return isFootage(clips.find((c) => c.id === a.clip_id)?.media_ref);
 }
 
 /** Register the deterministic stand-ins for everything outside the timeline.
@@ -362,9 +395,12 @@ export function registerStudioStubs(
   registry.register("video_ask", async (args) => {
     const a = (args ?? {}) as Record<string, unknown>;
     const byClip = isClipSubject(a);
+    // The paid look hears the shot unless asked not to (`visual_only`); the free look's frames,
+    // loudness and speech transcript cannot say what a sound that is not speech is.
+    const heard = a.visual_only === true ? "" : ` ${STUDIO_SOUND}`;
     return {
       ok: true,
-      response: "A wide shot of a launch pad, then the vehicle clears the tower.",
+      response: `A wide shot of a launch pad, then the vehicle clears the tower.${heard}`,
       timing: byClip ? "project_frames" : "source_seconds",
       timestamps_found: byClip
         ? [{ text: "clears the tower", frame: STUDIO_MOMENT_FRAMES.peak }]
@@ -425,7 +461,8 @@ export function registerStudioStubs(
 
   // ── inspection ────────────────────────────────────────────────────────────
   // No `_attachments`: the harness has no real frames, and a fabricated attachment
-  // would be a fiction. The model still gets the numeric facts it reasons over.
+  // would be a fiction. The model still gets the numeric facts it reasons over, and a
+  // look at the studio footage says in words what its pictures show (studioShotAt).
   // Captioning needs decoded audio and a whisper run, neither of which exists in the
   // harness. Stubbed like the inspect_* reads: a shaped, deterministic answer that says so,
   // rather than a silent success the eval would read as "captions are on the timeline".
@@ -453,6 +490,21 @@ export function registerStudioStubs(
     const end = num(a.end_seconds, 12);
     const at = (t: number): { frame: number } | { t: number } =>
       clip ? { frame: Math.round(t * fps) } : { t: Math.round(t * 1000) / 1000 };
+    // No pixels to attach, so a look at the footage is told what its pictures show, in words; a
+    // look that showed nothing left the model nothing to act on (the case then failed whatever it
+    // did). Any other subject has no agreed content and stays unseen.
+    const footage = await looksAtFootage(a, timeline);
+    const shown = (times: number[]): string =>
+      footage
+        ? `; what the pictures show: ${times
+            .map((t) => {
+              const when = clip
+                ? `frame ${Math.round(t * fps)}`
+                : `${Math.round(t * 1000) / 1000} s`;
+              return `at ${when}, ${studioShotAt(t)}`;
+            })
+            .join("; ")}`
+        : "";
     const base = {
       ok: true,
       kind: "video",
@@ -466,20 +518,22 @@ export function registerStudioStubs(
       frames_attached: 0,
     };
     if (a.overview === true) {
-      const tiles = [0, 4, 8].map((t) => Math.round(t * (clip ? fps : 1)));
+      const seconds = [0, 4, 8];
+      const tiles = seconds.map((t) => Math.round(t * (clip ? fps : 1)));
       return {
         ...base,
         overview: clip ? { tile_frames: tiles } : { tile_times: tiles },
-        note: "(eval) the storyboard was not attached in this harness",
+        note: `(eval) the storyboard was not attached in this harness${shown(seconds)}`,
       };
     }
+    const times = mediaLookTimes(start, end, a.max_frames);
     return {
       ...base,
-      frames: mediaLookTimes(start, end, a.max_frames).map(at),
+      frames: times.map(at),
       coordinate_grid: GRID_NOTE,
       sharpness: 182.4,
       noise_sigma: 1.1,
-      note: "(eval) frames were not attached in this harness",
+      note: `(eval) frames were not attached in this harness${shown(times)}`,
     };
   });
 

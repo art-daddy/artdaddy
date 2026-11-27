@@ -89,9 +89,19 @@ const cases: Array<{ id: string; good: Timeline; bad: Timeline; why: string }> =
   },
   {
     id: "find_moment_and_trim",
-    why: "kept the whole clip — the search result was ignored",
-    good: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60)])]) as Timeline,
+    why: "kept the whole clip — the moment was never cut to",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60, { source_in: 90, source_out: 150 })]),
+    ]) as Timeline,
     bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])]) as Timeline,
+  },
+  {
+    id: "find_moment_and_trim",
+    why: "kept 60 frames, but of the still opening, not the moment",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60, { source_in: 90, source_out: 150 })]),
+    ]) as Timeline,
+    bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60)])]) as Timeline,
   },
   {
     id: "download_and_place",
@@ -420,6 +430,33 @@ describe("studio trace graders reject a broken chain", () => {
     expect(() =>
       s.expectTrace!(trace([{ name: "library_op", args: { action: "list" } }])),
     ).toThrow();
+  });
+
+  it("video_ask_question: takes the answer the listening look gave, and only from such a look", () => {
+    const s = byId("video_ask_question");
+    const asked = (finalText: string, args: Record<string, unknown> = { prompt: "music?" }) => ({
+      ...trace([{ name: "video_ask", args }]),
+      finalText,
+    });
+    for (const right of [
+      "No music, just the roar of the engines.",
+      "It's only the engines roaring; there isn't any music.",
+      "Just the launch: engine noise, without music or voices.",
+    ])
+      expect(() => s.expectTrace!(asked(right)), right).not.toThrow();
+    expect(() => s.expectTrace!(asked("There's soft music under the engine roar."))).toThrow(
+      /says there is music/,
+    );
+    expect(() => s.expectTrace!(asked("Hard to say."))).toThrow(/does not name the sound/);
+    // A look that cannot hear: frames only, or the paid look told to ignore the sound.
+    const free = {
+      ...trace([{ name: "inspect_media", args: { clip_id: "a" } }]),
+      finalText: "No music, just the engines.",
+    };
+    expect(() => s.expectTrace!(free)).toThrow(/without a look that hears/);
+    expect(() =>
+      s.expectTrace!(asked("No music, just the engines.", { prompt: "music?", visual_only: true })),
+    ).toThrow(/without a look that hears/);
   });
 });
 
