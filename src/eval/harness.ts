@@ -2,6 +2,8 @@
 // agent loop (ClientTurnRunner) in autopilot against the REAL model via /inference,
 // executing REAL timeline tools, then captures the full trace + scores it. Mirrors
 // src/agent/synclock.e2e.ts, generalized to any scenario + model + budget guard.
+// A test can pass `send` to script the model's rounds: the same loop, tools, oracle and
+// records then run with no network and no model.
 //
 // Timeline-only tool surface (like synclock): guarantees ZERO surprise generation/
 // network spend. A non-timeline tool the model reaches for is recorded as
@@ -17,6 +19,7 @@ import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
 import { authedFetch } from "../api/auth";
 import { catalogIdentity } from "../contract";
+import { DEFAULT_EFFORT } from "../store/chatControls";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
 import { registerTimelineTools } from "../timeline/ops";
 import { setProjectSettingsTool } from "../tools/project";
@@ -24,7 +27,7 @@ import type { CommandResult, CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { ClientToolRegistry } from "../tools/registry";
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
-import { evalTier0, evalTier1 } from "./oracle";
+import { gradeRun } from "./oracle";
 import { registerJourneyStubs } from "./journey";
 import {
   emptyStudioState,
@@ -37,9 +40,13 @@ import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
 import { type Budget, costFromUsage } from "./pricing";
 import { analyzeTrace } from "./signals";
+import type { CampaignSetup } from "./setup";
 import { RecoveryRuntime, recoveryContext, recoveryProjectDir } from "./recovery";
 import {
   HARNESS_UNAVAILABLE as HARNESS_MARK,
+  type RoundClock,
+  type RunClocks,
+  type RunSetup,
   type Scenario,
   type ScenarioResult,
   type ToolCall,
@@ -110,12 +117,71 @@ const probeRunner: CommandRunner = {
  *  loses that rule). */
 export const harnessProbeRunner: CommandRunner = probeRunner;
 
+/** The JSON body of one /inference round, as the harness sends it. */
+export interface InferenceRequest {
+  round_input: RoundInput;
+  provider_snapshot: Record<string, unknown> | null;
+  model: string;
+  effort: string;
+  mode: string;
+  catalog_id: string;
+  app_version: string;
+}
+
 export interface DriveOpts {
   server: string;
   budget: Budget;
-  effort?: string; // reasoning effort, default "high"
+  effort?: string; // reasoning effort, default the picker's (store/chatControls.ts)
   mode?: string; // loop mode, default "autopilot"
   artifactDir?: string;
+  /** What the campaign runs against (eval.e2e.ts reads it once); recorded on every run. */
+  setup?: CampaignSetup;
+  /** Sends one round. Default: POST it to `${server}/inference`. A test passes a scripted one,
+   *  which drives the same loop, tools, oracle and records with no network and no model. */
+  send?: (request: InferenceRequest) => Promise<RoundResultDTO>;
+  /** Where each run's throwaway project folder is made (default: the OS temp folder). */
+  workDir?: string;
+}
+
+/** What a round reports that the app's Usage type does not name (yet). */
+type RoundUsage = Usage & { cached_tokens?: number; credits?: number };
+
+/** Wall time covered by a set of [start, end) intervals: parallel tool calls count once. */
+function coveredMs(spans: [number, number][]): number {
+  const sorted = [...spans].sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let end = -Infinity;
+  for (const [s, e] of sorted) {
+    if (e <= end) continue;
+    total += e - Math.max(s, end);
+    end = e;
+  }
+  return total;
+}
+
+const FIRST_TOKEN_NOTE =
+  "not measured: the harness sends each round to /inference, which answers the whole round at once; " +
+  "a first-token time needs the streamed route (/inference/stream)";
+
+/** Per-round model and tool time, from the rounds' clocks and the calls each round asked for. */
+function clocksOf(rounds: RoundClock[], calls: ToolCall[]): RunClocks {
+  const byRound = new Map<number, [number, number][]>();
+  for (const c of calls) {
+    if (typeof c.startMs !== "number" || typeof c.ms !== "number") continue;
+    const spans = byRound.get(c.round) ?? [];
+    spans.push([c.startMs, c.startMs + c.ms]);
+    byRound.set(c.round, spans);
+  }
+  const out = rounds.map((r) => {
+    const spans = byRound.get(r.round) ?? [];
+    return { ...r, toolMs: Math.round(coveredMs(spans)), tools: spans.length };
+  });
+  return {
+    rounds: out,
+    modelMs: out.reduce((n, r) => n + r.modelMs, 0),
+    toolMs: out.reduce((n, r) => n + r.toolMs, 0),
+    firstTokenNote: FIRST_TOKEN_NOTE,
+  };
 }
 
 /** What the tools handed back across a scenario. Reported per run so payload shaping can be
@@ -143,15 +209,43 @@ export async function driveScenario(
   opts: DriveOpts,
 ): Promise<ScenarioResult> {
   const started = Date.now();
+  const now = (): number => Date.now() - started;
   const toolCalls: ToolCall[] = [];
   const reasoning: string[] = [];
   let rounds = 0;
+  let turn = 0;
   let finalText = "";
   const turnTexts: string[] = [];
   let recovery: RecoveryRuntime | null = null;
   let providerError = "";
   let roundLimitReached = false;
-  const usage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, costUsd: 0 };
+  const usage: Trace["usage"] = {
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    costUsd: 0,
+    cachedTokens: 0,
+    credits: null,
+    costUnknownRounds: 0,
+  };
+  const effort = opts.effort ?? DEFAULT_EFFORT;
+  const mode = opts.mode ?? "autopilot";
+  const appVersion = process.env.ARTDADDY_EVAL_APP_VERSION ?? "0.24.0";
+  const setup: RunSetup = {
+    model,
+    effort,
+    mode,
+    catalogId: catalogIdentity(),
+    appVersion,
+    appGitSha: opts.setup?.appGitSha ?? null,
+    appGitDirty: opts.setup?.appGitDirty ?? null,
+    server: opts.setup?.server ?? opts.server ?? null,
+    serverVersion: opts.setup?.serverVersion ?? null,
+    serverBuild: opts.setup?.serverBuild ?? null,
+    promptSha256: opts.setup?.promptSha256 ?? null,
+    preload: process.env.ARTDADDY_EVAL_PRELOAD === "1",
+  };
+  const roundClocks: RoundClock[] = [];
   // `prompt` is persisted so a later reader (report, LLM judge) can grade what the
   // model did against what was actually asked, not just the scenario's title.
   const meta = {
@@ -160,11 +254,16 @@ export async function driveScenario(
     prompt: scenario.prompt,
     tags: scenario.tags ?? [],
     model,
+    ...(scenario.knownFailure ? { knownFailure: scenario.knownFailure } : {}),
   };
   let docCleanup: (() => Promise<void>) | null = null;
+  let dir: string | null = null;
 
   try {
-    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), `artdaddy-eval-${scenario.id}-`));
+    if (opts.workDir) await fsp.mkdir(opts.workDir, { recursive: true });
+    dir = await fsp.mkdtemp(
+      path.join(opts.workDir ?? os.tmpdir(), `artdaddy-eval-${scenario.id}-`),
+    );
     const realContext =
       scenario.surface === "recovery" ? recoveryContext(recoveryProjectDir(dir)) : null;
     const store = realContext?.store ?? new ProjectStoreAccess(dir, nodeFs);
@@ -250,39 +349,66 @@ export async function driveScenario(
     }
 
     let snapshot: Record<string, unknown> | null = null;
+    const send =
+      opts.send ??
+      (async (request: InferenceRequest): Promise<RoundResultDTO> => {
+        const res = await authedFetch(`${opts.server}/inference`, {
+          method: "POST",
+          // This posts to /inference itself rather than going through src/agent/api.ts, so it
+          // has to carry the auth header too — against a gated server it 401s without one.
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        });
+        if (!res.ok)
+          throw new Error(`/inference ${res.status}: ${await res.text().catch(() => "")}`);
+        return (await res.json()) as RoundResultDTO;
+      });
     const infer = async (roundInput: RoundInput): Promise<RoundResultDTO> => {
       if (recovery && rounds >= (scenario.maxRounds ?? 16)) {
         roundLimitReached = true;
         throw new Error("recovery scenario model-round limit reached");
       }
       opts.budget.startRound();
-      const res = await authedFetch(`${opts.server}/inference`, {
-        method: "POST",
-        // This posts to /inference itself rather than going through src/agent/api.ts, so it
-        // has to carry the auth header too — against a gated server it 401s without one.
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          round_input: roundInput,
-          provider_snapshot: snapshot,
-          model,
-          effort: opts.effort ?? "high",
-          mode: opts.mode ?? "autopilot",
-          // The server refuses a call that does not name the tool catalog it was built against (426), as the app does.
-          catalog_id: catalogIdentity(),
-          app_version: process.env.ARTDADDY_EVAL_APP_VERSION ?? "0.24.0",
-        }),
+      const sentAt = now();
+      const dto = await send({
+        round_input: roundInput,
+        provider_snapshot: snapshot,
+        model,
+        effort,
+        mode,
+        // The server refuses a call that does not name the tool catalog it was built against (426), as the app does.
+        catalog_id: setup.catalogId,
+        app_version: appVersion,
       });
-      if (!res.ok) throw new Error(`/inference ${res.status}: ${await res.text().catch(() => "")}`);
-      const dto = (await res.json()) as RoundResultDTO;
+      const modelMs = now() - sentAt;
       snapshot = dto.provider_snapshot ?? snapshot;
       rounds += 1;
-      const u: Usage = dto.usage ?? {};
+      const u: RoundUsage = dto.usage ?? {};
       usage.inputTokens += u.input_tokens ?? 0;
       usage.outputTokens += u.output_tokens ?? 0;
       usage.reasoningTokens += u.reasoning_tokens ?? 0;
-      const cost = costFromUsage(model, u);
-      if (recovery && (u.input_tokens ?? 0) > 0 && cost <= 0)
-        throw new Error("recovery campaign stopped: model usage has no trustworthy cost receipt");
+      if (typeof u.cached_tokens === "number" && u.cached_tokens > 0)
+        usage.cachedTokens = (usage.cachedTokens ?? 0) + u.cached_tokens;
+      if (typeof u.credits === "number" && Number.isFinite(u.credits))
+        usage.credits = (usage.credits ?? 0) + u.credits;
+      const cost = costFromUsage(u);
+      roundClocks.push({
+        round: rounds,
+        turn,
+        modelMs,
+        toolMs: 0,
+        tools: 0,
+        firstTokenMs: null,
+        costKnown: cost !== null,
+      });
+      if (cost === null) {
+        // Tokens were spent and the server named no price: the cap can no longer bound the
+        // campaign, so it ends here rather than counting the round as free.
+        usage.costUnknownRounds = (usage.costUnknownRounds ?? 0) + 1;
+        const reason = "a model round used tokens and its reply carried no cost (usage.cost_usd)";
+        opts.budget.stop(reason);
+        throw new Error(`eval stopped: ${reason}`);
+      }
       usage.costUsd += cost;
       opts.budget.add(cost);
       return dto;
@@ -293,8 +419,18 @@ export async function driveScenario(
       infer,
       runTool: async (name, args, trace) => {
         const a = (args ?? {}) as Record<string, unknown>;
+        const startMs = now();
         if (!recovery && !registry.has(name)) {
-          toolCalls.push({ round: rounds, name, args: a, ok: false, error: HARNESS_MARK });
+          toolCalls.push({
+            round: rounds,
+            turn,
+            name,
+            args: a,
+            ok: false,
+            error: HARNESS_MARK,
+            startMs,
+            ms: 0,
+          });
           return { ok: false, error: `tool '${name}' is not available in this eval harness` };
         }
         const r = (
@@ -305,10 +441,12 @@ export async function driveScenario(
           ok?: boolean;
           error?: string;
         };
+        const ms = now() - startMs;
         const ok = r?.ok !== false;
         const serialized = JSON.stringify(r ?? null);
         toolCalls.push({
           round: rounds,
+          turn,
           name,
           args: a,
           ok,
@@ -316,6 +454,8 @@ export async function driveScenario(
           resultChars: serialized.length,
           error: ok ? undefined : String(r?.error ?? ""),
           expectedFailure: recovery?.expectedErrors.has(r),
+          startMs,
+          ms,
         });
         return r;
       },
@@ -328,7 +468,7 @@ export async function driveScenario(
         // how 24 scenarios in one campaign were recorded as capability gaps.
         if (event === "error") providerError = String(data.error ?? "unknown provider error");
       },
-      mode: () => (opts.mode ?? "autopilot") as "autopilot",
+      mode: () => mode as "autopilot",
       stopped: () => opts.budget.exceeded(),
       onUsage: () => {},
       session: () => ({}),
@@ -366,6 +506,7 @@ export async function driveScenario(
     for (const followUp of followUps) {
       if (opts.budget.exceeded() || roundLimitReached) break;
       recovery?.releaseQueuedFailure();
+      turn += 1;
       await runner.start(followUp);
       turnTexts.push(finalText);
       await recovery?.recordClaim(finalText);
@@ -391,14 +532,18 @@ export async function driveScenario(
             ),
           }
         : {}),
+      setup,
+      clocks: clocksOf(roundClocks, toolCalls),
     };
     // A wasted tool call can BE the regression, so tool errors fail the run (tier0
     // only looks at the end state, which the model usually still reaches). The
     // budget defaults to 0 and is raised only by a scenario that provokes an error
-    // on purpose — see evalTier0.
-    const tier0 = evalTier0(final, trace, scenario.maxToolErrors ?? 0);
-    const tier1 = evalTier1(scenario, final, trace);
-    const signals = analyzeTrace(scenario, trace, tier0.violations);
+    // on purpose — see evalTier0. The diff runs from the seed AS LOADED, so nothing the
+    // load itself normalises reads as the model's change.
+    const grade = gradeRun(scenario, seeded, final, trace);
+    trace.diff = grade.diff;
+    trace.checks = grade.checks;
+    const signals = analyzeTrace(scenario, trace, grade.tier0.violations);
     await docCleanup?.();
     docCleanup = null;
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
@@ -406,14 +551,17 @@ export async function driveScenario(
     return {
       ...meta,
       wallMs: Date.now() - started,
-      passed: tier0.passed && tier1.passed,
-      tier0,
-      tier1,
+      passed: grade.passed,
+      tier0: grade.tier0,
+      tier1: grade.tier1,
+      harm: grade.harm,
       signals,
       trace,
     };
   } catch (e) {
     await docCleanup?.();
+    // A run that errors must not leave its project folder behind either.
+    if (dir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
     const trace: Trace = {
       toolCalls,
       reasoning,
@@ -422,6 +570,8 @@ export async function driveScenario(
       turnTexts,
       usage,
       payload: payloadOf(toolCalls),
+      setup,
+      clocks: clocksOf(roundClocks, toolCalls),
     };
     const empty = { passed: false, violations: [] as string[] };
     return {
@@ -430,6 +580,7 @@ export async function driveScenario(
       passed: false,
       tier0: empty,
       tier1: empty,
+      harm: empty,
       signals: analyzeTrace(scenario, trace, []),
       trace,
       harnessError: e instanceof Error ? e.message : String(e),

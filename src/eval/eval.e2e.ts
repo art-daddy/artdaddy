@@ -5,6 +5,10 @@
 // HARNESS breakage (server down / crash), never on the model missing a task — that
 // is data, captured in the report.
 //
+// Every round is a paid call to the hosted model through /inference: run it only when that spend
+// has been approved for the run. The defaults are what a person gets in the app: the picker's
+// default model at its default effort (src/store/chatControls.ts), with a $2 cap.
+//
 // Prereqs (see src/agent/synclock.e2e.ts header): the server running with metering
 // OFF. Config sets ARTDADDY_EVAL=1; override models/cap/server via env:
 //   ARTDADDY_EVAL_MODELS, ARTDADDY_EVAL_CAP_USD, ARTDADDY_SERVER, ARTDADDY_EVAL_EFFORT, ARTDADDY_EVAL_ONLY
@@ -19,12 +23,14 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { setClerkTokenProvider, verifyAccess } from "../api/auth";
+import { authedFetch, setClerkTokenProvider, verifyAccess } from "../api/auth";
 import { setApiBase } from "../api/config";
+import { DEFAULT_EFFORT, DEFAULT_MODEL } from "../store/chatControls";
 import { driveScenario } from "./harness";
-import { Budget } from "./pricing";
+import { Budget, DEFAULT_CAP_USD } from "./pricing";
 import { buildReport } from "./report";
 import { ALL_SCENARIOS } from "./scenarios";
+import { campaignSetup, type CampaignSetup } from "./setup";
 import type { ScenarioResult, Signals, Trace } from "./types";
 
 const EVAL = process.env.ARTDADDY_EVAL === "1";
@@ -32,12 +38,13 @@ const SERVER = process.env.ARTDADDY_SERVER ?? "http://127.0.0.1:8000";
 // A gated server (the deployed one) needs a Clerk session JWT; a local dev server
 // with metering off needs none and ignores this.
 const TOKEN = process.env.ARTDADDY_EVAL_TOKEN ?? "";
-const MODELS = (process.env.ARTDADDY_EVAL_MODELS ?? "gpt-5.4,gpt-5.4-mini")
+const MODELS = (process.env.ARTDADDY_EVAL_MODELS ?? DEFAULT_MODEL)
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const CAP = Number(process.env.ARTDADDY_EVAL_CAP_USD ?? "10");
-const EFFORT = process.env.ARTDADDY_EVAL_EFFORT ?? "high";
+/** The cap is never above $2 unless the environment says so for one run. */
+const CAP = Number(process.env.ARTDADDY_EVAL_CAP_USD ?? String(DEFAULT_CAP_USD));
+const EFFORT = process.env.ARTDADDY_EVAL_EFFORT ?? DEFAULT_EFFORT;
 const ONLY = (process.env.ARTDADDY_EVAL_ONLY ?? "")
   .split(",")
   .map((s) => s.trim())
@@ -121,6 +128,7 @@ describe.skipIf(!EVAL)("model eval (live model via /inference)", () => {
   const budget = new Budget(CAP);
   const results: ScenarioResult[] = [];
   let done = new Map<string, ScenarioResult>();
+  let setup: CampaignSetup | undefined;
 
   beforeAll(async () => {
     done = await loadCheckpoint();
@@ -154,6 +162,12 @@ describe.skipIf(!EVAL)("model eval (live model via /inference)", () => {
         `[eval] ${SERVER} rejected the credentials — set ARTDADDY_EVAL_TOKEN to a valid Clerk session JWT.`,
       );
     }
+    // What this campaign runs against, recorded on every run so two campaigns can be compared:
+    // the client's commit, the server's version and build, and the base prompt's fingerprint.
+    // Plain GETs and a local git call; nothing here reaches a model.
+    setup = await campaignSetup(SERVER, (url) => authedFetch(url));
+    // eslint-disable-next-line no-console
+    console.log(`[eval] setup ${JSON.stringify({ models: MODELS, effort: EFFORT, ...setup })}`);
   });
 
   for (const model of MODELS) {
@@ -178,13 +192,14 @@ describe.skipIf(!EVAL)("model eval (live model via /inference)", () => {
             signals: emptySignals(),
             trace: emptyTrace(),
             wallMs: 0,
+            ...(scenario.knownFailure ? { knownFailure: scenario.knownFailure } : {}),
             skipped: true,
           });
           ctx.skip();
           return;
         }
         const raced = await withWatchdog(
-          driveScenario(scenario, model, { server: SERVER, budget, effort: EFFORT }),
+          driveScenario(scenario, model, { server: SERVER, budget, effort: EFFORT, setup }),
         );
         if (raced === WATCHDOG) {
           // Quarantine the hang: checkpoint it so a relaunch moves PAST this
@@ -201,6 +216,7 @@ describe.skipIf(!EVAL)("model eval (live model via /inference)", () => {
             signals: emptySignals(),
             trace: emptyTrace(),
             wallMs: WATCHDOG_MS,
+            ...(scenario.knownFailure ? { knownFailure: scenario.knownFailure } : {}),
             harnessError: `watchdog: no completion in ${WATCHDOG_MS / 1000}s`,
           };
           results.push(stalled);
@@ -223,6 +239,9 @@ describe.skipIf(!EVAL)("model eval (live model via /inference)", () => {
       models: MODELS,
       capUsd: CAP,
       spentUsd: budget.total,
+      effort: EFFORT,
+      ...(setup ? { setup } : {}),
+      ...(budget.stopped ? { stoppedBecause: budget.stopped } : {}),
     });
     const dir = path.resolve("reports/eval");
     await fsp.mkdir(dir, { recursive: true });

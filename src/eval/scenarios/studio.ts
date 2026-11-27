@@ -13,6 +13,7 @@
 // which catches a model that answers a question by editing.
 import {
   STUDIO_BBOX,
+  STUDIO_CROP_REF,
   STUDIO_DOWNLOAD_REF,
   STUDIO_IMAGE_REF,
   STUDIO_MOMENT_FRAMES,
@@ -35,10 +36,6 @@ function called(trace: Trace, name: string) {
 }
 function mustCall(trace: Trace, name: string): void {
   if (called(trace, name).length === 0) throw new Error(`never called ${name}`);
-}
-function mustNotCall(trace: Trace, name: string): void {
-  const hits = trace.toolCalls.filter((c) => c.name === name);
-  if (hits.length > 0) throw new Error(`reached for ${name} (${hits.length}×) when it shouldn't`);
 }
 /** The asset really landed on the timeline — the outcome, not the instruction. */
 function placed(final: ReturnType<Scenario["seed"]>, ref: string) {
@@ -86,7 +83,6 @@ const clipPlusMusic = () =>
   ]);
 const twoClips = () =>
   timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 150), vclip("b", "b.mp4", 150, 300)])]);
-const emptyProject = () => timeline([], { width: 1920, height: 1080, fps: FPS });
 const logoStill = () =>
   timeline([vtrack("v1", 0, [vclip("logo", "logo.png", 0, 90, { kind: "image" })])]);
 
@@ -94,6 +90,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── structural gaps the timeline surface already supports ──────────────────
   {
     id: "add_track_for_overlay",
+    scope: { addTracks: true },
     title: "Make room for an overlay above the footage",
     tags: ["tracks"],
     seed: oneClip,
@@ -114,6 +111,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "redo_after_undo",
+    scope: { change: ["a"] },
     title: "Undo an edit, then ask for it back",
     tags: ["undo", "redo", "multi-turn"],
     seed: oneClip,
@@ -133,6 +131,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── inspection: look before you edit ──────────────────────────────────────
   {
     id: "inspect_color_then_warm",
+    scope: { change: ["a"] },
     title: "Measure a cold shot, then warm it",
     tags: ["studio", "inspect", "color"],
     surface: "studio",
@@ -157,6 +156,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "inspect_timeline_check",
+    scope: {},
     title: "Check the composite at a frame before answering",
     tags: ["studio", "inspect", "read-only"],
     surface: "studio",
@@ -186,12 +186,15 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "inspect_media_before_place",
+    scope: { change: ["a"], remove: ["a"], add: ["video"] },
     title: "Look at the footage before choosing where to cut",
     tags: ["studio", "inspect"],
     surface: "studio",
     seed: oneClip,
     prompt: "What's actually in this shot? Have a look and then cut the boring opening off.",
     expectTools: ["inspect_media"],
+    // "Have a look" asks for a look at the content; the paid looks are fair ways to take it.
+    paidTools: ["video_ask", "video_find_moment"],
     maxRounds: 10,
     expect: (final) => {
       const c = clipsOf(final, "v1")[0];
@@ -205,6 +208,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── media in: find it, fetch it, place it ─────────────────────────────────
   {
     id: "download_and_place",
+    scope: { add: ["video", "audio"], addTracks: true },
     title: "Download a video and put it on the end",
     tags: ["studio", "download", "placement"],
     surface: "studio",
@@ -221,6 +225,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "search_then_fetch",
+    scope: { add: ["video", "audio"], addTracks: true },
     title: "Search YouTube, then bring the right one in",
     tags: ["studio", "search", "download"],
     surface: "studio",
@@ -242,47 +247,52 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "metadata_before_download",
+    scope: {},
     title: "Answer how long a video is without downloading it",
     tags: ["studio", "metadata", "read-only"],
     surface: "studio",
     seed: oneClip,
     prompt: `How long is ${STUDIO_URL}, and what are its chapters? Don't bring it in yet.`,
     expectTools: ["video_get_metadata"],
+    // Reading metadata is the cheap path; pulling the file is not, and the user said not yet.
+    mustNotCall: ["download_video"],
     maxRounds: 6,
     expect: untouched(oneClip),
-    expectTrace: (t) => {
-      mustCall(t, "video_get_metadata");
-      // Reading metadata is the cheap path; pulling the file is not.
-      mustNotCall(t, "download_video");
-    },
+    expectTrace: (t) => mustCall(t, "video_get_metadata"),
   },
   {
     id: "probe_before_trusting",
+    scope: {},
     title: "Check the real resolution of a source",
     tags: ["studio", "probe", "read-only"],
     surface: "studio",
     seed: oneClip,
     prompt: "Is the footage in this project actually 4K, or is it upscaled? Just check.",
-    expectTools: ["probe_media"],
+    // probe_media is withdrawn; inspect_media reports a source's real size (its `metadata`).
+    expectTools: ["inspect_media"],
     maxRounds: 6,
     expect: untouched(oneClip),
     expectTrace: (t) => {
-      // Either read answers "what resolution is this" honestly; demanding the exact
-      // tool would grade the instruction instead of the outcome. What must NOT
-      // happen is answering from thin air.
-      if (called(t, "probe_media").length + called(t, "inspect_media").length === 0)
+      // What must NOT happen is answering from thin air: the size has to be read, and the answer
+      // has to be the one the read gave (the stand-in's source is 1920x1080, not 4K).
+      if (called(t, "inspect_media").length === 0)
         throw new Error("answered without inspecting the media");
+      if (!/1080|1920|full ?hd/i.test(t.finalText))
+        throw new Error(`the answer does not give the size the read reported (1920x1080)`);
     },
   },
   // ── vision: look at it, then act on what you saw ──────────────────────────
   {
     id: "find_moment_and_trim",
+    scope: { change: ["a"], remove: ["a"], add: ["video"] },
     title: "Find the best moment and cut to it",
     tags: ["studio", "vision", "trim"],
     surface: "studio",
     seed: oneClip,
     prompt: "Find the moment the rocket clears the tower and cut this down to just that.",
     expectTools: ["video_find_moment"],
+    // Finding a moment by what happens in it is a paid look, and the request asks for one.
+    paidTools: ["video_find_moment", "video_ask"],
     maxRounds: 12,
     expect: (final) => {
       const clips = allClips(final).filter((c) => c.kind !== "text");
@@ -298,29 +308,21 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "video_ask_question",
+    scope: {},
     title: "Answer a question about the footage without editing",
     tags: ["studio", "vision", "read-only"],
     surface: "studio",
     seed: oneClip,
     prompt: "What happens in this shot? Don't change anything, I'm just asking.",
     expectTools: ["video_ask"],
+    paidTools: ["video_ask"],
     maxRounds: 6,
     expect: untouched(oneClip),
     expectTrace: (t) => mustCall(t, "video_ask"),
   },
   {
-    id: "describe_the_logo",
-    title: "Describe a still image in the project",
-    tags: ["studio", "vision", "read-only"],
-    surface: "studio",
-    seed: logoStill,
-    prompt: "Describe the logo image for me — colours, background, that sort of thing.",
-    expectTools: ["vision_describe"],
-    maxRounds: 6,
-    expect: untouched(logoStill),
-  },
-  {
     id: "compare_two_images",
+    scope: {},
     title: "Compare two stills and pick one",
     tags: ["studio", "vision", "read-only"],
     surface: "studio",
@@ -347,38 +349,54 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expectTrace: (t) => mustCall(t, "image_ask"),
   },
   {
-    id: "find_content_then_crop",
-    title: "Locate the logo in a frame and crop to it",
-    tags: ["studio", "vision", "crop"],
+    id: "crop_to_wordmark",
+    scope: { change: ["logo"], remove: ["logo"], add: ["image", "video"], addTracks: true },
+    title: "Crop a still to a box the user gives, and use the crop",
+    tags: ["studio", "crop", "placement"],
     surface: "studio",
     seed: logoStill,
-    prompt: "There's a wordmark in that image — crop it down to just the wordmark.",
-    expectTools: ["find_content", "crop_image"],
+    // Was find_content_then_crop: find_content is withdrawn, and the harness attaches no pixels, so
+    // a look cannot locate the wordmark. The user gives the box instead. What the case still holds
+    // is the chain, now from the user to crop_image to the timeline: the crop must use THIS box
+    // (in source pixels, as crop_image takes it), and the cropped still must replace the logo.
+    prompt:
+      "The wordmark in my logo image fills the box from x 120 to 360 and y 80 to 240, in " +
+      "pixels. Crop the image down to just that box and show the crop on the timeline in place " +
+      "of the full logo.",
+    expectTools: ["crop_image"],
     maxRounds: 10,
+    expect: (final) => {
+      const crop = placed(final, STUDIO_CROP_REF);
+      if (Math.abs(Number(crop.timeline_in)) > 2 || Math.abs(Number(crop.timeline_out) - 90) > 3)
+        throw new Error(
+          `the crop shows ${crop.timeline_in}-${crop.timeline_out}f, not where the logo was (0-90f)`,
+        );
+      if (allClips(final).some((c) => c.media_ref === "logo.png"))
+        throw new Error("the full logo is still on the timeline beside the crop");
+    },
     expectTrace: (t) => {
-      mustCall(t, "find_content");
       const crop = called(t, "crop_image")[0];
-      if (!crop) throw new Error("found the wordmark but never cropped");
-      // The chain is the point: the crop must use the box the search returned,
-      // not a box the model invented. This is what a "did it read the reply?" test
-      // has to assert — calling both tools proves nothing on its own.
-      const raw = JSON.stringify(crop.args);
-      for (const [k, v] of Object.entries(STUDIO_BBOX)) {
-        if (!new RegExp(`\\b${v}\\b`).test(raw))
-          throw new Error(`crop ignored the located bbox (${k}=${v} missing from ${raw})`);
-      }
+      if (!crop) throw new Error("never cropped");
+      const box = ((crop.args ?? {}) as { bbox?: Record<string, unknown> }).bbox ?? {};
+      for (const [k, v] of Object.entries(STUDIO_BBOX))
+        if (Math.abs(Number(box[k]) - v) > 2)
+          throw new Error(`crop ${k}=${String(box[k])}, the box the user gave has ${k}=${v}`);
     },
   },
   {
     id: "research_then_caption",
-    title: "Read a page and put a fact on screen",
+    scope: { add: ["text"], addTracks: true },
+    title: "Look a fact up and put it on screen",
     tags: ["studio", "research", "captions"],
     surface: "studio",
     seed: oneClip,
+    // get_page is withdrawn; a web search is how the app looks something up now, and its
+    // stand-in returns the page's fact in a result snippet.
     prompt:
-      `Read ${STUDIO_URL} and put the launch time on screen as a caption over the first ` +
-      "couple of seconds.",
-    expectTools: ["get_page", "add_text_clips"],
+      "Find out when the launch window at example.com opens and put that time on screen as a " +
+      "caption over the first couple of seconds.",
+    expectTools: ["web_search", "add_text_clips"],
+    paidTools: ["web_search"],
     maxRounds: 12,
     expect: (final) => {
       const texts = allClips(final).filter((c) => c.kind === "text");
@@ -391,6 +409,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "web_search_answer",
+    scope: {},
     title: "Search the web and answer, without editing",
     tags: ["studio", "research", "read-only"],
     surface: "studio",
@@ -399,12 +418,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       "Search the web for the launch at example.com and tell me when the launch window " +
       "opens. Don't touch the edit.",
     expectTools: ["web_search"],
+    paidTools: ["web_search"],
     maxRounds: 8,
     expect: untouched(oneClip),
     expectTrace: (t) => mustCall(t, "web_search"),
   },
   {
     id: "screenshot_page_and_place",
+    scope: { change: ["a"], add: ["image", "video"], addTracks: true },
     title: "Screenshot a page and show it on screen",
     tags: ["studio", "research", "placement"],
     surface: "studio",
@@ -423,6 +444,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── generation: make what's missing, then USE it ──────────────────────────
   {
     id: "generate_image_and_place",
+    scope: { change: ["a"], add: ["image", "video"], addTracks: true },
     title: "Generate a title card and put it first",
     tags: ["studio", "generation", "placement"],
     surface: "studio",
@@ -434,6 +456,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     // or the scenario stops measuring the capability and starts measuring the wording.
     followUps: ["Yes, go ahead."],
     expectTools: ["generate_image", "add_clips"],
+    paidTools: ["generate_image"],
     maxRounds: 12,
     expect: (final) => {
       const hit = placed(final, STUDIO_IMAGE_REF);
@@ -445,6 +468,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "generate_video_broll",
+    scope: { change: ["b"], add: ["video", "audio"], addTracks: true },
     title: "Generate b-roll and cut it in",
     tags: ["studio", "generation", "placement"],
     surface: "studio",
@@ -452,6 +476,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     prompt: "I need a shot of clouds moving fast between these two. Make one and drop it in.",
     followUps: ["Yes, go ahead."],
     expectTools: ["generate_video", "insert_clips"],
+    paidTools: ["generate_video"],
     maxRounds: 12,
     expect: (final) => {
       const hit = placed(final, STUDIO_VIDEO_REF);
@@ -466,12 +491,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "generate_voiceover_and_place",
+    scope: { add: ["audio"], addTracks: true },
     title: "Write and place a voiceover",
     tags: ["studio", "generation", "audio"],
     surface: "studio",
     seed: oneClip,
     prompt: "Record a voiceover saying 'Welcome to the launch' and lay it under the video.",
     expectTools: ["generate_voiceover", "add_clips"],
+    paidTools: ["generate_voiceover"],
     maxRounds: 12,
     expect: (final) => {
       const hit = placed(final, STUDIO_VOICEOVER_REF);
@@ -481,12 +508,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "generate_music_bed",
+    scope: { add: ["audio"], addTracks: true },
     title: "Generate a music bed under the cut",
     tags: ["studio", "generation", "audio"],
     surface: "studio",
     seed: oneClip,
     prompt: "This needs music. Make something calm and instrumental and put it underneath.",
     expectTools: ["generate_music", "add_clips"],
+    paidTools: ["generate_music"],
     maxRounds: 12,
     expect: (final) => {
       const hit = placed(final, STUDIO_MUSIC_REF);
@@ -496,6 +525,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "list_models_before_generating",
+    scope: {},
     title: "Answer what generation models are available",
     tags: ["studio", "generation", "read-only"],
     surface: "studio",
@@ -504,15 +534,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expectTools: ["list_models"],
     maxRounds: 6,
     expect: untouched(oneClip),
-    expectTrace: (t) => {
-      mustCall(t, "list_models");
-      // Asking about capability must not burn a generation call.
-      mustNotCall(t, "generate_video");
-    },
+    // Asking about capability must not burn a generation call: no paid tool is allowed here, so
+    // the oracle's paid-tool check fails any of them (it used to name generate_video alone).
+    expectTrace: (t) => mustCall(t, "list_models"),
   },
   // ── project lifecycle ────────────────────────────────────────────────────
   {
     id: "project_rename",
+    scope: {},
     title: "Rename the project",
     tags: ["studio", "project"],
     surface: "studio",
@@ -547,6 +576,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "project_duplicate_before_risk",
+    scope: {},
     title: "Copy the project before experimenting",
     tags: ["studio", "project"],
     surface: "studio",
@@ -576,11 +606,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "project_state_question",
+    scope: {},
     title: "Answer what the project is set to",
     tags: ["studio", "project", "read-only"],
     surface: "studio",
     seed: oneClip,
     prompt: "Remind me what this project's canvas and frame rate are.",
+    // A settings QUESTION must never become a settings CHANGE.
+    mustNotCall: ["set_project_settings"],
     maxRounds: 6,
     expect: untouched(oneClip),
     expectTrace: (t) => {
@@ -595,12 +628,11 @@ export const STUDIO_SCENARIOS: Scenario[] = [
             throw new Error(`answered without the project's real canvas and frame rate (${value})`);
         }
       }
-      // A settings QUESTION must never become a settings CHANGE.
-      mustNotCall(t, "set_project_settings");
     },
   },
   {
     id: "project_pack_for_handoff",
+    scope: {},
     title: "Package the project to hand off",
     tags: ["studio", "project", "deliverable"],
     surface: "studio",
@@ -614,6 +646,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── library ──────────────────────────────────────────────────────────────
   {
     id: "library_tag_broll",
+    scope: {},
     title: "Find library assets and tag them",
     tags: ["studio", "library"],
     surface: "studio",
@@ -631,6 +664,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   },
   {
     id: "library_place_from_catalog",
+    scope: { add: ["video", "audio"], addTracks: true },
     title: "Put a library asset on the timeline by description",
     tags: ["studio", "library", "placement"],
     surface: "studio",
@@ -648,6 +682,7 @@ export const STUDIO_SCENARIOS: Scenario[] = [
   // ── escape hatch: the tool it should NOT reach for ───────────────────────
   {
     id: "no_ffmpeg_for_speed",
+    scope: { change: ["a", "m"] },
     title: "A first-class tool exists — don't shell out",
     tags: ["studio", "escape-hatch"],
     surface: "studio",
@@ -655,6 +690,9 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     prompt: "Speed the video up to double and drop the music to about a third.",
     expectTools: ["set_clip_properties"],
     flagTools: ["run_ffmpeg"],
+    // The whole point: a raw-ffmpeg detour here is a capability-model failure, not a shortcut. It
+    // bypasses the timeline entirely and the user's undo stack.
+    mustNotCall: ["run_ffmpeg"],
     maxRounds: 10,
     expect: (final) => {
       const v = clipsOf(final, "v1")[0];
@@ -664,44 +702,5 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       const vol = Number((m as Record<string, unknown>)?.volume ?? 1);
       if (vol < 0.2 || vol > 0.45) throw new Error(`music volume ${vol}, expected ≈0.33`);
     },
-    expectTrace: (t) => {
-      // The whole point: a raw-ffmpeg detour here is a capability-model failure,
-      // not a shortcut. It bypasses the timeline entirely and the user's undo stack.
-      mustNotCall(t, "run_ffmpeg");
-    },
-  },
-];
-
-/** Kept, not deleted, for tools withdrawn from the served catalog: the model is no longer offered
- *  them, so running one of these would fail on the withdrawal rather than on the behaviour it
- *  tests. Bringing the tool back is moving the scenario up into the list above. */
-export const WITHDRAWN_SCENARIOS: Scenario[] = [
-  {
-    id: "clip_window_from_source",
-    title: "Pull one window out of a long source",
-    tags: ["studio", "clip_video"],
-    surface: "studio",
-    seed: emptyProject,
-    prompt:
-      `Take ${STUDIO_URL} — I only want the bit from two minutes in to two and a half ` +
-      "minutes. Get just that and put it on the timeline.",
-    expectTools: ["clip_video", "add_clips"],
-    maxRounds: 12,
-    expect: (final) => {
-      if (allClips(final).length === 0) throw new Error("nothing reached the timeline");
-    },
-  },
-  {
-    id: "extract_style_from_reference",
-    title: "Turn reference edits into a reusable style",
-    tags: ["studio", "style"],
-    surface: "studio",
-    seed: oneClip,
-    prompt:
-      "I like how ref1.mp4 and ref2.mp4 are cut. Work out that style and save it as " +
-      "'punchy' so we can reuse it.",
-    expectTools: ["extract_style"],
-    maxRounds: 10,
-    expectTrace: (t) => mustCall(t, "extract_style"),
   },
 ];

@@ -2,16 +2,31 @@
 // scorecard. The markdown leads with pass-rates per model, then the FRICTION
 // section (the actionable part): the missing-feature backlog, tools ranked by
 // failures, workaround snippets, and silent-corruption cases.
+import { runStatus } from "./status";
 import { hasFriction } from "./signals";
-import type { ScenarioResult } from "./types";
+import type { CampaignSetup } from "./setup";
+import type { CheckId, RunStatus, ScenarioResult } from "./types";
 
 interface ReportOpts {
   models: string[];
   capUsd: number;
   spentUsd: number;
+  effort?: string;
+  setup?: CampaignSetup;
+  /** Why the campaign stopped before its cap (an uncounted spend), if it did. */
+  stoppedBecause?: string;
 }
 
 const pct = (n: number, d: number): string => (d ? `${Math.round((100 * n) / d)}%` : "—");
+
+const STATUS_WORD: Record<RunStatus, string> = {
+  pass: "✓ pass",
+  fail: "✗ fail",
+  known_failure: "known failure",
+  fixed: "FIXED",
+  skipped: "⏭ budget",
+  harness_error: "⚠ harness",
+};
 
 interface ModelSummary {
   model: string;
@@ -19,27 +34,68 @@ interface ModelSummary {
   passed: number;
   tier0: number;
   tier1: number;
+  harm: number;
+  failed: number;
+  knownFailures: number;
+  fixed: number;
   avgRounds: number;
   toolErrors: number;
   cost: number;
+  cachedTokens: number;
+  inputTokens: number;
+  modelMs: number;
+  toolMs: number;
 }
 
 function summarize(results: ScenarioResult[], models: string[]): ModelSummary[] {
   return models.map((model) => {
     const rs = results.filter((r) => r.model === model && !r.skipped && !r.harnessError);
     const rounds = rs.reduce((a, r) => a + r.trace.rounds, 0);
+    const status = rs.map((r) => runStatus(r));
     return {
       model,
       run: rs.length,
       passed: rs.filter((r) => r.passed).length,
       tier0: rs.filter((r) => r.tier0.passed).length,
       tier1: rs.filter((r) => r.tier1.passed).length,
+      // A result written before the harm checks existed has none, and is not counted as harmed.
+      harm: rs.filter((r) => r.harm?.passed !== false).length,
+      failed: status.filter((s) => s === "fail").length,
+      knownFailures: status.filter((s) => s === "known_failure").length,
+      fixed: status.filter((s) => s === "fixed").length,
       avgRounds: rs.length ? rounds / rs.length : 0,
       toolErrors: rs.reduce((a, r) => a + r.signals.toolErrors.length, 0),
       cost: rs.reduce((a, r) => a + r.trace.usage.costUsd, 0),
+      cachedTokens: rs.reduce((a, r) => a + (r.trace.usage.cachedTokens ?? 0), 0),
+      inputTokens: rs.reduce((a, r) => a + r.trace.usage.inputTokens, 0),
+      modelMs: rs.reduce((a, r) => a + (r.trace.clocks?.modelMs ?? 0), 0),
+      toolMs: rs.reduce((a, r) => a + (r.trace.clocks?.toolMs ?? 0), 0),
     };
   });
 }
+
+/** Per check: how many runs it failed and warned on, with a few examples. Collateral on a case
+ *  with no declared scope is the run's diff, recorded rather than judged, so it is counted apart. */
+function checkTally(results: ScenarioResult[]): {
+  id: CheckId;
+  fail: number;
+  warn: number;
+  examples: string[];
+}[] {
+  const map = new Map<CheckId, { fail: number; warn: number; examples: string[] }>();
+  for (const r of results)
+    for (const c of r.trace.checks ?? []) {
+      if (c.verdict !== "fail" && c.verdict !== "warn") continue;
+      const e = map.get(c.id) ?? { fail: 0, warn: 0, examples: [] };
+      e[c.verdict] += 1;
+      if (e.examples.length < 5)
+        e.examples.push(`[\`${r.model}\` / ${r.scenarioId}] ${c.details.slice(0, 2).join("; ")}`);
+      map.set(c.id, e);
+    }
+  return [...map.entries()].map(([id, e]) => ({ id, ...e }));
+}
+
+const secs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
 /** Aggregate the missing-feature backlog: (tool.param) -> scenarios that tried it. */
 function undeclaredBacklog(results: ScenarioResult[]): { key: string; runs: string[] }[] {
@@ -76,24 +132,79 @@ export function buildReport(
   const skipped = results.filter((r) => r.skipped).length;
   const backlog = undeclaredBacklog(results);
   const failRanking = toolFailureRanking(results);
+  const checks = checkTally(results);
   const now = new Date().toISOString();
 
   const L: string[] = [];
   L.push(`# Model eval — ${now.slice(0, 16).replace("T", " ")}`);
   L.push("");
   L.push(
-    `Models: ${opts.models.join(", ")} · Scenarios: ${results.length} · ` +
+    `Models: ${opts.models.join(", ")}${opts.effort ? ` · Effort: ${opts.effort}` : ""} · Scenarios: ${results.length} · ` +
       `Spent: **$${opts.spentUsd.toFixed(2)}** / $${opts.capUsd.toFixed(2)} cap · Skipped (budget): ${skipped}`,
   );
+  if (opts.stoppedBecause) {
+    L.push("");
+    L.push(`**Stopped early:** ${opts.stoppedBecause}`);
+  }
+  L.push("");
+  // Two campaigns compare fairly only when these are equal, or when the one that differs is
+  // the thing under test. Null means the run could not learn it.
+  L.push("## Setup");
+  const s0 = opts.setup;
+  const catalogs = [...new Set(results.map((r) => r.trace.setup?.catalogId).filter(Boolean))];
+  L.push(
+    `- Client commit: ${s0?.appGitSha ?? "unknown"}${s0?.appGitDirty ? " (with local changes)" : ""}`,
+  );
+  L.push(
+    `- Server: ${s0?.server ?? "unknown"} · version ${s0?.serverVersion ?? "unknown"} · build ${s0?.serverBuild || "unknown"}`,
+  );
+  L.push(`- Base prompt sha256: ${s0?.promptSha256 ?? "not reported"}`);
+  L.push(`- Tool catalog: ${catalogs.join(", ") || "unknown"}`);
   L.push("");
   L.push("## Summary");
-  L.push("| Model | Pass | Tier0 (safe) | Tier1 (did-it) | Avg rounds | Tool errors | Cost |");
-  L.push("|---|---|---|---|---|---|---|");
+  L.push(
+    "| Model | Pass | Tier0 (safe) | Tier1 (did-it) | Harm-free | Fail | Known failure | Fixed | Avg rounds | Tool errors | Cost | Cached input | Model time | Tool time |",
+  );
+  L.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const s of summaries) {
     L.push(
       `| \`${s.model}\` | ${s.passed}/${s.run} (${pct(s.passed, s.run)}) | ${s.tier0}/${s.run} | ${s.tier1}/${s.run} | ` +
-        `${s.avgRounds.toFixed(1)} | ${s.toolErrors} | $${s.cost.toFixed(2)} |`,
+        `${s.harm}/${s.run} | ${s.failed} | ${s.knownFailures} | ${s.fixed} | ` +
+        `${s.avgRounds.toFixed(1)} | ${s.toolErrors} | $${s.cost.toFixed(2)} | ` +
+        `${pct(s.cachedTokens, s.inputTokens)} | ${secs(s.modelMs)} | ${secs(s.toolMs)} |`,
     );
+  }
+  L.push("");
+  L.push(
+    "_Fail_ is a case that failed with no known failure on record: a regression, or a new case that never passed. " +
+      "_Known failure_ is a case marked with the backlog item tracking it. _Fixed_ is a marked case that passed: remove its mark.",
+  );
+  L.push("");
+
+  const marked = results.filter((r) => r.knownFailure && !r.skipped && !r.harnessError);
+  if (marked.length) {
+    L.push("## Known failures and fixes");
+    for (const r of marked)
+      L.push(
+        `- [\`${r.model}\` / ${r.scenarioId}] ${runStatus(r) === "fixed" ? "**FIXED** (remove the mark)" : "still failing"} — ${r.knownFailure}`,
+      );
+    L.push("");
+  }
+
+  L.push("## Harm and craft checks");
+  L.push("");
+  L.push(
+    "> A failed check fails the run. A warning is a pointer to read the trace, never a verdict. " +
+      "Collateral on a case with no declared scope is the run's diff, recorded for a reader.",
+  );
+  L.push("");
+  if (checks.length) {
+    L.push("| Check | Failed runs | Warned runs | Examples |");
+    L.push("|---|---|---|---|");
+    for (const c of checks)
+      L.push(`| \`${c.id}\` | ${c.fail} | ${c.warn} | ${c.examples.join("<br>")} |`);
+  } else {
+    L.push("- _(no check failed or warned)_");
   }
   L.push("");
 
@@ -193,24 +304,30 @@ export function buildReport(
   L.push("");
 
   L.push("## Per-scenario");
-  L.push("| Scenario | Model | Pass | T0 | T1 | Rounds | Errors | Friction |");
-  L.push("|---|---|---|---|---|---|---|---|");
+  L.push("| Scenario | Model | Status | T0 | T1 | Harm | Rounds | Errors | Warnings | Friction |");
+  L.push("|---|---|---|---|---|---|---|---|---|---|");
   for (const r of results) {
+    const status = STATUS_WORD[runStatus(r)];
     if (r.skipped) {
-      L.push(`| ${r.scenarioId} | \`${r.model}\` | ⏭ budget | — | — | — | — | — |`);
+      L.push(`| ${r.scenarioId} | \`${r.model}\` | ${status} | — | — | — | — | — | — | — |`);
       continue;
     }
     if (r.harnessError) {
       L.push(
-        `| ${r.scenarioId} | \`${r.model}\` | ⚠ harness | — | — | — | — | ${r.harnessError.slice(0, 60)} |`,
+        `| ${r.scenarioId} | \`${r.model}\` | ${status} | — | — | — | — | — | — | ${r.harnessError.slice(0, 60)} |`,
       );
       continue;
     }
     const t1 = r.tier1.passed ? "✓" : "✗";
     const t0 = r.tier0.passed ? "✓" : "✗";
+    const harm = r.harm ? (r.harm.passed ? "✓" : "✗") : "—";
+    // An unscoped case's collateral warning is its diff, recorded rather than judged.
+    const warned = (r.trace.checks ?? [])
+      .filter((c) => c.verdict === "warn" && c.id !== "collateral")
+      .map((c) => c.id.replace(/^craft_/, ""));
     const friction = hasFriction(r.signals) ? "⚑" : "";
     L.push(
-      `| ${r.scenarioId} | \`${r.model}\` | ${r.passed ? "✓" : "✗"} | ${t0} | ${t1} | ${r.trace.rounds} | ${r.signals.toolErrors.length} | ${friction} |`,
+      `| ${r.scenarioId} | \`${r.model}\` | ${status} | ${t0} | ${t1} | ${harm} | ${r.trace.rounds} | ${r.signals.toolErrors.length} | ${warned.join(", ")} | ${friction} |`,
     );
   }
   L.push("");
@@ -218,11 +335,19 @@ export function buildReport(
   const json = {
     generatedAt: now,
     models: opts.models,
-    budget: { capUsd: opts.capUsd, spentUsd: opts.spentUsd, skipped },
+    effort: opts.effort ?? null,
+    setup: opts.setup ?? null,
+    budget: {
+      capUsd: opts.capUsd,
+      spentUsd: opts.spentUsd,
+      skipped,
+      stoppedBecause: opts.stoppedBecause ?? null,
+    },
     summary: summaries,
+    checks,
     backlog,
     toolFailures: failRanking,
-    results,
+    results: results.map((r) => ({ ...r, status: runStatus(r) })),
   };
   return { json, markdown: L.join("\n") };
 }

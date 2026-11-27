@@ -31,6 +31,7 @@ function textClips(final: ReturnType<Scenario["seed"]>) {
 export const JOURNEYS: Scenario[] = [
   {
     id: "journey_import_edit_export",
+    scope: { add: ["video", "audio"], addTracks: true },
     title: "Import two clips, join them with a crossfade, export the result",
     tags: ["journey", "import", "transition", "export"],
     surface: "journey",
@@ -78,6 +79,7 @@ export const JOURNEYS: Scenario[] = [
 
   {
     id: "journey_transcript_captions",
+    scope: { change: ["narration"], add: ["text"], addTracks: true },
     title: "Caption a narration clip from its transcript and trim the dead air",
     tags: ["journey", "transcript", "captions", "trim"],
     surface: "journey",
@@ -91,6 +93,12 @@ export const JOURNEYS: Scenario[] = [
       "Caption what's said in this clip so the words appear on screen as they're spoken, " +
       "then trim off the dead air after the last word.",
     expectTools: ["get_transcript", "add_text_clips"],
+    // What the get_transcript stand-in says is spoken, in the clip's source seconds (the seed
+    // places it at frame 0 untrimmed, so its project frames are source frames at 30 fps).
+    transcript: {
+      media_ref: JOURNEY_NARRATION_REF,
+      words: JOURNEY_WORDS.map(([, text, s, e]) => [text, s / FPS, e / FPS] as const),
+    },
     maxRounds: 14,
     expect: (final) => {
       const texts = textClips(final);

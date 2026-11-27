@@ -4,6 +4,7 @@
 // validation-rejection thrash while retiming (t008/t009 — t009 retried it ×13), and
 // the sync-lock / linked-A/V invariants. These reproduce those in the timeline-only
 // harness; the friction signals catch the rejections even when the task still passes.
+import { buildScene } from "../../preview/scene";
 import { clipMagnification, MAX_MAGNIFICATION } from "../../timeline/magnification";
 import type { Clip } from "../../timeline/model";
 import type { Scenario } from "../types";
@@ -38,6 +39,7 @@ function synclockSeed() {
 export const REGRESSIONS: Scenario[] = [
   {
     id: "t006_speed_1_2x",
+    scope: { change: ["a"] },
     title: "Increase clip speed to 1.2× (the real t006/t008/t009 task)",
     tags: ["regression:t006", "retime"],
     // The shared prompt across t006/t008/t009 was "…increase speed to 1.2x". The
@@ -51,6 +53,7 @@ export const REGRESSIONS: Scenario[] = [
   },
   {
     id: "ripple_both_ids",
+    scope: { remove: ["b"], change: ["c"] },
     title: "Ripple-cut a specific clip (model kept passing track_id AND clip_id)",
     tags: ["regression:t008", "regression:t009", "ripple"],
     // In t005/t008/t009 the model called ripple_delete with BOTH track_id and clip_id
@@ -76,6 +79,7 @@ export const REGRESSIONS: Scenario[] = [
   },
   {
     id: "linked_av_retime_sync",
+    scope: { change: ["shot", "shotAud"] },
     title: "Retiming a clip keeps its linked audio in sync",
     tags: ["link", "retime", "invariant"],
     seed: () =>
@@ -96,6 +100,7 @@ export const REGRESSIONS: Scenario[] = [
   },
   {
     id: "synclock_ripple",
+    scope: { remove: ["middle"], change: ["outro", "outroAud", "logo"] },
     title: "Ripple-cut keeps a sync-locked overlay + linked audio aligned",
     tags: ["sync-lock", "ripple", "invariant"],
     seed: synclockSeed,
@@ -119,6 +124,7 @@ export const REGRESSIONS: Scenario[] = [
   },
   {
     id: "t009_property_thrash",
+    scope: { change: ["a"] },
     title: "Combined property edit lands without rejected retries",
     tags: ["regression:t009", "properties"],
     // Real t009 retried set_clip_properties ×13 (validation rejections) while retiming;
@@ -135,18 +141,8 @@ export const REGRESSIONS: Scenario[] = [
     maxRounds: 4,
   },
   {
-    id: "speed_2x_parity",
-    title: "2× speed keeps source/timeline parity",
-    tags: ["retime", "invariant"],
-    seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60, { source_out: 60 })])]),
-    prompt: "Make this clip play twice as fast.",
-    // Tier 0 enforces source/timeline parity; Tier 1 just nails the speed intent.
-    expect: (tl) => near(Number(clipById(tl, "a")?.speed ?? 1), 2, 0.1, "speed"),
-    expectTools: ["set_clip_properties"],
-    maxRounds: 5,
-  },
-  {
     id: "vertical_reframe_480p",
+    scope: { change: ["a"] },
     title: "Reframe a 480p 16:9 talk to vertical without destroying the picture",
     tags: ["regression:feedback-f82a9221", "reframe"],
     // The reported session: filling a 9:16 canvas from a 16:9 480p podcast is ALREADY a 4x
@@ -163,8 +159,12 @@ export const REGRESSIONS: Scenario[] = [
       "The video is not moving, just the voice over is moving.",
       "It's still static. Fix it.",
     ],
+    // Two things must both hold. The frame is FILLED: the seed letterboxes the 16:9 picture in the
+    // 9:16 canvas, so a model that never reframed used to pass on the ceiling alone (the tool clamps
+    // zoom itself). And the picture is not blown past the ceiling.
     expect: (tl) => {
       const c = clipById(tl, "a");
+      assert(c, "the clip is gone");
       const fit = String(c?.fit ?? "contain") === "cover" ? "cover" : "contain";
       const mag = clipMagnification(c as Clip, { w: 1080, h: 1920 }, { w: 854, h: 480 }, fit);
       assert(
@@ -172,6 +172,26 @@ export const REGRESSIONS: Scenario[] = [
         `the picture is magnified ${mag.toFixed(1)}x (max ${MAX_MAGNIFICATION}x) — ` +
           `only ${Math.round(1080 / mag)}x${Math.round(1920 / mag)} source pixels reach the canvas`,
       );
+      // Where the compositor draws it (preview/scene.ts), at the start, middle and end.
+      const dims = new Map([[String(c!.media_ref), { w: 854, h: 480 }]]);
+      const fps = Number(tl.canvas?.fps) || 30;
+      const [tin, tout] = [Number(c!.timeline_in), Number(c!.timeline_out)];
+      for (const f of [tin, Math.floor((tin + tout) / 2), tout - 1]) {
+        const layer = buildScene(tl, f / fps, dims).layers.find((l) => l.source === c!.media_ref);
+        assert(layer, `nothing of the clip is drawn at frame ${f}`);
+        const { x, y, w, h } = layer!.clipBox ?? layer!.dst;
+        const d = layer!.dst;
+        const covers =
+          Math.max(x, d.x) <= 1 &&
+          Math.max(y, d.y) <= 1 &&
+          Math.min(x + w, d.x + d.w) >= 1080 - 1 &&
+          Math.min(y + h, d.y + d.h) >= 1920 - 1;
+        assert(
+          covers,
+          `the picture does not fill the 1080x1920 frame at frame ${f}: drawn at ` +
+            `${Math.round(d.x)},${Math.round(d.y)} ${Math.round(d.w)}x${Math.round(d.h)}`,
+        );
+      }
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 12,
