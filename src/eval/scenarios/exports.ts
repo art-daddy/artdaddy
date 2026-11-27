@@ -52,6 +52,7 @@ const readySeed = () =>
 export const EXPORT_SCENARIOS: Scenario[] = [
   {
     id: "export_once",
+    scope: {},
     title: "A plain export request renders exactly one file",
     tags: ["export", "regression:multi-export"],
     surface: "journey",
@@ -64,6 +65,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_no_verify_loop",
+    scope: {},
     title: "Asked to make sure it worked, the model checks instead of re-rendering",
     tags: ["export", "regression:multi-export"],
     surface: "journey",
@@ -82,6 +84,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_after_edit",
+    scope: { remove: ["b"] },
     title: "The deliverable is rendered after the edit, not before it",
     tags: ["export", "sequencing"],
     surface: "journey",
@@ -107,6 +110,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_settings_not_guessed",
+    scope: {},
     title: "A requested setting is passed as a setting, not baked in another way",
     tags: ["export", "settings"],
     surface: "journey",
@@ -132,6 +136,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_default_destination",
+    scope: {},
     title: "With no destination named, the model does not invent an absolute path",
     tags: ["export", "destination"],
     surface: "journey",
@@ -152,6 +157,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_named_destination",
+    scope: {},
     title: "A destination the user DID name is honoured",
     tags: ["export", "destination"],
     surface: "journey",
@@ -173,6 +179,7 @@ export const EXPORT_SCENARIOS: Scenario[] = [
 
   {
     id: "export_redo_with_new_settings",
+    scope: {},
     title: "Changing the settings mid-render cancels the first one rather than stacking",
     tags: ["export", "cancel"],
     surface: "journey",

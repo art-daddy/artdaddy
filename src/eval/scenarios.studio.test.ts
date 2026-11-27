@@ -21,12 +21,14 @@ import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 import type { Timeline } from "../timeline/model";
 import { emptyStudioState, registerStudioStubs, STUDIO_BBOX, studioRefIsAudio } from "./studio";
 import {
+  STUDIO_CROP_REF,
   STUDIO_DOWNLOAD_REF,
   STUDIO_IMAGE_REF,
   STUDIO_MUSIC_REF,
   STUDIO_SCREENSHOT_REF,
   STUDIO_VOICEOVER_REF,
 } from "./studio";
+import { gradeRun } from "./oracle";
 import { STUDIO_SCENARIOS } from "./scenarios/studio";
 import { aclip, atrack, timeline, ttrack, vclip, vtrack } from "./scenarios/helpers";
 import type { Scenario, ToolCall, Trace } from "./types";
@@ -87,9 +89,19 @@ const cases: Array<{ id: string; good: Timeline; bad: Timeline; why: string }> =
   },
   {
     id: "find_moment_and_trim",
-    why: "kept the whole clip — the search result was ignored",
-    good: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60)])]) as Timeline,
+    why: "kept the whole clip — the moment was never cut to",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60, { source_in: 90, source_out: 150 })]),
+    ]) as Timeline,
     bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])]) as Timeline,
+  },
+  {
+    id: "find_moment_and_trim",
+    why: "kept 60 frames, but of the still opening, not the moment",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60, { source_in: 90, source_out: 150 })]),
+    ]) as Timeline,
+    bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 60)])]) as Timeline,
   },
   {
     id: "download_and_place",
@@ -270,54 +282,84 @@ describe("read-only studio scenarios reject an edit", () => {
 // ── trace graders: the chain, not the call ──────────────────────────────────
 
 describe("studio trace graders reject a broken chain", () => {
-  it("find_content_then_crop: rejects a crop that invented its own bbox", () => {
-    const s = byId("find_content_then_crop");
+  it("crop_to_wordmark: rejects a crop that invented its own box", () => {
+    const s = byId("crop_to_wordmark");
     const good = trace([
-      { name: "find_content", args: { media_ref: "logo.png" } },
       { name: "crop_image", args: { media_ref: "logo.png", bbox: { ...STUDIO_BBOX } } },
     ]);
     const invented = trace([
-      { name: "find_content", args: { media_ref: "logo.png" } },
       { name: "crop_image", args: { media_ref: "logo.png", bbox: { x: 0, y: 0, w: 500, h: 500 } } },
     ]);
-    const neverCropped = trace([{ name: "find_content", args: {} }]);
+    // The box as corners instead of a size: x 120..360 read as w=360.
+    const misread = trace([
+      {
+        name: "crop_image",
+        args: { media_ref: "logo.png", bbox: { x: 120, y: 80, w: 360, h: 240 } },
+      },
+    ]);
+    const neverCropped = trace([{ name: "inspect_media", args: { media_ref: "logo.png" } }]);
     expect(() => s.expectTrace!(good)).not.toThrow();
     expect(() => s.expectTrace!(invented)).toThrow();
+    expect(() => s.expectTrace!(misread)).toThrow();
     expect(() => s.expectTrace!(neverCropped)).toThrow();
   });
 
+  it("crop_to_wordmark: rejects a crop that never replaced the logo on the timeline", () => {
+    const s = byId("crop_to_wordmark");
+    const replaced = timeline([
+      vtrack("v1", 0, [vclip("logo", STUDIO_CROP_REF, 0, 90, { kind: "image" })]),
+    ]) as Timeline;
+    const beside = timeline([
+      vtrack("v1", 0, [vclip("logo", "logo.png", 0, 90, { kind: "image" })]),
+      vtrack("v2", 1, [vclip("c", STUDIO_CROP_REF, 0, 90, { kind: "image" })]),
+    ]) as Timeline;
+    expect(() => s.expect!(replaced)).not.toThrow();
+    expect(() => s.expect!(beside)).toThrow(/still on the timeline/);
+    expect(() => s.expect!(s.seed())).toThrow(/never reached the timeline/);
+  });
+
+  // These two are graded by the oracle's forbidden-tool check (Scenario.mustNotCall), not by
+  // their own trace graders: the verdict a runner gets is the one under test.
+  const harmOf = (id: string, calls: Partial<ToolCall>[]) => {
+    const s = byId(id);
+    return gradeRun(s, s.seed(), s.seed(), trace(calls)).harm;
+  };
+
   it("no_ffmpeg_for_speed: rejects a trace that shelled out to raw ffmpeg", () => {
-    const s = byId("no_ffmpeg_for_speed");
-    expect(() => s.expectTrace!(trace([{ name: "set_clip_properties", args: {} }]))).not.toThrow();
-    expect(() =>
-      s.expectTrace!(trace([{ name: "run_ffmpeg", args: { command: "-i a.mp4 -vf setpts…" } }])),
-    ).toThrow();
+    expect(harmOf("no_ffmpeg_for_speed", [{ name: "set_clip_properties", args: {} }]).passed).toBe(
+      true,
+    );
+    const shelled = harmOf("no_ffmpeg_for_speed", [
+      { name: "run_ffmpeg", args: { command: "-i a.mp4 -vf setpts…" } },
+    ]);
+    expect(shelled.passed).toBe(false);
+    expect(shelled.violations.join("\n")).toMatch(/forbidden_tool.*run_ffmpeg/);
   });
 
   it("metadata_before_download: rejects downloading when only asked how long it is", () => {
     const s = byId("metadata_before_download");
     expect(() => s.expectTrace!(trace([{ name: "video_get_metadata", args: {} }]))).not.toThrow();
-    expect(() =>
-      s.expectTrace!(
-        trace([
-          { name: "video_get_metadata", args: {} },
-          { name: "download_video", args: {} },
-        ]),
-      ),
-    ).toThrow();
+    expect(harmOf("metadata_before_download", [{ name: "video_get_metadata" }]).passed).toBe(true);
+    const fetched = harmOf("metadata_before_download", [
+      { name: "video_get_metadata", args: {} },
+      { name: "download_video", args: {} },
+    ]);
+    expect(fetched.passed).toBe(false);
+    expect(fetched.violations.join("\n")).toMatch(/forbidden_tool.*download_video/);
   });
 
-  it("list_models_before_generating: rejects burning a generation call to answer a question", () => {
+  it("list_models_before_generating: rejects burning any paid call to answer a question", () => {
     const s = byId("list_models_before_generating");
     expect(() => s.expectTrace!(trace([{ name: "list_models", args: {} }]))).not.toThrow();
-    expect(() =>
-      s.expectTrace!(
-        trace([
-          { name: "list_models", args: {} },
-          { name: "generate_video", args: {} },
-        ]),
-      ),
-    ).toThrow();
+    expect(harmOf("list_models_before_generating", [{ name: "list_models" }]).passed).toBe(true);
+    for (const paid of ["generate_video", "generate_image", "video_ask", "web_search"]) {
+      const burned = harmOf("list_models_before_generating", [
+        { name: "list_models", args: {} },
+        { name: paid, args: {} },
+      ]);
+      expect(burned.passed, paid).toBe(false);
+      expect(burned.violations.join("\n")).toContain(`harm(paid_tool): ${paid}`);
+    }
   });
 
   it("inspect_timeline_check: rejects inspecting a frame the prompt didn't ask for", () => {
@@ -366,14 +408,13 @@ describe("studio trace graders reject a broken chain", () => {
   it("project_state_question: rejects turning a settings question into a settings change", () => {
     const s = byId("project_state_question");
     expect(() => s.expectTrace!(trace([{ name: "get_project_state", args: {} }]))).not.toThrow();
-    expect(() =>
-      s.expectTrace!(
-        trace([
-          { name: "get_project_state", args: {} },
-          { name: "set_project_settings", args: {} },
-        ]),
-      ),
-    ).toThrow();
+    expect(harmOf("project_state_question", [{ name: "get_project_state" }]).passed).toBe(true);
+    const changed = harmOf("project_state_question", [
+      { name: "get_project_state", args: {} },
+      { name: "set_project_settings", args: {} },
+    ]);
+    expect(changed.passed).toBe(false);
+    expect(changed.violations.join("\n")).toMatch(/forbidden_tool.*set_project_settings/);
   });
 
   it("library_tag_broll: rejects listing without ever tagging", () => {
@@ -389,6 +430,33 @@ describe("studio trace graders reject a broken chain", () => {
     expect(() =>
       s.expectTrace!(trace([{ name: "library_op", args: { action: "list" } }])),
     ).toThrow();
+  });
+
+  it("video_ask_question: takes the answer the listening look gave, and only from such a look", () => {
+    const s = byId("video_ask_question");
+    const asked = (finalText: string, args: Record<string, unknown> = { prompt: "music?" }) => ({
+      ...trace([{ name: "video_ask", args }]),
+      finalText,
+    });
+    for (const right of [
+      "No music, just the roar of the engines.",
+      "It's only the engines roaring; there isn't any music.",
+      "Just the launch: engine noise, without music or voices.",
+    ])
+      expect(() => s.expectTrace!(asked(right)), right).not.toThrow();
+    expect(() => s.expectTrace!(asked("There's soft music under the engine roar."))).toThrow(
+      /says there is music/,
+    );
+    expect(() => s.expectTrace!(asked("Hard to say."))).toThrow(/does not name the sound/);
+    // A look that cannot hear: frames only, or the paid look told to ignore the sound.
+    const free = {
+      ...trace([{ name: "inspect_media", args: { clip_id: "a" } }]),
+      finalText: "No music, just the engines.",
+    };
+    expect(() => s.expectTrace!(free)).toThrow(/without a look that hears/);
+    expect(() =>
+      s.expectTrace!(asked("No music, just the engines.", { prompt: "music?", visual_only: true })),
+    ).toThrow(/without a look that hears/);
   });
 });
 
