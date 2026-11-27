@@ -44,6 +44,7 @@ describe("KNOWN_FAILURE_REF", () => {
       "art-daddy/backlog#0",
       "art-daddy/backlog#9x",
       "see #93",
+      "see art-daddy/backlog#93",
       "",
     ])
       expect(bad).not.toMatch(KNOWN_FAILURE_REF);

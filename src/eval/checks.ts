@@ -317,15 +317,13 @@ function gapsOf(track: Track | undefined): Span[] {
 function subtract([s, e]: Span, cover: Span[]): Span[] {
   let parts: Span[] = [[s, e]];
   for (const [cs, ce] of cover)
-    parts = parts.flatMap(([ps, pe]): Span[] =>
-      ce <= ps || cs >= pe
-        ? [[ps, pe]]
-        : (
-            [
-              [ps, Math.min(pe, cs)],
-              [Math.max(ps, ce), pe],
-            ] as Span[]
-          ).filter(([a, b]) => b > a),
+    parts = parts.flatMap(([ps, pe]) =>
+      (
+        [
+          [ps, Math.min(pe, cs)],
+          [Math.max(ps, ce), pe],
+        ] as Span[]
+      ).filter(([a, b]) => b > a),
     );
   return parts;
 }
