@@ -24,8 +24,17 @@ export type Step =
   | { result: RoundResult }
   /** The connection drops now, with no result: a network that died mid-reply. */
   | { cut: true }
-  /** The socket stays open and silent until the app hangs up (Stop) or the test ends. */
+  /** The line stays open, carrying only keepalive comments, until the test calls
+   *  `server.release()` (then the next step runs) or the app hangs up (Stop). */
+  | { hold: true }
+  /** The same, but never released: only the app hanging up (Stop) or the test ending closes it. */
   | { hang: true };
+
+/** How often a held line carries a keepalive comment. The real server sends one every 15 s; a held
+ *  line sends them sooner because an engine may keep the last bytes of a quiet stream back until
+ *  more arrive (in CI, Linux WebKit showed two words of seven, then nothing for 15 s), and a test
+ *  must never depend on when an engine hands over bytes it already has. */
+export const KEEPALIVE_MS = 200;
 
 export type Reply =
   | { kind: "stream"; steps: Step[]; note: string }

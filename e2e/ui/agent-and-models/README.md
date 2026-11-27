@@ -59,9 +59,10 @@ export function askForMusic(prompt = "calm piano, 30 seconds"): Reply {
 The helpers: `say(text, { gapMs, firstTokenMs, usage, refusedFrames })` streams words then the
 result; `callTools(calls, prose)` asks for tool calls; `httpAnswer(status, detail)` answers an HTTP
 error the way the server does (`{"detail": ...}`); `stream(note, ...steps)` writes any sequence of
-`{ delta }`, `{ wait }`, `{ ping }`, `{ result }`, `{ cut }` (the connection drops) and `{ hang }`
-(open and silent until Stop). The result shape is the app's own `RoundResultDTO`
-(`src/agent/types.ts`), so a reply cannot drift from what the app reads.
+`{ delta }`, `{ wait }`, `{ ping }`, `{ result }`, `{ cut }` (the connection drops), `{ hold }` (the
+line stays open, carrying only keepalive comments, until the test calls `qa.server.release()`) and
+`{ hang }` (the same, never released: open until Stop). The result shape is the app's own
+`RoundResultDTO` (`src/agent/types.ts`), so a reply cannot drift from what the app reads.
 
 In a test, queue the replies in the order the rounds will come. A reply can also be a function of
 the round it answers, to read the tool results the app sent back:
@@ -71,6 +72,30 @@ qa.server.script(addTrack("video"), (round) =>
   addClips(ref, 90, String(round.toolResults[0].result.track_id)),
 );
 ```
+
+## Wait for events, never for a time
+
+These tests run on Chromium and WebKit on four systems, and a pause that suits one is a red run on
+another. So a test waits for a state the app shows or an event a stand-in saw, never for a number
+of milliseconds:
+
+- What the server has sent: each model round in `qa.server.seen` keeps the answer's text written so
+  far (`written`) and whether its line is held open (`holding`). A pause in a stream is a `hold` (or
+  a `hang`) that carries keepalive comments, as the real server's line does: in CI, Linux WebKit
+  showed two words of seven for 15 s once a stream went silent, so a silent pause can hide words the
+  server has already sent.
+- What the shell ran: `qa.shell.sidecarRuns` lists each ffmpeg/ffprobe run with its arguments and
+  whether it is `running`, was `killed` or has `ended`.
+- What the app saved: read it with the rig's helpers (`savedTranscript`, `savedMessages`,
+  `savedAnswers`, `savedTimeline`...) inside `expect.poll`. The shell makes the app's file changes
+  and these reads take turns, so a read never meets half a file.
+- "Nothing was sent by itself": script the next reply only just before the click that should send
+  it. A round the app sends on its own then finds no reply and fails the test, whenever it comes.
+
+A test that shows a known bug is marked with `knownBug(issue, shows)` from `lib/qa.ts`, not with
+`test.fail`: `shows` must match the error the test fails with, so a failure for any other reason
+(a timeout, a broken step) is reported as a failure instead of passing as "the bug is still there".
+When the bug is fixed the test passes, which Playwright reports as a failure until the mark goes.
 
 ## Waits
 

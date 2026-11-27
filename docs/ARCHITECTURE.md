@@ -439,16 +439,23 @@ mutants take ≈82% of the wall-clock). Reports land in `reports/mutation/` (git
 
 **Model eval** (`src/eval/`, `npm run eval` — manual/nightly, gated by `vitest.eval.config.ts`)
 drives natural-language prompts × seeded projects through the **live model** (/inference) + the
-real agent loop + real timeline tools, scoring Tier 0 (result safety) + Tier 1 (expected
-geometry) and mining **friction signals** (failed calls, undeclared-param attempts = the
-missing-feature backlog, workarounds, silent corruption) that fire even on passing tasks. $10
-budget guard; models gpt-5.4 + gpt-5.4-mini; JSON + md scorecard in `reports/eval/` (gitignored).
-Non-gating. An **offline transcript miner** (`npm run mine`, "Mode A") replays recorded sessions'
+real agent loop + real timeline tools, scoring Tier 0 (result safety: the render is planned from
+sources resolved the way every export resolves them), Tier 1 (expected geometry) and harm
+(`src/eval/checks.ts`: a paid tool the request did not ask for, most of the timeline deleted, a
+change outside the case's declared scope), and mining **friction signals** (failed calls,
+undeclared-param attempts = the missing-feature backlog, workarounds, silent corruption, craft
+warnings) that fire even on passing tasks. Defaults: the picker's default model at its default
+effort (`src/store/chatControls.ts`), $2 budget guard (`eval:mini`: $1); each run records its setup
+(model, effort, catalog id, client commit, server build, base-prompt hash) and its model and tool
+time. JSON + md scorecard in `reports/eval/` (gitignored). Non-gating. A case marked
+`knownFailure` (a backlog reference) reads as a known failure while it fails and as fixed when it
+passes. An **offline transcript miner** (`npm run mine`, "Mode A") replays recorded sessions'
 `.artdaddy/transcript.json` through the same friction analyzer (zero spend, no media) →
 `reports/eval/transcript-mining.md` — it mined the real t001–t009 into the recurring-bug report.
 Full contract in the backend repo's `docs/ARCHITECTURE.md` §14.
 
-The recovery surface additionally executes real local media/inspection handlers and
+The recovery surface (its eight cases are kept out of the main lane's list, `RECOVERY_LANE`)
+additionally executes real local media/inspection handlers and
 grades retained ffmpeg artifacts rather than an unconditional-success tool stub.
 `recoveryCampaign.e2e.ts` is an explicit old/new-guidance, five-repetition Luna campaign
 with one shared spend journal; it remains skipped without `ARTDADDY_RECOVERY_EVAL=1`.

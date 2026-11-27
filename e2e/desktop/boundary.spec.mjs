@@ -23,14 +23,34 @@ function scratchFile(tag) {
   return p;
 }
 
+// A dev build's first load waits on a cold vite (measured at ~50 s), so it gets the lanes' raised ceiling when set.
+const BOOT_MS = Number(process.env.ARTDADDY_E2E_TIMEOUT_MS || 30_000);
+
+/** What the webview shows, for a failure message: a blank or error page says why the bundle never mounted. */
+async function whatTheWebviewShows() {
+  try {
+    const [href, title, text] = await evalInApp(() => [
+      location.href,
+      document.title,
+      (document.body?.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 300),
+    ]);
+    const windows = (await browser.getWindowHandles()).length;
+    return `${href} ("${title}") in ${windows} window(s): ${text || "(no text)"}`;
+  } catch (error) {
+    return `nothing readable (${error.message})`;
+  }
+}
+
 describe("packaged app boot", () => {
   it("mounts the production bundle into #root (not a blank webview)", async () => {
-    const root = await $("#root");
-    await root.waitForExist({ timeout: 30_000 });
-    await browser.waitUntil(
-      async () => (await evalInApp(() => document.getElementById("root")?.innerHTML.length ?? 0)) > 50,
-      { timeout: 30_000, timeoutMsg: "#root stayed empty — the app white-screened in the webview" },
-    );
+    try {
+      await browser.waitUntil(
+        async () => (await evalInApp(() => document.getElementById("root")?.innerHTML.length ?? 0)) > 50,
+        { timeout: BOOT_MS, interval: 500 },
+      );
+    } catch {
+      assert.fail(`#root stayed missing or empty for ${BOOT_MS / 1000} s; the webview shows ${await whatTheWebviewShows()}`);
+    }
   });
 
   it("loaded the built bundle, not an error page or a bare shell", async () => {
@@ -122,28 +142,35 @@ describe("trash_path IPC command", () => {
 });
 
 describe("plugin capabilities", () => {
+  // Both checks call the IPC the bundled plugins call. A script injected into the page cannot `import()` a package by
+  // its bare name (the page has no import map), so the import these checks used to make failed whatever the
+  // capabilities said, and proved nothing either way.
   it("the fs plugin is permitted (a capabilities typo breaks every project read)", async () => {
-    const err = await evalInApp(async () => {
+    const probe = path.join(os.homedir(), `artdaddy_e2e_exists_${Date.now()}`);
+    const answer = await evalInApp(async (target) => {
       try {
-        const { exists } = await import("@tauri-apps/plugin-fs");
-        await exists("."); // the ANSWER doesn't matter; being allowed to ask does
-        return null;
+        return { exists: await window.__TAURI_INTERNALS__.invoke("plugin:fs|exists", { path: target }) };
       } catch (e) {
-        return String(e);
+        return { error: String(e) };
       }
-    });
-    assert.equal(err, null, `the fs plugin is not permitted by the capabilities: ${err}`);
+    }, probe);
+    // The ANSWER (false: nothing is there) matters less than being allowed to ask at all.
+    assert.deepEqual(answer, { exists: false }, `the fs plugin is not permitted by the capabilities: ${answer.error}`);
   });
 
-  it("the shell plugin is permitted (sidecars are how every export runs)", async () => {
-    const denied = await evalInApp(async () => {
+  it("the page cannot run programs through the shell plugin (sidecars run through the app's own sidecar_run)", async () => {
+    const err = await evalInApp(async () => {
       try {
-        await import("@tauri-apps/plugin-shell");
+        await window.__TAURI_INTERNALS__.invoke("plugin:shell|execute", {
+          program: "cmd",
+          args: ["/c", "exit", "0"],
+          options: {},
+        });
         return null;
       } catch (e) {
         return String(e);
       }
     });
-    assert.equal(denied, null, `the shell plugin failed to load: ${denied}`);
+    assert.notEqual(err, null, "the page ran a program through the shell plugin: no capability grants that");
   });
 });

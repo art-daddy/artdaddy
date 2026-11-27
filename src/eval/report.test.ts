@@ -103,4 +103,107 @@ describe("buildReport", () => {
     });
     expect(markdown).toContain("budget");
   });
+
+  // A failing case with a backlog item on record is not a regression, and the run that first
+  // passes it must say so loudly enough that the mark gets removed.
+  it("reports a marked case as a known failure while it fails, and as fixed once it passes", () => {
+    const ref = "art-daddy/backlog#93";
+    const results = [
+      mk({ scenarioId: "old_bug", passed: false, knownFailure: ref }),
+      mk({ scenarioId: "now_fixed", passed: true, knownFailure: ref }),
+      mk({ scenarioId: "regressed", passed: false }),
+      mk({ scenarioId: "fine", passed: true }),
+    ];
+    const { json, markdown } = buildReport(results, {
+      models: ["gpt-5.4"],
+      capUsd: 2,
+      spentUsd: 0,
+    });
+    const row = (id: string) => markdown.split("\n").find((l) => l.startsWith(`| ${id} |`))!;
+    expect(row("old_bug")).toContain("known failure");
+    expect(row("now_fixed")).toContain("FIXED");
+    expect(row("regressed")).toContain("✗ fail");
+    expect(row("fine")).toContain("✓ pass");
+    expect(markdown).toContain(`[\`gpt-5.4\` / now_fixed] **FIXED** (remove the mark) — ${ref}`);
+    expect(markdown).toContain(`[\`gpt-5.4\` / old_bug] still failing — ${ref}`);
+    const summary = (json as { summary: Record<string, number>[] }).summary[0];
+    expect([summary.failed, summary.knownFailures, summary.fixed, summary.passed]).toEqual([
+      1, 1, 1, 2,
+    ]);
+    const statuses = (json as { results: { scenarioId: string; status: string }[] }).results;
+    expect(statuses.map((r) => r.status)).toEqual(["known_failure", "fixed", "fail", "pass"]);
+  });
+
+  it("shows the setup, the harm column and the checks that failed or warned", () => {
+    const r = mk({
+      scenarioId: "spent",
+      model: "gpt-6-luna",
+      passed: false,
+      harm: { passed: false, violations: ["harm(paid_tool): generate_video called 1x"] },
+      trace: {
+        toolCalls: [],
+        reasoning: [],
+        rounds: 2,
+        finalText: "",
+        usage: {
+          inputTokens: 1000,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          costUsd: 0.1,
+          cachedTokens: 800,
+        },
+        setup: {
+          model: "gpt-6-luna",
+          effort: "medium",
+          mode: "autopilot",
+          catalogId: "cat_1",
+          appVersion: "0.24.0",
+          appGitSha: "a".repeat(40),
+          appGitDirty: true,
+          server: "http://s",
+          serverVersion: "9",
+          serverBuild: "b1",
+          promptSha256: "c".repeat(64),
+          preload: false,
+        },
+        clocks: { rounds: [], modelMs: 1500, toolMs: 500, firstTokenNote: "n/a" },
+        checks: [
+          { id: "paid_tool", verdict: "fail", details: ["generate_video called 1x"] },
+          {
+            id: "craft_tiny_clip",
+            verdict: "warn",
+            details: ["clip f is 2 frames long (under 5)"],
+          },
+          { id: "collateral", verdict: "warn", details: ["clip a changed: opacity"] },
+        ],
+      },
+    });
+    const { markdown } = buildReport([r], {
+      models: ["gpt-6-luna"],
+      capUsd: 2,
+      spentUsd: 0.1,
+      effort: "medium",
+      setup: {
+        appGitSha: "a".repeat(40),
+        appGitDirty: true,
+        server: "http://s",
+        serverVersion: "9",
+        serverBuild: "b1",
+        promptSha256: "c".repeat(64),
+      },
+    });
+    expect(markdown).toContain("Effort: medium");
+    expect(markdown).toContain(`Client commit: ${"a".repeat(40)} (with local changes)`);
+    expect(markdown).toContain("version 9 · build b1");
+    expect(markdown).toContain(`Base prompt sha256: ${"c".repeat(64)}`);
+    expect(markdown).toContain("Tool catalog: cat_1");
+    expect(markdown).toMatch(/\| `paid_tool` \| 1 \| 0 \|/);
+    expect(markdown).toMatch(/\| `craft_tiny_clip` \| 0 \| 1 \|/);
+    const row = markdown.split("\n").find((l) => l.startsWith("| spent |"))!;
+    expect(row).toContain("| ✗ |"); // harm
+    expect(row).toContain("tiny_clip"); // a craft warning, by name
+    expect(row).not.toContain("collateral"); // an unscoped diff is a record, not a warning
+    const summaryRow = markdown.split("\n").find((l) => l.startsWith("| `gpt-6-luna` |"))!;
+    expect(summaryRow).toContain("| 80% | 1.5s | 0.5s |"); // cached share, model time, tool time
+  });
 });

@@ -16,6 +16,7 @@ const fx = (c: Any, type: string): Any =>
 export const EFFECT_SCENARIOS: Scenario[] = [
   {
     id: "effect_disable",
+    scope: { change: ["a"] },
     title: "Bypass an effect without losing it",
     tags: ["effects", "enabled"],
     seed: () =>
@@ -41,6 +42,7 @@ export const EFFECT_SCENARIOS: Scenario[] = [
   },
   {
     id: "effect_remove",
+    scope: { change: ["a"] },
     title: "Remove an effect",
     tags: ["effects", "remove"],
     seed: () =>
@@ -66,6 +68,7 @@ export const EFFECT_SCENARIOS: Scenario[] = [
   },
   {
     id: "effect_partial_update",
+    scope: { change: ["a"] },
     title: "Change one knob, keep the rest",
     tags: ["effects", "merge"],
     seed: () =>
@@ -95,6 +98,7 @@ export const EFFECT_SCENARIOS: Scenario[] = [
   },
   {
     id: "effect_copy_look",
+    scope: { change: ["b"] },
     title: "Copy a look between clips",
     tags: ["effects", "echo"],
     seed: () =>
@@ -127,6 +131,7 @@ export const EFFECT_SCENARIOS: Scenario[] = [
   },
   {
     id: "audio_eq_boost",
+    scope: { change: ["m"] },
     title: "Audio effect on a music clip",
     tags: ["effects", "audio"],
     seed: () =>
@@ -145,6 +150,7 @@ export const EFFECT_SCENARIOS: Scenario[] = [
   },
   {
     id: "effect_refusal_recovery",
+    scope: { change: ["m"] },
     title: "Recover from a refusal",
     tags: ["effects", "regression:refusal"],
     seed: () =>

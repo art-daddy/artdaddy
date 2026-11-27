@@ -1,0 +1,19 @@
+{
+  "id": "golden_0_23_0_a5f698",
+  "name": "Golden 0.23.0",
+  "schemaVersion": 1,
+  "createdAt": "2026-11-03T19:11:38.000Z",
+  "modifiedAt": "2026-11-03T19:11:38.000Z",
+  "activeTimeline": "timeline.json",
+  "settings": {
+    "canvas": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 30
+    },
+    "model_id": "",
+    "active_style": "",
+    "active_workflow": "",
+    "planning_mode": "beats"
+  }
+}

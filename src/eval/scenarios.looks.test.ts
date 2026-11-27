@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Timeline } from "../timeline/model";
 import catalog from "../contract/catalog.json";
-import { ALL_SCENARIOS, DISABLED_SCENARIOS } from "./scenarios";
+import { ALL_SCENARIOS, DISABLED_SCENARIOS, RECOVERY_LANE } from "./scenarios";
 import { CANONICAL } from "./scenarios/canonical";
 import { EFFECT_SCENARIOS } from "./scenarios/effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./scenarios/exports";
@@ -77,7 +77,7 @@ describe("caption-look eval graders (validated without the model)", () => {
   }
 
   it("every scenario id in the corpus is unique (report keys can't collide)", () => {
-    const ids = ALL_SCENARIOS.map((s) => s.id);
+    const ids = [...ALL_SCENARIOS, ...DISABLED_SCENARIOS, ...RECOVERY_LANE].map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
@@ -88,7 +88,6 @@ describe("caption-look eval graders (validated without the model)", () => {
       ...REGRESSIONS,
       ...JOURNEYS,
       ...EXPORT_SCENARIOS,
-      ...RECOVERY_SCENARIOS,
       ...STUDIO_SCENARIOS,
     ];
     const withdrawn = new Set(
@@ -100,6 +99,18 @@ describe("caption-look eval graders (validated without the model)", () => {
       expect(DISABLED_SCENARIOS.includes(scenario), scenario.id).toBe(retired);
     }
     expect(ALL_SCENARIOS.length + DISABLED_SCENARIOS.length).toBe(candidates.length);
+  });
+
+  // The harness stops a recovery case before inference unless the server's tool list matches its
+  // stand-ins, so in the main lane it could only ever be recorded as a harness error.
+  it("keeps the recovery cases out of the main lane and runnable in their own", () => {
+    expect(RECOVERY_SCENARIOS.length).toBeGreaterThan(0);
+    for (const scenario of RECOVERY_SCENARIOS) {
+      expect(ALL_SCENARIOS.includes(scenario), scenario.id).toBe(false);
+      expect(RECOVERY_LANE.includes(scenario), scenario.id).toBe(true);
+      expect(scenario.surface, scenario.id).toBe("recovery");
+    }
+    expect(ALL_SCENARIOS.some((s) => s.surface === "recovery")).toBe(false);
   });
 });
 

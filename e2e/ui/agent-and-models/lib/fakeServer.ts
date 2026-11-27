@@ -15,7 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo, Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
-import type { ReplySource, Round, Step } from "./reply";
+import { KEEPALIVE_MS, type ReplySource, type Round, type Step } from "./reply";
 
 export interface Seen {
   method: string;
@@ -27,6 +27,11 @@ export interface Seen {
   status?: number;
   /** The scripted reply that answered it (model rounds only). */
   reply?: string;
+  /** The answer's text written so far (the `text` deltas since the last `reset`), so a test can wait
+   *  for "the server has sent these words" as an event rather than for a time. */
+  written?: string;
+  /** The stream is held open (a `hold` or `hang` step) and waiting. */
+  holding?: boolean;
   /** How the answer ended: written to the end, cut by the script, or the app hung up first. */
   end?: "complete" | "cut" | "left";
   endedAt?: number;
@@ -67,6 +72,9 @@ export class FakeArtDaddy {
 
   private readonly replies: ReplySource[] = [];
   private readonly sockets = new Set<Socket>();
+  /** Held streams waiting for `release()`, oldest first; and releases given before any was held. */
+  private readonly holds: Array<() => void> = [];
+  private releasesAhead = 0;
   private rounds = 0;
   private requestSeq = 0;
 
@@ -100,6 +108,14 @@ export class FakeArtDaddy {
   /** Scripted replies no round has used yet. */
   get unused(): number {
     return this.replies.length;
+  }
+
+  /** Let the oldest held stream (a `hold` step) go on to its next step. A release given before the
+   *  stream reaches its hold is kept for it. */
+  release(): void {
+    const next = this.holds.shift();
+    if (next) next();
+    else this.releasesAhead += 1;
   }
 
   /** The model rounds the app sent, in order (both the streaming and the plain route). */
@@ -281,12 +297,16 @@ export class FakeArtDaddy {
         resolve();
       }),
     );
+    seen.written = "";
     for (const step of reply.steps) {
       if (seen.end) return;
       if ("wait" in step) await Promise.race([sleep(step.wait), left]);
-      else if ("delta" in step)
-        res.write(frame("delta", { kind: step.kind ?? "text", text: step.delta }));
-      else if ("ping" in step) res.write(": ping\r\n\r\n");
+      else if ("delta" in step) {
+        const kind = step.kind ?? "text";
+        res.write(frame("delta", { kind, text: step.delta }));
+        if (kind === "text") seen.written += step.delta;
+        else if (kind === "reset") seen.written = "";
+      } else if ("ping" in step) res.write(": ping\r\n\r\n");
       else if ("result" in step) {
         seen.end = "complete";
         seen.endedAt = performance.now();
@@ -297,8 +317,9 @@ export class FakeArtDaddy {
         seen.endedAt = performance.now();
         req.socket.destroy();
         return;
-      } else if ("hang" in step) {
-        await left;
+      } else if ("hold" in step) await this.holdOpen(res, seen, left, true);
+      else if ("hang" in step) {
+        await this.holdOpen(res, seen, left, false);
         return;
       }
     }
@@ -306,6 +327,41 @@ export class FakeArtDaddy {
       seen.end = "complete";
       seen.endedAt = performance.now();
       res.end();
+    }
+  }
+
+  /** Keep a stream open, writing a keepalive comment every KEEPALIVE_MS, until `release()` lets it go
+   *  on (when `releasable`) or the app hangs up. */
+  private async holdOpen(
+    res: ServerResponse,
+    seen: Seen,
+    left: Promise<void>,
+    releasable: boolean,
+  ): Promise<void> {
+    const ping = () => {
+      if (!res.writableEnded && !res.destroyed) res.write(": ping\r\n\r\n");
+    };
+    ping();
+    const timer = setInterval(ping, KEEPALIVE_MS);
+    seen.holding = true;
+    let released: (() => void) | undefined;
+    try {
+      if (!releasable) await left;
+      else if (this.releasesAhead > 0) this.releasesAhead -= 1;
+      else
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            released = resolve;
+            this.holds.push(resolve);
+          }),
+          left,
+        ]);
+    } finally {
+      clearInterval(timer);
+      seen.holding = false;
+      // A stream the app left is no longer waiting: a later release belongs to the next hold.
+      const waiting = released ? this.holds.indexOf(released) : -1;
+      if (waiting >= 0) this.holds.splice(waiting, 1);
     }
   }
 }
