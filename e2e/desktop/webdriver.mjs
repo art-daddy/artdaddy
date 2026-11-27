@@ -5,8 +5,10 @@
 // W3C WebDriver server, and `fetch` is enough to speak it. The Actions API below is REAL pointer
 // input delivered to the app window only — unlike synthetic OS-level mouse events, it cannot
 // land in another application if the app loses focus.
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +17,27 @@ export const root = path.resolve(here, "..", "..");
 const BASE = "http://127.0.0.1:4444";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The app's MCP port (src-tauri/src/mcp.rs DEFAULT_PORT). */
+export const MCP_PORT = 19787;
+
+function portTaken(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+/** Whether something already listens on the MCP port. Only one app can hold it, so a lane that talks MCP checks this
+ *  BEFORE it launches its app: if another ArtDaddy (an installed one) holds the port, every call would reach that
+ *  app and its projects, never the one under test. */
+export function mcpPortTaken(port = MCP_PORT) {
+  return portTaken(port);
+}
 
 export function appBinary() {
   const explicit = process.env.ARTDADDY_APP_BINARY;
@@ -54,11 +77,12 @@ export function projectsRoot() {
   return path.join(base, folder, "projects");
 }
 
-async function call(method, url, body) {
+async function call(method, url, body, timeoutMs) {
   const res = await fetch(BASE + url, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
   });
   const text = await res.text();
   let json;
@@ -73,30 +97,251 @@ async function call(method, url, body) {
   return json.value;
 }
 
+/** Stops a process and everything it started (Windows does not stop a killed process's children). */
+function stopTree(proc) {
+  if (proc.exitCode !== null || !proc.pid) return;
+  if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
+  else proc.kill("SIGKILL");
+}
+
+/** Starts tauri-driver (4444), which runs the Edge WebDriver (4445) as its child, and waits until it answers.
+ *
+ *  Lanes run back to back (the nightly timing run) met two failures here: killing tauri-driver alone left that child
+ *  running and holding 4445, and a pair started while the previous one was still letting go of its ports found the
+ *  new Edge WebDriver unable to bind ("Only one usage of each socket address") and tauri-driver never answering. So
+ *  `driver.kill()` stops the whole tree on Windows, a start waits for both ports, and a pair that does not answer
+ *  within 30 s is stopped and started again (three tries). */
 export async function startDriver() {
   const native = process.env.MSEDGEDRIVER || "msedgedriver";
-  const proc = spawn("tauri-driver", ["--native-driver", native], { stdio: ["ignore", "pipe", "pipe"] });
-  proc.stderr.on("data", (d) => process.stderr.write(`[tauri-driver] ${d}`));
-  // Poll the status endpoint rather than sleeping a fixed time.
-  for (let i = 0; i < 60; i++) {
-    try {
-      await call("GET", "/status");
-      return proc;
-    } catch {
-      await sleep(250);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let i = 0; i < 80 && ((await portTaken(4444)) || (await portTaken(4445))); i++) await sleep(250);
+    const proc = spawn("tauri-driver", ["--native-driver", native], { stdio: ["ignore", "pipe", "pipe"] });
+    proc.stderr.on("data", (d) => process.stderr.write(`[tauri-driver] ${d}`));
+    if (process.platform === "win32") {
+      const killOne = proc.kill.bind(proc);
+      proc.kill = (signal) => {
+        stopTree(proc);
+        return killOne(signal);
+      };
     }
+    // Poll the status endpoint rather than sleeping a fixed time.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        await call("GET", "/status", undefined, 3_000);
+        return proc;
+      } catch {
+        await sleep(250);
+      }
+    }
+    proc.kill();
+    process.stderr.write(`[tauri-driver] did not answer on 4444 (try ${attempt} of 3)\n`);
+    await sleep(1_000);
   }
-  proc.kill();
   throw new Error("tauri-driver did not come up on 4444");
 }
 
+/** The WebView2 debugging port to ATTACH through instead of letting the Edge WebDriver start the app (see
+ *  launchForAttach); 0 when unset, the usual way. */
+export const ATTACH_PORT = Number(process.env.ARTDADDY_WEBVIEW2_DEBUG_PORT || 0);
+
+/** The switches the Edge WebDriver starts the app's WebView2 with (read from its browser process, msedgedriver 158),
+ *  so an app started for attach on a normal machine runs as one the driver starts: the budgets were timed on those. */
+const DRIVER_SWITCHES = [
+  "--allow-pre-commit-input",
+  "--disable-background-networking",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-client-side-phishing-detection",
+  "--disable-default-apps",
+  "--disable-hang-monitor",
+  "--disable-popup-blocking",
+  "--disable-prompt-on-repost",
+  "--disable-sync",
+  "--enable-automation",
+  "--enable-logging",
+  "--log-level=0",
+  "--no-first-run",
+  "--no-service-autorun",
+  "--password-store=basic",
+  "--test-type=webdriver",
+  "--use-mock-keychain",
+];
+const DRIVER_DISABLED_FEATURES = ["IgnoreDuplicateNavs", "Prewarm"];
+
+/** The WebView2 arguments for an app started for attach: the app's own (tauri.conf.json; whatever sets arguments
+ *  replaces them), the Edge WebDriver's, and the debugging port. */
+export function attachBrowserArgs(port = ATTACH_PORT) {
+  const own = ownBrowserArgs();
+  const ownDisabled = own.find((a) => a.startsWith("--disable-features="))?.slice("--disable-features=".length);
+  const disabled = [...(ownDisabled ? ownDisabled.split(",") : []), ...DRIVER_DISABLED_FEATURES];
+  return [
+    ...own.filter((a) => !a.startsWith("--disable-features=")),
+    `--disable-features=${disabled.join(",")}`,
+    ...DRIVER_SWITCHES,
+    `--remote-debugging-port=${port}`,
+    "--remote-allow-origins=*",
+  ].join(" ");
+}
+
+/** The arguments for an ELEVATED machine, which takes them only from HKLM policy (the desktop-e2e job in ci.yml sets
+ *  this): the app's own and the debugging port. On GitHub's runner WebView2 ignored the whole policy value once it was
+ *  longer than about 250 characters (246 applied, 271 did not), so the driver's switches do not fit in it. */
+export function policyBrowserArgs(port = ATTACH_PORT) {
+  return [...ownBrowserArgs(), `--remote-debugging-port=${port}`, "--remote-allow-origins=*"].join(" ");
+}
+
+function ownBrowserArgs() {
+  const conf = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
+  return ((conf.app?.windows ?? []).map((w) => w.additionalBrowserArgs).find(Boolean) ?? "").split(/\s+/).filter(Boolean);
+}
+
+/** Starts the app with its WebView2 debugging port open, for the Edge WebDriver to attach to (`debuggerAddress`).
+ *
+ *  The Edge WebDriver opens that port with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS when it starts the app, and an
+ *  ELEVATED WebView2 ignores that variable ("session not created: DevToolsActivePort file doesn't exist"). GitHub's
+ *  Windows runners are elevated, so there the port comes from HKLM policy instead (policyBrowserArgs; the desktop-e2e
+ *  job in .github/workflows/ci.yml sets it) and the variable serves a normal machine. Like the driver, each launch gets
+ *  a fresh WebView2 profile through WEBVIEW2_USER_DATA_FOLDER, which an elevated WebView2 does honour: the app's own
+ *  profile keeps what earlier sessions stored (on the lab PC an `artdaddy.api_base` override sent the app's first call
+ *  to a closed port). Returns the app's process once a page exists. */
+export async function launchForAttach(application, port = ATTACH_PORT) {
+  const profile = mkdtempSync(path.join(os.tmpdir(), "artdaddy-attach-"));
+  const app = spawn(application, [], {
+    env: {
+      ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: attachBrowserArgs(port),
+      WEBVIEW2_USER_DATA_FOLDER: profile,
+    },
+    stdio: "ignore",
+  });
+  const stop = async () => {
+    stopTree(app);
+    for (let i = 0; i < 40 && app.exitCode === null; i++) await sleep(250);
+    // WebView2 lets go of its profile a moment after the app ends.
+    for (let i = 0; i < 20; i++) {
+      try {
+        rmSync(profile, { recursive: true, force: true });
+        return;
+      } catch {
+        await sleep(500);
+      }
+    }
+  };
+  try {
+    // The browser answers before the app's window exists, and an attach then finds no page to drive.
+    let targets = [];
+    await waitFor(
+      async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3_000) });
+        targets = res.ok ? await res.json() : [];
+        return targets.some((t) => t.type === "page" || t.type === "webview");
+      },
+      { label: `a page on the app's WebView2 debugging port ${port}`, timeout: 120_000, interval: 250 },
+    ).catch((error) => {
+      const seen = targets.map((t) => `${t.type} ${t.url}`).join(", ") || "none";
+      throw new Error(`${error.message} (targets: ${seen})`);
+    });
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+  return { app, stop };
+}
+
+/** The capabilities that attach the Edge WebDriver to a WebView2 whose debugging port is `port`. tauri-driver passes a
+ *  request with no `tauri:options` through as it is. */
+export function attachCapabilities(port = ATTACH_PORT) {
+  return { browserName: "webview2", "ms:edgeOptions": { debuggerAddress: `127.0.0.1:${port}` } };
+}
+
+/** The webview's address, title and the start of its text, for a failure message. */
+export async function describePage(s) {
+  try {
+    const [href, title, text] = await s.exec(
+      'return [location.href, document.title, (document.body ? document.body.innerText : "").replace(/\\s+/g, " ").trim().slice(0, 300)];',
+    );
+    return `${href} ("${title}"): ${text || "(no text)"}`;
+  } catch (error) {
+    return `nothing readable (${error.message})`;
+  }
+}
+
+/** Polls `script` in the webview until it returns something truthy, as waitFor does. When it never does, the error says
+ *  what the webview shows and a screenshot of the app's window goes beside the run's times (the folder of
+ *  ARTDADDY_TIMING_FILE, which CI uploads): a lane that stops before its screen says where it stopped. */
+export async function waitInApp(s, script, options = {}) {
+  try {
+    return await waitFor(() => s.exec(script), options);
+  } catch (error) {
+    const shot = await saveScreenshot(s, options.label ?? "wait");
+    throw new Error(`${error.message}; the webview shows ${await describePage(s)}${shot ? `; screenshot ${shot}` : ""}`);
+  }
+}
+
+async function saveScreenshot(s, label) {
+  try {
+    const png = await s.screenshot();
+    const dir = process.env.ARTDADDY_TIMING_FILE ? path.dirname(path.resolve(process.env.ARTDADDY_TIMING_FILE)) : os.tmpdir();
+    const file = path.join(dir, `${label.replace(/[^\w-]+/g, "_").slice(0, 60)}-${Date.now()}.png`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, Buffer.from(png, "base64"));
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/** Waits until the webview holds a page from a real origin. A blank or error page has none ("null"): without this a
+ *  lane waits out its whole boot timeout and says only that the app did not boot, not what the webview shows. */
+async function waitForPage(s) {
+  try {
+    await waitFor(async () => (await s.exec("return location.origin;")) !== "null", {
+      label: "the app's page",
+      interval: 500,
+    });
+  } catch {
+    throw new Error(`the app's page did not load; the webview shows ${await describePage(s)}`);
+  }
+}
+
+/** A session on the app: started by the Edge WebDriver, or, with ARTDADDY_WEBVIEW2_DEBUG_PORT set, started here and
+ *  attached to (launchForAttach). Either way `quit()` closes the app, and the app's page has loaded. */
 export async function newSession(application) {
+  if (ATTACH_PORT) {
+    const launched = await launchForAttach(application);
+    let attached;
+    try {
+      const v = await call("POST", "/session", { capabilities: { alwaysMatch: attachCapabilities() } });
+      const id = v.sessionId ?? v.capabilities?.sessionId;
+      if (!id) throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
+      attached = session(id);
+      await waitForPage(attached);
+    } catch (error) {
+      await attached?.quit();
+      await launched.stop();
+      throw error;
+    }
+    const detach = attached.quit;
+    attached.quit = async () => {
+      await detach();
+      await launched.stop();
+    };
+    return attached;
+  }
   const v = await call("POST", "/session", {
     capabilities: { alwaysMatch: { "tauri:options": { application } } },
   });
   const id = v.sessionId ?? v.capabilities?.sessionId;
   if (!id) throw new Error(`no sessionId in ${JSON.stringify(v).slice(0, 200)}`);
-  return session(id);
+  const started = session(id);
+  try {
+    await waitForPage(started);
+  } catch (error) {
+    await started.quit();
+    throw error;
+  }
+  return started;
 }
 
 function session(id) {
@@ -106,6 +351,8 @@ function session(id) {
     quit: () => call("DELETE", s("")).catch(() => {}),
     /** Run JS in the webview. `body` is a function source string; args are JSON. */
     exec: (script, args = []) => call("POST", s("/execute/sync"), { script, args }),
+    /** The app's window as a base64 PNG (the webview only, never the desktop around it). */
+    screenshot: () => call("GET", s("/screenshot")),
     findAll: (css) => call("POST", s("/elements"), { using: "css selector", value: css }),
     async find(css) {
       const els = await self.findAll(css);

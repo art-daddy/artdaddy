@@ -1,46 +1,47 @@
-// Cost accounting + the $ budget guard. The server computes `usage.cost_usd` per
-// round (llm_metrics.estimate_cost_usd); we accumulate it and stop the run before
-// it blows the cap. The pricing table is a FALLBACK for when a round omits cost_usd
-// (mirrors the server's llm_metrics._PRICING for the two eval models).
+// Cost accounting + the $ budget guard. The server prices every round itself (`usage.cost_usd`,
+// from its own rate card) and that receipt is the only price this rig uses. It keeps no copy of
+// vendor prices: a copy drifts (the one that lived here knew none of the models the picker offers
+// today, so it priced every one of their rounds at zero), and vendor prices do not belong in this
+// public repository. A round that used tokens and carries no cost is UNKNOWN, not free: the budget
+// cannot bound what it cannot count, so the run stops on it.
 import type { Usage } from "../agent/types";
 
-/** USD per 1M tokens (fallback only; server-provided cost_usd wins). */
-export const PRICING: Record<string, { inPerM: number; outPerM: number }> = {
-  "gpt-5.4-pro": { inPerM: 15.0, outPerM: 60.0 },
-  "gpt-5.4": { inPerM: 5.0, outPerM: 20.0 },
-  "gpt-5.4-mini": { inPerM: 0.25, outPerM: 2.0 },
-  "gpt-5.4-nano": { inPerM: 0.05, outPerM: 0.4 },
-};
+/** A campaign's spend cap, in USD, when nothing sets one. */
+export const DEFAULT_CAP_USD = 2;
 
-function rates(model: string): { inPerM: number; outPerM: number } | null {
-  if (PRICING[model]) return PRICING[model];
-  const prefix = Object.keys(PRICING).find((k) => model.startsWith(k));
-  return prefix ? PRICING[prefix] : null;
-}
-
-/** Cost of one round: prefer the server's `cost_usd`, else estimate from tokens. */
-export function costFromUsage(model: string, usage: Usage | undefined): number {
+/** Cost of one round from the server's receipt. Null when the round used tokens but reported no
+ *  cost, which the caller must treat as a reason to stop, never as zero. */
+export function costFromUsage(usage: Usage | undefined): number | null {
   if (!usage) return 0;
-  if (typeof usage.cost_usd === "number" && usage.cost_usd > 0) return usage.cost_usd;
-  const r = rates(model);
-  if (!r) return 0;
-  const inTok = usage.input_tokens ?? 0;
-  const outTok = usage.output_tokens ?? 0;
-  return (inTok / 1_000_000) * r.inPerM + (outTok / 1_000_000) * r.outPerM;
+  const cost = usage.cost_usd;
+  if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) return cost;
+  const used = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+  return used > 0 ? null : 0;
 }
 
 /** A running spend tracker with a hard cap. The runner checks `exceeded()` before
  *  each scenario and stops (skips the rest) so a run can't overshoot the budget. */
 export class Budget {
   private spent = 0;
+  private stopReason: string | null = null;
   constructor(readonly capUsd: number) {}
 
   startRound(): void {
+    if (this.stopReason) throw new Error(`eval stopped before a model round: ${this.stopReason}`);
     if (this.exceeded()) throw new Error("eval budget exhausted before model round");
   }
 
   add(usd: number): void {
     if (Number.isFinite(usd) && usd > 0) this.spent += usd;
+  }
+
+  /** Stop the campaign for good: something was spent that the budget cannot count. */
+  stop(reason: string): void {
+    this.stopReason ??= reason;
+  }
+
+  get stopped(): string | null {
+    return this.stopReason;
   }
   get total(): number {
     return this.spent;
@@ -49,6 +50,6 @@ export class Budget {
     return Math.max(0, this.capUsd - this.spent);
   }
   exceeded(): boolean {
-    return this.spent >= this.capUsd;
+    return this.stopReason !== null || this.spent >= this.capUsd;
   }
 }

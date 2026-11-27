@@ -1,10 +1,11 @@
 import { defineConfig } from "vitest/config";
 
-// Standalone config for the MODEL EVAL lane (manual/nightly). Drives the live model
-// via /inference — needs the server running with metering OFF (see the eval.e2e.ts
-// header). Kept out of the unit + smoke suites. Run: `npm run eval`.
-//   ARTDADDY_EVAL_MODELS  (default gpt-5.4,gpt-5.4-mini)
-//   ARTDADDY_EVAL_CAP_USD (default 10)  ·  ARTDADDY_EVAL_EFFORT (default high)
+// Standalone config for the MODEL EVAL lane (manual). Drives the live model via /inference: every
+// round is a paid model call, so run it only when that spend has been approved for the run. Needs
+// the server running with metering OFF (see the eval.e2e.ts header). Kept out of the unit + smoke
+// suites. Run: `npm run eval`.
+//   ARTDADDY_EVAL_MODELS  (default: the picker's default model, src/store/chatControls.ts)
+//   ARTDADDY_EVAL_EFFORT  (default: the picker's default effort)  ·  ARTDADDY_EVAL_CAP_USD (default 2)
 //   ARTDADDY_SERVER       (default http://127.0.0.1:8000)  ·  ARTDADDY_EVAL_ONLY (csv of ids)
 export default defineConfig({
   test: {

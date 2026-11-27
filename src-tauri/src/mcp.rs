@@ -1168,4 +1168,100 @@ Active Connections
       stop_listening(&running, port, Some(closed));
     }
   }
+
+  // The reader of one HTTP request (`read_request`) is the first code a connection reaches, before the Origin check and before
+  // anything is parsed, so what it does with a request that is malformed, cut short or announced as huge decides whether one
+  // bad client can hold the server. Each case runs on a real loopback socket, as the probe tests above do.
+
+  /// What `read_request` makes of what a client sends, read on a thread so that a reader that never returns shows as a
+  /// timeout instead of hanging the test. The client writes `chunks` a few milliseconds apart, keeps its end open for
+  /// `keep_open` (a client that is still there and has gone quiet), then closes it.
+  fn read_what_is_sent(
+    chunks: Vec<Vec<u8>>,
+    keep_open: Duration,
+    wait: Duration,
+  ) -> Result<Option<Request>, std::sync::mpsc::RecvTimeoutError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+      let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+      for chunk in chunks {
+        let _ = stream.write_all(&chunk);
+        let _ = stream.flush();
+        std::thread::sleep(Duration::from_millis(5));
+      }
+      std::thread::sleep(keep_open);
+    });
+    let (mut accepted, _) = listener.accept().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      let _ = tx.send(read_request(&mut accepted));
+    });
+    rx.recv_timeout(wait)
+  }
+
+  #[test]
+  fn a_request_is_read_whole_however_it_arrives() {
+    // A long tool call (a few hundred kilobytes), with text whose bytes are cut between two writes in the middle of a
+    // character, a header block cut mid-line, header names in any case, and a query on the path.
+    let body = format!(
+      r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"add_text_clips","arguments":{{"text":"Grüße 🎬 {}"}}}}}}"#,
+      "x".repeat(300_000)
+    );
+    let head = format!(
+      "POST /mcp?probe=1 HTTP/1.1\r\nHost: 127.0.0.1:19787\r\nMcp-Session-Id: artdaddy-7\r\nCONTENT-LENGTH: {}\r\n\r\n",
+      body.len()
+    );
+    let (head, body_bytes) = (head.into_bytes(), body.as_bytes());
+    let cut = body.find('🎬').unwrap() + 2;
+    let chunks = vec![
+      head[..20].to_vec(),
+      head[20..].to_vec(),
+      body_bytes[..cut].to_vec(),
+      body_bytes[cut..].to_vec(),
+    ];
+    let read = read_what_is_sent(chunks, Duration::ZERO, Duration::from_secs(10))
+      .expect("the reader returned")
+      .expect("a request");
+    assert_eq!(read.method, "POST");
+    assert_eq!(read.path, "/mcp");
+    assert_eq!(read.headers.get("mcp-session-id").map(String::as_str), Some("artdaddy-7"));
+    assert_eq!(read.body.len(), body.len());
+    assert!(read.body == body, "the body arrived changed");
+  }
+
+  #[test]
+  fn a_malformed_or_cut_short_request_is_let_go_as_soon_as_the_client_goes() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+      ("nothing at all", vec![]),
+      ("a blank line", b"\r\n\r\n".to_vec()),
+      ("a method and no path", b"POST\r\n\r\n".to_vec()),
+      ("bytes that are not text", vec![0xff, 0xfe, 0x00, 0x80, b' ', b'/', b'\r', b'\n', b'\r', b'\n']),
+      ("headers that never end", b"POST /mcp HTTP/1.1\r\nHost: x\r\n".to_vec()),
+      ("a header with no colon", b"POST /mcp HTTP/1.1\r\nnonsense\r\n\r\n".to_vec()),
+      ("a body shorter than announced", b"POST /mcp HTTP/1.1\r\nContent-Length: 50\r\n\r\n{\"id\":1}".to_vec()),
+      ("a length that is not a number", b"POST /mcp HTTP/1.1\r\nContent-Length: lots\r\n\r\n{}".to_vec()),
+      ("a negative length", b"POST /mcp HTTP/1.1\r\nContent-Length: -5\r\n\r\n{}".to_vec()),
+    ];
+    for (what, bytes) in cases {
+      let out = read_what_is_sent(vec![bytes], Duration::ZERO, Duration::from_secs(5));
+      assert!(out.is_ok(), "{what}: the reader was still waiting after the client had gone");
+    }
+  }
+
+  /// KNOWN BUG, kept as an expected failure: `should_panic` passes only while the bug is there. The reader believes the length
+  /// a request announces: it sets that much memory aside and waits for all of it, before anything has looked at the request
+  /// (the Origin check included), and the connection has no time limit. So a connection that announces a body of hundreds of
+  /// megabytes and sends nothing holds that memory and a thread for as long as it stays open. When the reader refuses such a
+  /// length at once, this test fails: then remove `should_panic`.
+  #[test]
+  #[should_panic(expected = "KNOWN BUG")]
+  fn a_body_announced_as_hundreds_of_megabytes_is_refused_without_waiting_for_it() {
+    let head = b"POST /mcp HTTP/1.1\r\nContent-Length: 209715200\r\n\r\n{\"jsonrpc\":".to_vec();
+    let out = read_what_is_sent(vec![head], Duration::from_secs(6), Duration::from_secs(3));
+    assert!(
+      out.is_ok(),
+      "KNOWN BUG: a 200 MB body was announced and the reader is still waiting for it 3 s later"
+    );
+  }
 }

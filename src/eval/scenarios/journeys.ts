@@ -10,12 +10,18 @@
 // acceptable result satisfies — the deliverable exists, the sequence was legal,
 // nothing was done twice, the geometry is sane. Keep tolerances generous: this
 // grades a model, not a pure function.
-import { JOURNEY_LAST_WORD_FRAME, JOURNEY_NARRATION_REF, JOURNEY_WORDS } from "../journey";
-import type { Scenario, Trace } from "../types";
+import {
+  JOURNEY_IMPORT_SECONDS,
+  JOURNEY_LAST_WORD_FRAME,
+  JOURNEY_NARRATION_REF,
+  JOURNEY_WORDS,
+} from "../journey";
+import type { Scenario, ToolCall, Trace } from "../types";
 import { timeline, vclip, vtrack } from "./helpers";
 
 const FPS = 30;
 const NARRATION_END = 300; // the seeded clip runs 0..300; the last word starts at 205
+const IMPORTED_FRAMES = JOURNEY_IMPORT_SECONDS * FPS; // a whole imported file on the timeline
 
 function called(trace: Trace, name: string) {
   return trace.toolCalls.filter((c) => c.name === name);
@@ -27,10 +33,38 @@ function firstRound(trace: Trace, name: string): number {
 function textClips(final: ReturnType<Scenario["seed"]>) {
   return (final.tracks ?? []).flatMap((t) => (t.clips ?? []).filter((c) => c.kind === "text"));
 }
+/** A call's reply as an object, whether the trace kept it as JSON text or as an object. */
+function replyOf(call: ToolCall): Record<string, unknown> | null {
+  const r: unknown = call.result;
+  if (r && typeof r === "object") return r as Record<string, unknown>;
+  if (typeof r !== "string") return null;
+  try {
+    const v: unknown = JSON.parse(r);
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+/** The media_ref the import of `file` returned, or null when the trace does not say. */
+function importedRef(trace: Trace, file: string): string | null {
+  for (const c of called(trace, "import_media")) {
+    const source = ((c.args ?? {}).source ?? {}) as Record<string, unknown>;
+    if (
+      !String(source.path ?? source.url ?? "")
+        .toLowerCase()
+        .endsWith(file)
+    )
+      continue;
+    const ref = replyOf(c)?.media_ref;
+    if (c.ok && typeof ref === "string" && ref) return ref;
+  }
+  return null;
+}
 
 export const JOURNEYS: Scenario[] = [
   {
     id: "journey_import_edit_export",
+    scope: { add: ["video", "audio"], addTracks: true },
     title: "Import two clips, join them with a crossfade, export the result",
     tags: ["journey", "import", "transition", "export"],
     surface: "journey",
@@ -55,8 +89,21 @@ export const JOURNEYS: Scenario[] = [
       if (Math.abs(gap) > 2) throw new Error(`clips are not back to back (gap ${gap} frames)`);
       // The crossfade lives on the INCOMING clip.
       if (!ordered[1].transition_in) throw new Error("no transition on the second clip");
+      // Nothing asked for a trim: each file plays whole, at its own speed (the import said each
+      // runs 10 s). Half of each passed every check above.
+      for (const c of ordered.slice(0, 2)) {
+        const len = Number(c.timeline_out ?? 0) - Number(c.timeline_in ?? 0);
+        const played =
+          typeof c.source_in === "number" && typeof c.source_out === "number"
+            ? c.source_out - c.source_in
+            : len;
+        if (Math.abs(len - IMPORTED_FRAMES) > 2 || Math.abs(played - IMPORTED_FRAMES) > 2)
+          throw new Error(
+            `clip ${c.id} plays ${played} of its file's ${IMPORTED_FRAMES} frames over ${len} frames; nothing asked for a trim`,
+          );
+      }
     },
-    expectTrace: (trace) => {
+    expectTrace: (trace, final) => {
       const imports = called(trace, "import_media");
       if (imports.length < 2) throw new Error(`expected 2 imports, got ${imports.length}`);
       if (imports.length > 3)
@@ -73,11 +120,28 @@ export const JOURNEYS: Scenario[] = [
       if (lastEdit >= 0 && trace.toolCalls.indexOf(exports[0]) < lastEdit) {
         throw new Error("exported before finishing the edit");
       }
+      // "In that order": intro first. Which clip plays which file is only in the trace (the app
+      // names an imported file by a hash of its bytes), so this reads the refs the imports returned.
+      const intro = importedRef(trace, "intro.mp4");
+      const outro = importedRef(trace, "outro.mp4");
+      if (!final || !intro || !outro || intro === outro) return;
+      const startOf = (ref: string) => {
+        const hit = (final.tracks ?? [])
+          .flatMap((t) => t.clips ?? [])
+          .find((c) => c.media_ref === ref);
+        return hit ? Number(hit.timeline_in ?? 0) : null;
+      };
+      const [a, b] = [startOf(intro), startOf(outro)];
+      if (a !== null && b !== null && a >= b)
+        throw new Error(
+          `outro.mp4 plays first (frame ${b}, intro.mp4 at ${a}); asked for intro then outro`,
+        );
     },
   },
 
   {
     id: "journey_transcript_captions",
+    scope: { change: ["narration"], add: ["text"], addTracks: true },
     title: "Caption a narration clip from its transcript and trim the dead air",
     tags: ["journey", "transcript", "captions", "trim"],
     surface: "journey",
@@ -91,6 +155,12 @@ export const JOURNEYS: Scenario[] = [
       "Caption what's said in this clip so the words appear on screen as they're spoken, " +
       "then trim off the dead air after the last word.",
     expectTools: ["get_transcript", "add_text_clips"],
+    // What the get_transcript stand-in says is spoken, in the clip's source seconds (the seed
+    // places it at frame 0 untrimmed, so its project frames are source frames at 30 fps).
+    transcript: {
+      media_ref: JOURNEY_NARRATION_REF,
+      words: JOURNEY_WORDS.map(([, text, s, e]) => [text, s / FPS, e / FPS] as const),
+    },
     maxRounds: 14,
     expect: (final) => {
       const texts = textClips(final);

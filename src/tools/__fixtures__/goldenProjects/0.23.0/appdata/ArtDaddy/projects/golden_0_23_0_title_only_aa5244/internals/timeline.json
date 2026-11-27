@@ -1,0 +1,42 @@
+{
+  "units": "frames",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30
+  },
+  "tracks": [
+    {
+      "id": "v1",
+      "kind": "video",
+      "z": 0,
+      "clips": []
+    },
+    {
+      "id": "a1",
+      "kind": "audio",
+      "z": 0,
+      "clips": []
+    },
+    {
+      "id": "captions",
+      "kind": "text",
+      "z": 1,
+      "clips": [
+        {
+          "id": "txt_b71d04ca",
+          "kind": "text",
+          "timeline_in": 15,
+          "timeline_out": 60,
+          "content": [
+            {
+              "text": "Only words"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "canvas_auto": true
+}

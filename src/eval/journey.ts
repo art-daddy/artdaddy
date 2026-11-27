@@ -23,9 +23,13 @@ export interface JourneyExport {
 
 /** What the journey stubs recorded, for a scenario's `expectTrace` grader. */
 export interface JourneyState {
-  imported: { media_ref: string; kind: string }[];
+  imported: { media_ref: string; kind: string; duration_s: number }[];
   exports: JourneyExport[];
 }
+
+/** How long every file the import stand-in brings in runs, as its reply says (and as the
+ *  harness's ffprobe stand-in then answers for it, so a file placed whole runs this long). */
+export const JOURNEY_IMPORT_SECONDS = 10;
 
 /** A fixed word-level transcript for the narration clip the journey seeds.
  *  Rows are [index, text, start_frame, end_frame] at the canvas fps — the real contract. */
@@ -65,8 +69,8 @@ export function registerJourneyStubs(
     const media_ref = `media_${String(name)
       .replace(/[^a-z0-9]+/gi, "_")
       .toLowerCase()}`;
-    state.imported.push({ media_ref, kind });
-    return { ok: true, media_ref, kind, filename: name, duration_s: 10 };
+    state.imported.push({ media_ref, kind, duration_s: JOURNEY_IMPORT_SECONDS });
+    return { ok: true, media_ref, kind, filename: name, duration_s: JOURNEY_IMPORT_SECONDS };
   });
 
   registry.register("get_transcript", async () => ({

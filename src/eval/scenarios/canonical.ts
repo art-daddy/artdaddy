@@ -35,32 +35,26 @@ function textOf(c: { text?: unknown; content?: unknown }): string {
   return "";
 }
 
+/** read_whole_timeline's project: two clips the answer has to name. */
+const readSeed = () =>
+  timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60), vclip("b", "b.mp4", 60, 120)])]);
+
+/** A call that sets a clip's opacity to `v`: set_clip_properties' scalar, or an opacity keyframe. */
+function setsOpacity(args: Record<string, unknown> | undefined, v: number): boolean {
+  const near = (x: unknown) => typeof x === "number" && Math.abs(x - v) <= 0.06;
+  if (!args) return false;
+  if (near(args.opacity)) return true;
+  return (
+    args.property === "opacity" &&
+    Array.isArray(args.keyframes) &&
+    (args.keyframes as { v?: unknown }[]).some((k) => near(k?.v))
+  );
+}
+
 export const CANONICAL: Scenario[] = [
   {
-    id: "ripple_delete_middle",
-    title: "Remove the middle clip and close the gap",
-    tags: ["ripple"],
-    seed: () =>
-      timeline([
-        vtrack("v2", 1, [
-          vclip("intro", "intro.mp4", 0, 60),
-          vclip("middle", "middle.mp4", 60, 120),
-          vclip("outro", "outro.mp4", 120, 180),
-        ]),
-      ]),
-    prompt:
-      "There are three back-to-back clips on the video track. The middle one doesn't work — remove it and close the gap so the last clip comes right after the first.",
-    expect: (tl) => {
-      const cs = clipsOf(tl, "v2");
-      assert(cs.length === 2, `expected 2 clips, got ${cs.length}`);
-      assert(!cs.some((c) => c.id === "middle"), "middle clip should be gone");
-      assert(contiguousFrom(tl, "v2", 0, 2), "remaining clips should be gap-free from 0");
-    },
-    expectTools: ["ripple_delete", "remove_clips"],
-    maxRounds: 6,
-  },
-  {
     id: "trim_to_2s",
+    scope: { change: ["intro"] },
     title: "Shorten a clip to 2 seconds",
     tags: ["trim"],
     seed: () => timeline([vtrack("v2", 1, [vclip("intro", "intro.mp4", 0, 90)])]),
@@ -71,6 +65,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "split_at_1s",
+    scope: { change: ["a"], add: ["video"] },
     title: "Split a clip at the 1-second mark",
     tags: ["split"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
@@ -86,6 +81,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "reorder_swap",
+    scope: { change: ["a", "b"] },
     title: "Swap the order of two clips",
     tags: ["reorder"],
     seed: () =>
@@ -102,6 +98,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "fade_in_1s",
+    scope: { change: ["a"] },
     title: "Add a 1-second fade-in",
     tags: ["fade"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -133,6 +130,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "opacity_50",
+    scope: { change: ["logo"] },
     title: "Make a clip 50% transparent",
     tags: ["properties"],
     seed: () => timeline([vtrack("v1", 2, [vclip("logo", "logo.png", 0, 60)])]),
@@ -147,6 +145,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "volume_30",
+    scope: { change: ["bed"] },
     title: "Lower music volume to 30%",
     tags: ["audio", "properties"],
     seed: () => timeline([atrack("a3", 0, [aclip("bed", "music.mp3", 0, 180)])]),
@@ -157,6 +156,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "crossfade_half_sec",
+    scope: { change: ["a", "b"] },
     title: "Crossfade between two clips",
     tags: ["transition"],
     seed: () =>
@@ -172,6 +172,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "add_clip_after",
+    scope: { add: ["video"] },
     title: "Append a clip",
     tags: ["placement"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
@@ -189,6 +190,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "insert_between",
+    scope: { change: ["b"], add: ["video"] },
     title: "Insert a clip between two",
     tags: ["placement"],
     seed: () =>
@@ -208,6 +210,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "remove_last",
+    scope: { remove: ["c"] },
     title: "Delete the last clip (no ripple)",
     tags: ["remove"],
     seed: () =>
@@ -230,6 +233,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "canvas_landscape",
+    scope: { canvas: ["width", "height"] },
     title: "Resize the canvas",
     tags: ["canvas"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
@@ -244,6 +248,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "fps_24",
+    scope: { canvas: ["fps"], change: ["a"] },
     title: "Change the frame rate",
     tags: ["canvas", "fps"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
@@ -262,6 +267,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "canvas_square_no_size",
+    scope: { canvas: ["width", "height"] },
     title: "Reshape the canvas without being told a size",
     tags: ["canvas"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
@@ -279,19 +285,42 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "read_whole_timeline",
+    scope: {},
     title: "Read the timeline without knowing its length",
-    tags: ["read"],
-    seed: () =>
-      timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60), vclip("b", "b.mp4", 60, 120)])]),
+    tags: ["read", "read-only"],
+    seed: readSeed,
     // get_timeline's window params had the SAME root cause as the canvas: both were
     // forced, so the model sent [0, 0) and got "invalid window".
     prompt: "What clips are on the timeline right now?",
     expectTools: ["get_timeline"],
     maxRounds: 3,
     maxToolErrors: 0,
+    // A question must not become an edit...
+    expect: (tl) =>
+      assert(
+        JSON.stringify(tl.tracks) === JSON.stringify(readSeed().tracks),
+        "a question about the timeline changed it",
+      ),
+    // ...and the answer has to come from the timeline: read it (or be handed it with the
+    // message), then name both clips. Doing nothing and saying anything used to pass.
+    expectTrace: (t) => {
+      const read = t.toolCalls.some((c) => c.ok && c.name === "get_timeline") || t.stateBlock;
+      assert(read, "answered without reading the timeline");
+      for (const [id, file] of [
+        ["a", "a.mp4"],
+        ["b", "b.mp4"],
+      ])
+        assert(
+          new RegExp(`${file.replace(".", "\\.")}|[\`'"]${id}[\`'"]|\\bclip ${id}\\b`, "i").test(
+            t.finalText,
+          ),
+          `the answer does not name clip ${id} (${file})`,
+        );
+    },
   },
   {
     id: "color_warm",
+    scope: { change: ["a"] },
     title: "Warmer, more saturated grade (open-ended)",
     tags: ["color", "open-ended"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -308,16 +337,20 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "title_text",
+    scope: { add: ["text"], addTracks: true },
     title: "Add a title card",
-    tags: ["text"],
+    tags: ["text", "captions"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
     prompt: "Add a title at the start that says 'Hello' for the first two seconds.",
+    // Merged with the former caption_title (same ask: a text clip over the first ~60 frames),
+    // keeping both checks: the words AND where it starts. Each case alone missed one of them.
     expect: (tl) => {
       const text = clipsOf(tl, "v2").concat(
         (tl.tracks ?? []).flatMap((t) => (t.kind === "text" ? (t.clips ?? []) : [])),
       );
       const hit = text.find((c) => textOf(c).toLowerCase().includes("hello"));
       assert(hit, "expected a text clip containing 'Hello'");
+      near(Number(hit!.timeline_in), 0, 2, "title starts at the start");
       near(span(hit!), 60, 6, "title duration");
     },
     expectTools: ["add_text_clips"],
@@ -325,6 +358,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "move_to_start",
+    scope: { change: ["a"] },
     title: "Move a clip to the beginning",
     tags: ["move"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 60, 120)])]),
@@ -335,6 +369,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "mute_music",
+    scope: { change: ["bed"], tracks: ["a3"] },
     title: "Mute the music",
     tags: ["audio", "properties"],
     seed: () => timeline([atrack("a3", 0, [aclip("bed", "music.mp3", 0, 180)])]),
@@ -353,20 +388,11 @@ export const CANONICAL: Scenario[] = [
     expectTools: ["set_clip_properties", "set_track"],
     maxRounds: 5,
   },
-  {
-    id: "slow_half_speed",
-    title: "Slow a clip to half speed",
-    tags: ["retime"],
-    seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
-    prompt: "Slow this clip down to half speed.",
-    expect: (tl) => near(Number(clipById(tl, "a")?.speed ?? 1), 0.5, 0.06, "speed"),
-    expectTools: ["set_clip_properties"],
-    maxRounds: 5,
-  },
 
   // ── compound / multi-step (two edits in one prompt) ─────────────────────────
   {
     id: "compound_fade_crossfade",
+    scope: { change: ["a", "b"] },
     title: "Fade-in the first clip AND crossfade into the second",
     tags: ["compound", "fade", "transition"],
     seed: () =>
@@ -385,28 +411,10 @@ export const CANONICAL: Scenario[] = [
     maxRounds: 8,
   },
 
-  // ── captions (add) ───────────────────────────────────────────────────────────
-  {
-    id: "caption_title",
-    title: "Add a title for the first 2 seconds",
-    tags: ["captions", "text"],
-    seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 120)])]),
-    prompt: "Add a title that says Welcome over the first two seconds.",
-    expect: (tl) => {
-      const texts = (tl.tracks ?? [])
-        .flatMap((t) => t.clips ?? [])
-        .filter((c) => (c as Any).kind === "text") as Any[];
-      assert(texts.length >= 1, "expected a text clip to be added");
-      near(Number(texts[0].timeline_in), 0, 2, "title starts at 0");
-      near(span(texts[0]), 60, 8, "title runs ~2s");
-    },
-    expectTools: ["add_text_clips"],
-    maxRounds: 6,
-  },
-
   // ── captions (styled / animated: the C1–C5 look engine) ──────────────────────
   {
     id: "caption_styled_bold",
+    scope: { add: ["text"], addTracks: true },
     title: "Add a big bold coloured caption",
     tags: ["captions", "text", "style"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -437,6 +445,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "caption_word_by_word",
+    scope: { add: ["text"], addTracks: true },
     title: "Reveal captions one word at a time",
     tags: ["captions", "animation"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -461,6 +470,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "caption_emphasis_word",
+    scope: { add: ["text"], addTracks: true },
     title: "Emphasise one word in a caption",
     tags: ["captions", "emphasis"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -496,6 +506,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "caption_kinetic_chunks",
+    scope: { add: ["text"], addTracks: true },
     title: "Kinetic phrase-by-phrase captions",
     tags: ["captions", "animation"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -521,6 +532,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "caption_preset_punchy",
+    scope: { add: ["text"], addTracks: true },
     title: "Punchy preset captions",
     tags: ["captions", "style", "preset"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -552,6 +564,7 @@ export const CANONICAL: Scenario[] = [
   // ── keyframed motion (pan/zoom) ──────────────────────────────────────────────
   {
     id: "zoom_in_motion",
+    scope: { change: ["a"] },
     title: "Slow zoom-in over the clip",
     tags: ["keyframes", "motion"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -570,6 +583,7 @@ export const CANONICAL: Scenario[] = [
   // ── PiP / transform layout ───────────────────────────────────────────────────
   {
     id: "pip_corner",
+    scope: { change: ["pip"] },
     title: "Shrink to a corner picture-in-picture",
     tags: ["layout", "transform"],
     seed: () => timeline([vtrack("v1", 2, [vclip("pip", "pip.mp4", 0, 90)])]),
@@ -591,6 +605,7 @@ export const CANONICAL: Scenario[] = [
   // ── transitions beyond crossfade ─────────────────────────────────────────────
   {
     id: "fade_to_black",
+    scope: { change: ["a", "b"] },
     title: "Fade to black between two clips",
     tags: ["transition"],
     seed: () =>
@@ -619,6 +634,7 @@ export const CANONICAL: Scenario[] = [
   // ── audio (duck) ─────────────────────────────────────────────────────────────
   {
     id: "duck_music",
+    scope: { change: ["bed"] },
     title: "Duck the music under the voiceover",
     tags: ["audio", "duck"],
     seed: () =>
@@ -642,6 +658,7 @@ export const CANONICAL: Scenario[] = [
   // ── audio (split) ────────────────────────────────────────────────────────────
   {
     id: "split_music",
+    scope: { change: ["bed"], add: ["audio"] },
     title: "Split the music in half",
     tags: ["audio", "split"],
     seed: () => timeline([atrack("a3", 0, [aclip("bed", "music.mp3", 0, 180)])]),
@@ -655,15 +672,29 @@ export const CANONICAL: Scenario[] = [
     maxRounds: 6,
   },
 
-  // ── adversarial / ambiguous (open-ended: Tier 0 only) ────────────────────────
+  // ── adversarial / ambiguous ──────────────────────────────────────────────────
   {
     id: "make_it_pop",
+    scope: { change: ["a"] },
     title: "Make it pop (underspecified)",
     tags: ["adversarial", "open-ended"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
     prompt: "Make this clip pop more.",
-    // No Tier-1 assertion — the point is it stays SAFE/valid (Tier 0) and reaches for
-    // a plausible look tool rather than corrupting the timeline or thrashing.
+    // Underspecified on purpose, and an ordinary edit like this one is expected without asking
+    // first. Which look is taste, so any real treatment of the clip passes: a grade, an effect
+    // or a glow. Doing nothing used to pass too; it does not any more.
+    expect: (tl) => {
+      const c = clipById(tl, "a") as Any;
+      assert(c, "the clip is gone");
+      const graded = c.color && typeof c.color === "object" && Object.keys(c.color).length > 0;
+      const affected =
+        Array.isArray(c.effects) && c.effects.some((e: Any) => e && e.enabled !== false);
+      const glow = numOf(typeof c.glow === "object" ? c.glow?.amount : c.glow) > 0;
+      assert(
+        graded || affected || glow,
+        "the clip was given no look at all (grade, effect or glow)",
+      );
+    },
     expectTools: ["apply_color", "apply_effects", "set_clip_properties"],
     maxRounds: 6,
   },
@@ -671,6 +702,7 @@ export const CANONICAL: Scenario[] = [
   // ── multi-turn follow-ups (needs the harness followUps extension) ────────────
   {
     id: "retrim_followup",
+    scope: { change: ["intro"] },
     title: "Trim, then correct it on a follow-up turn",
     tags: ["multi-turn", "trim"],
     seed: () => timeline([vtrack("v2", 1, [vclip("intro", "intro.mp4", 0, 90)])]),
@@ -682,6 +714,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "caption_retime_followup",
+    scope: { add: ["text"], addTracks: true },
     title: "Add a title, then extend it on a follow-up turn",
     tags: ["multi-turn", "captions"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 150)])]),
@@ -701,6 +734,7 @@ export const CANONICAL: Scenario[] = [
   // ── effects ──────────────────────────────────────────────────────────────────
   {
     id: "effect_blur",
+    scope: { change: ["a"] },
     title: "Add a blur",
     tags: ["effects"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -715,6 +749,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "effect_grain",
+    scope: { change: ["a"] },
     title: "Add film grain",
     tags: ["effects"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -733,6 +768,7 @@ export const CANONICAL: Scenario[] = [
   // ── colour ───────────────────────────────────────────────────────────────────
   {
     id: "black_and_white",
+    scope: { change: ["a"] },
     title: "Desaturate to black & white",
     tags: ["color"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -746,6 +782,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "boost_contrast",
+    scope: { change: ["a"] },
     title: "Increase contrast",
     tags: ["color"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -761,6 +798,7 @@ export const CANONICAL: Scenario[] = [
   // ── crop / flip / rotate / glow / blend / transform ──────────────────────────
   {
     id: "crop_square",
+    scope: { change: ["a"] },
     title: "Crop to square",
     tags: ["crop"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -778,6 +816,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "flip_horizontal",
+    scope: { change: ["a"] },
     title: "Mirror horizontally",
     tags: ["transform"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -788,6 +827,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "rotate_90",
+    scope: { change: ["a"] },
     title: "Rotate 90 degrees",
     tags: ["transform"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -801,6 +841,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "add_glow",
+    scope: { change: ["a"] },
     title: "Add a glow",
     tags: ["look"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -826,6 +867,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "blend_screen",
+    scope: { change: ["ov"] },
     title: "Set screen blend mode",
     tags: ["compositing"],
     seed: () => timeline([vtrack("v1", 2, [vclip("ov", "overlay.mp4", 0, 90)])]),
@@ -837,6 +879,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "move_to_topleft",
+    scope: { change: ["a"] },
     title: "Move to the top-left corner",
     tags: ["layout", "transform"],
     seed: () => timeline([vtrack("v1", 2, [vclip("a", "a.mp4", 0, 90)])]),
@@ -855,6 +898,7 @@ export const CANONICAL: Scenario[] = [
   // ── keyframed audio fade ─────────────────────────────────────────────────────
   {
     id: "music_fade_out",
+    scope: { change: ["bed"] },
     title: "Fade the music out at the end",
     tags: ["audio", "keyframes"],
     seed: () => timeline([atrack("a3", 0, [aclip("bed", "music.mp3", 0, 180)])]),
@@ -872,6 +916,7 @@ export const CANONICAL: Scenario[] = [
   // ── trim variant ─────────────────────────────────────────────────────────────
   {
     id: "trim_start",
+    scope: { change: ["a"] },
     title: "Trim off the first second",
     tags: ["trim"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -888,6 +933,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "slip_content_later",
+    scope: { change: ["a"] },
     title: "Show later footage without moving or resizing the clip",
     tags: ["trim", "slip"],
     // Deliberately different timeline and source origins: a model that confuses the
@@ -918,6 +964,7 @@ export const CANONICAL: Scenario[] = [
 
   {
     id: "clear_music_track",
+    scope: { remove: ["bed", "bed2"], tracks: ["a3"] },
     title: "Remove everything on the music track",
     tags: ["remove"],
     seed: () =>
@@ -939,6 +986,7 @@ export const CANONICAL: Scenario[] = [
   // ── split-screen layout ──────────────────────────────────────────────────────
   {
     id: "split_screen",
+    scope: { change: ["l", "r"] },
     title: "Side-by-side split screen",
     tags: ["layout", "transform"],
     seed: () =>
@@ -969,6 +1017,7 @@ export const CANONICAL: Scenario[] = [
   // ── more multi-turn (correction + undo) ──────────────────────────────────────
   {
     id: "speed_adjust_followup",
+    scope: { change: ["a"] },
     title: "Speed up, then dial it back (follow-up)",
     tags: ["multi-turn", "retime"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 120)])]),
@@ -986,6 +1035,7 @@ export const CANONICAL: Scenario[] = [
   },
   {
     id: "undo_followup",
+    scope: { change: ["a"] },
     title: "Apply an edit, then undo it (follow-up)",
     tags: ["multi-turn", "undo"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
@@ -998,6 +1048,16 @@ export const CANONICAL: Scenario[] = [
         0.06,
         "opacity restored to 1 after undo",
       ),
+    // The final opacity is the seed's own, so the end state alone cannot tell "undid it" from
+    // "never did it". The trace can: the 50% edit landed, and something put it back after.
+    expectTrace: (t) => {
+      const edit = t.toolCalls.findIndex((c) => c.ok && setsOpacity(c.args, 0.5));
+      assert(edit >= 0, "the 50% transparency edit never landed");
+      const back = t.toolCalls
+        .slice(edit + 1)
+        .some((c) => c.ok && (c.name === "undo" || setsOpacity(c.args, 1)));
+      assert(back, "nothing after the edit undid it (no undo, no opacity back to 1)");
+    },
     expectTools: ["set_clip_properties", "undo"],
     maxRounds: 8,
   },

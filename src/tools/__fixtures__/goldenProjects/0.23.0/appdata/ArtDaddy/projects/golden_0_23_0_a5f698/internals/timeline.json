@@ -1,0 +1,190 @@
+{
+  "units": "frames",
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  "tracks": [
+    {
+      "id": "v1",
+      "kind": "video",
+      "z": 0,
+      "clips": [
+        {
+          "id": "clip_4bbad6dc",
+          "media_ref": "media_0be386747c94",
+          "timeline_in": 0,
+          "timeline_out": 60,
+          "kind": "video",
+          "source_in": 60,
+          "source_out": 120,
+          "link_group": "lg_53b78ab9",
+          "color": {
+            "brightness": 0.1,
+            "saturation": 1.2
+          }
+        },
+        {
+          "id": "clip_ca1e8ce9",
+          "media_ref": "media_0be386747c94",
+          "timeline_in": 60,
+          "timeline_out": 150,
+          "kind": "video",
+          "source_in": 120,
+          "source_out": 210,
+          "link_group": "lg_1c7f7de9",
+          "color": {
+            "brightness": 0.1,
+            "saturation": 1.2
+          }
+        },
+        {
+          "id": "clip_d2f67b51",
+          "media_ref": "media_c532ffa5ce6b",
+          "timeline_in": 150,
+          "timeline_out": 240,
+          "kind": "video",
+          "source_in": 0,
+          "source_out": 90,
+          "transform": {
+            "position": {
+              "x": 0.1,
+              "y": -0.1
+            },
+            "scale": 1.2
+          },
+          "opacity": 0.8,
+          "transition_in": {
+            "kind": "crossfade",
+            "duration": 12
+          },
+          "effects": [
+            {
+              "type": "vignette",
+              "params": {
+                "vignette": 0.4
+              }
+            }
+          ]
+        },
+        {
+          "id": "clip_66aad9ec",
+          "media_ref": "media_62c4d7f0b226",
+          "timeline_in": 240,
+          "timeline_out": 300,
+          "kind": "video",
+          "source_in": 30,
+          "source_out": 90
+        }
+      ]
+    },
+    {
+      "id": "a1",
+      "kind": "audio",
+      "z": 0,
+      "clips": [
+        {
+          "id": "aud_4a872397",
+          "kind": "audio",
+          "media_ref": "media_0be386747c94",
+          "source_in": 60,
+          "source_out": 120,
+          "timeline_in": 0,
+          "timeline_out": 60,
+          "link_group": "lg_53b78ab9"
+        },
+        {
+          "id": "clip_f991145f",
+          "kind": "audio",
+          "media_ref": "media_0be386747c94",
+          "source_in": 120,
+          "source_out": 210,
+          "timeline_in": 60,
+          "timeline_out": 150,
+          "link_group": "lg_1c7f7de9"
+        }
+      ]
+    },
+    {
+      "id": "track_5b91ede1",
+      "kind": "video",
+      "z": 1,
+      "clips": [
+        {
+          "id": "clip_4cac7786",
+          "media_ref": "media_095d2dac678a",
+          "timeline_in": 30,
+          "timeline_out": 150,
+          "kind": "image",
+          "opacity": [
+            {
+              "t": 0,
+              "v": 0
+            },
+            {
+              "t": 20,
+              "v": 1,
+              "ease": "ease-out"
+            }
+          ],
+          "transform": {
+            "scale": [
+              {
+                "t": 0,
+                "v": 1
+              },
+              {
+                "t": 60,
+                "v": 1.1,
+                "ease": "hold"
+              }
+            ]
+          },
+          "fit": "stretch"
+        }
+      ]
+    },
+    {
+      "id": "track_6122d134",
+      "kind": "audio",
+      "z": 2,
+      "clips": [
+        {
+          "id": "clip_d9644cc7",
+          "media_ref": "media_75d2bf49e3b7",
+          "timeline_in": 0,
+          "timeline_out": 240,
+          "kind": "audio",
+          "source_in": 0,
+          "source_out": 240,
+          "volume": 0.5,
+          "fade": {
+            "in": 15,
+            "out": 30
+          }
+        }
+      ],
+      "mute": true
+    },
+    {
+      "id": "captions",
+      "kind": "text",
+      "z": 3,
+      "clips": [
+        {
+          "id": "txt_779eecda",
+          "kind": "text",
+          "timeline_in": 0,
+          "timeline_out": 75,
+          "content": [
+            {
+              "text": "Golden 0.23.0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "failures": []
+}

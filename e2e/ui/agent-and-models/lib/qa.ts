@@ -39,6 +39,44 @@ export interface SavedTimeline {
 const APP_VERSION = (JSON.parse(readFileSync("package.json", "utf8")) as { version: string })
   .version;
 
+/** The known bug each test marked with `knownBug` fails with, by test. */
+const knownBugs = new WeakMap<TestInfo, { issue: string; shows: RegExp }>();
+/** The colour codes Playwright puts in an assertion's message. */
+const COLOUR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/** Mark this test as failing until a known bug is fixed (Playwright's `test.fail`), and say how the bug
+ *  shows: `shows` must match every error the test fails with. A failure that does not match (a timeout,
+ *  a broken fixture, a wait that raced) then reports as the failure it is, instead of passing as "the bug
+ *  is still there"; and the day the bug is fixed the test passes, which Playwright reports as a failure
+ *  until the mark is removed with the fix. */
+export function knownBug(issue: string, shows: RegExp): void {
+  const info = test.info();
+  knownBugs.set(info, { issue, shows });
+  info.annotations.push({ type: "known bug", description: `${issue}; fails with ${shows}` });
+  test.fail(true, issue);
+}
+
+/** A known-bug test that ended any other way than its bug shows is a real failure: say so. `extra` are
+ *  errors the fixture is about to raise itself. */
+function checkKnownBug(info: TestInfo, extra: Error[]): void {
+  const bug = knownBugs.get(info);
+  if (!bug || info.expectedStatus !== "failed") return;
+  const plain = (s: string): string => s.replace(COLOUR, "");
+  const messages = [
+    ...info.errors.map((e) => plain(e.message ?? e.value ?? "")),
+    ...extra.map((e) => e.message),
+  ];
+  const other = messages.filter((m) => !bug.shows.test(m));
+  const asTheBugShows = info.status === "failed" && messages.length > 0 && other.length === 0;
+  // Passed with nothing else wrong: the bug is fixed, and Playwright reports that itself.
+  if (asTheBugShows || (info.status === "passed" && extra.length === 0)) return;
+  info.expectedStatus = "passed";
+  throw new Error(
+    `marked as failing because of ${bug.issue} (an error matching ${bug.shows}), but it ended ` +
+      `another way (${info.status}): ${(other[0] ?? "no error matched").slice(0, 400)}`,
+  );
+}
+
 export class AgentRig {
   constructor(
     readonly page: Page,
@@ -228,6 +266,19 @@ export class AgentRig {
   async savedTranscriptText(id = this.projectId()): Promise<string> {
     return JSON.stringify((await this.savedTranscript(id)) ?? {});
   }
+
+  /** The person's messages in the saved transcript, in order, or null while there is none. */
+  async savedMessages(id = this.projectId()): Promise<Array<string | undefined> | null> {
+    return (await this.savedTranscript(id))?.requests?.map((r) => r.message?.text) ?? null;
+  }
+
+  /** How many answers to calls of `tool` the saved transcript holds. */
+  async savedAnswers(tool: string, id = this.projectId()): Promise<number> {
+    const parts = ((await this.savedTranscript(id))?.requests ?? []).flatMap(
+      (r) => r.response ?? [],
+    );
+    return parts.filter((p) => p.kind === "tool_result" && p.name === tool).length;
+  }
 }
 
 export const test = base.extend<{ qa: AgentRig }>({
@@ -249,7 +300,12 @@ export const test = base.extend<{ qa: AgentRig }>({
       });
       await info.attach("qa-shell.json", {
         body: JSON.stringify(
-          { unknown: [...shell.unknown], blocked: [...shell.blocked], calls: shell.calls },
+          {
+            unknown: [...shell.unknown],
+            blocked: [...shell.blocked],
+            sidecarRuns: shell.sidecarRuns,
+            calls: shell.calls,
+          },
           null,
           2,
         ),
@@ -269,11 +325,16 @@ export const test = base.extend<{ qa: AgentRig }>({
         );
       }
     }
-    if (server.unscripted.length)
-      throw new Error(
-        `the app sent ${server.unscripted.length} model round(s) no reply was scripted for: ` +
-          "an extra round (a duplicate, an unasked retry) or a test that forgot to script one",
-      );
+    const unscripted = server.unscripted.length
+      ? [
+          new Error(
+            `the app sent ${server.unscripted.length} model round(s) no reply was scripted for: ` +
+              "an extra round (a duplicate, an unasked retry) or a test that forgot to script one",
+          ),
+        ]
+      : [];
+    checkKnownBug(info, unscripted);
+    if (unscripted.length) throw unscripted[0];
   },
 });
 

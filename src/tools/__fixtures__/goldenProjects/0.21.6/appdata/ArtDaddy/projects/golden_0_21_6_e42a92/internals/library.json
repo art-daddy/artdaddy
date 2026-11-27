@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "clips": [
+    {
+      "id": "media_0be386747c94",
+      "filename": "interview.mp4",
+      "path": "library/media_0be386747c94.mp4",
+      "kind": "video",
+      "size_bytes": 67,
+      "added_by": "import_media",
+      "added_at": 1792415325
+    },
+    {
+      "id": "media_c532ffa5ce6b",
+      "filename": "broll.mov",
+      "path": "library/media_c532ffa5ce6b.mov",
+      "kind": "video",
+      "size_bytes": 63,
+      "added_by": "import_media",
+      "added_at": 1792415326
+    },
+    {
+      "id": "media_75d2bf49e3b7",
+      "filename": "music.mp3",
+      "path": "library/media_75d2bf49e3b7.mp3",
+      "kind": "audio",
+      "size_bytes": 63,
+      "added_by": "import_media",
+      "added_at": 1792415327
+    },
+    {
+      "id": "media_095d2dac678a",
+      "filename": "logo.png",
+      "path": "library/media_095d2dac678a.png",
+      "kind": "image",
+      "size_bytes": 62,
+      "added_by": "import_media",
+      "added_at": 1792415328
+    },
+    {
+      "id": "media_62c4d7f0b226",
+      "filename": "drone.mp4",
+      "path": "D:/Footage/drone.mp4",
+      "kind": "video",
+      "external": true,
+      "size_bytes": 63,
+      "added_by": "import_reference",
+      "added_at": 1792415329
+    }
+  ],
+  "folders": []
+}
