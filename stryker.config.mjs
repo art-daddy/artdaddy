@@ -40,6 +40,11 @@ export default {
     // The MCP door: what an outside agent can run, what it is told costs money, and what comes back to it. Its tests drive
     // the real door (src/mcp/bridge*.test.ts) with fakes only below it, so a survivor here is a gap in them.
     "src/mcp/**/*.ts",
+    // Whether an installed app is offered, downloads and installs an update, and the gate that stops a build the
+    // service no longer supports. Both are unit-covered, so a survivor here is a real gap. (The update feed itself
+    // is read in Rust: src-tauri/tests/update_feed.rs.)
+    "src/update/updater.ts",
+    "src/update/compatibility.ts",
     // NOT src/eval/studio.ts: the stub surface is exercised by the LIVE eval lane,
     // not by vitest, so its mutants are ~all "no coverage" and only dilute the score.
     "!src/**/*.test.ts",

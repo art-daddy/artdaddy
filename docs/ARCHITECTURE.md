@@ -675,22 +675,27 @@ for 17 minutes and the offer had to be rolled back.
    a published asset with different bytes (`--replace-published`, on purpose only), because the
    live manifest carries the signature of the bytes users are offered. To rehearse the wiring
    without touching a real release, make a throwaway draft and pass `release_tag=<its tag>`.
-   Check each `.sig` against the committed key too: `node scripts/verify-release-signature.mjs
-   <asset> <asset>.sig`.
+   Each build also checks its `.sig` against the committed key (`scripts/verify-release-signature.mjs`,
+   the step "The updater signature must verify against the shipped key"); by hand: `node
+   scripts/verify-release-signature.mjs <asset> <asset>.sig`.
 5. **Publish.** `gh release edit vX.Y.Z --draft=false --latest --target <sha>`, then
    `node scripts/publishReleaseAssets.mjs --tag vX.Y.Z --verify-only --latest`: every asset
    answers publicly with the size the release lists, and this release is the latest.
-6. **Judge the installers before the switch.** Dispatch `updater canary` with `from_version` = the
-   previous release and `to_version` = this one. On Windows the old app is replaced by THIS release's
-   installer the way the updater replaces it (nothing is read from the manifest, so nobody is offered
-   anything); a failure writes `state-*.txt/png` (who ran, where Windows says the app is installed,
-   what Defender and the Application log said). Do not switch the manifest until it is green.
+6. **Update to it on every system before the switch.** Dispatch `updater canary` with `to_version` =
+   this release (published, not yet the one the live feed offers; `from_version` defaults to the
+   latest shipped release before it). Each job serves this release's STAGED feed at the live feed's
+   own address on its own runner only (`scripts/qa/stagedFeed.mjs`: a hosts entry and a certificate
+   authority made and trusted for that run), so on Windows, Linux and macOS the previous release
+   updates itself to this one through its own updater, and the job proves the updater asked that
+   staged feed. Nobody is offered anything. A Windows failure writes `state-*.txt/png` (who ran,
+   where Windows says the app is installed, what Defender and the Application log said). Do not
+   switch the manifest until all of it is green.
 7. **Switch (landing repo).** Edit `landing/updates/latest.json` (version, notes, `pub_date`), run
    `node scripts/add-platform-update.mjs <platform> <version> <sig>` for each platform, commit
    that, then the download labels in the HTML, `npm run check:downloads`, push `main` (Cloudflare
    Pages deploys it). Verify the LIVE manifest by parsing it (invariant 3).
-8. **Canary, through the live manifest.** Dispatch `updater canary` with `from_version` = the previous
-   release (no `to_version`). Windows and
+8. **Canary, through the live manifest.** Dispatch `updater canary` with no `to_version`
+   (`from_version` defaults to the release before the live one). Windows and
    Linux call the app's own updater commands. macOS cannot be driven that way (WKWebView has no
    remote debugging port and a signed-out app never shows the banner), so its job installs the
    previous release's `.app`, runs the shipped updater plugin against it (`src-tauri/tests/

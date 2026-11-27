@@ -1,7 +1,9 @@
 // In-place update canary for Linux. Installs a PUBLIC release's AppImage on a disposable CI runner and
-// lets the app update itself through the LIVE updater manifest, the way a user's app does: the app checks,
-// downloads and verifies the signed AppImage, replaces the file it was started from, and relaunches it.
-// It reads the public release and the public manifest only; nothing is published or changed.
+// lets the app update itself through the update feed, the way a user's app does: the live feed, or, with
+// TO_VERSION, the candidate's staged feed this job serves at the live feed's address (scripts/qa/stagedFeed.mjs),
+// so a candidate is installed here before the live feed offers it to anyone. The app checks, downloads and
+// verifies the signed AppImage, replaces the file it was started from, and relaunches it.
+// It reads public releases and the feed only; nothing is published or changed.
 //
 // The updater commands (check_for_update, download_update, install_update) are called through the
 // webview's own invoke, over the Tauri WebDriver bridge the Linux QA lane already uses (scripts/qa/
@@ -31,21 +33,33 @@ import {
 import path from "node:path";
 
 import { appProcessName, newSession, sleep, waitFor } from "../../e2e/desktop/webdriver.mjs";
+import {
+  STAGED_FEED,
+  feedTheAppReads,
+  releaseToUpdateFrom,
+  stagedFeedRequests,
+  updaterReadTheStagedFeed,
+} from "./canaryFeed.mjs";
 
 if (process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true") {
   throw new Error("The update canary runs only on a disposable GitHub-hosted Linux runner");
 }
 
 const REPOSITORY = process.env.GITHUB_REPOSITORY;
-const FROM = process.env.FROM_VERSION;
+// Chosen once the feed is read, unless given: the latest shipped release older than the one updated to.
+let FROM = process.env.FROM_VERSION ?? "";
+// A candidate, updated to through the staged feed this job serves for it (scripts/qa/stagedFeed.mjs) before the
+// live feed offers it; without one, the live feed.
+const TO = process.env.TO_VERSION ?? "";
 const TEMP = process.env.RUNNER_TEMP;
 const ASSET = "ArtDaddy-linux-x86_64.AppImage";
-const MANIFEST_URL = "https://artdaddy.app/updates/latest.json";
 const MAIN_BINARY = appProcessName();
 const OUT = path.resolve("reports/qa/updater-canary");
-if (!REPOSITORY || !/^\d+\.\d+\.\d+$/.test(FROM ?? "") || !TEMP) {
-  throw new Error("GITHUB_REPOSITORY, RUNNER_TEMP and FROM_VERSION (x.y.z) are required");
+if (!REPOSITORY || !TEMP) {
+  throw new Error("GITHUB_REPOSITORY and RUNNER_TEMP are required");
 }
+if (TO && !/^\d+\.\d+\.\d+$/.test(TO)) throw new Error("TO_VERSION must be x.y.z when given");
+if (TO && !STAGED_FEED) throw new Error("TO_VERSION needs the staged feed: run node scripts/qa/stagedFeed.mjs serve first");
 mkdirSync(OUT, { recursive: true });
 
 // A request that never answers must fail the step, not hold the runner until its job timeout.
@@ -340,13 +354,18 @@ async function verifyWithWebDriver(appRun, appImage, expectedVersion) {
 
 let failure = null;
 try {
-  // 1. What the live manifest offers, and the bytes the finished update must be.
-  const manifest = await (await fetch(MANIFEST_URL, { headers: { "cache-control": "no-cache" } })).json();
+  // 1. What the feed the app reads offers (a candidate's staged feed, or the live one), and the bytes the finished
+  // update must be.
+  const manifest = await feedTheAppReads();
   const offered = manifest.platforms?.["linux-x86_64"];
-  note("live manifest", { version: manifest.version, linuxUrl: offered?.url });
-  if (!offered?.url || !offered?.signature) throw new Error("the live manifest has no Linux entry");
+  FROM = releaseToUpdateFrom(REPOSITORY, TO || manifest.version);
+  evidence.from = FROM;
+  evidence.feed = TO ? "staged" : "live";
+  note(TO ? "staged feed" : "live manifest", { version: manifest.version, linuxUrl: offered?.url, from: FROM });
+  if (TO && manifest.version !== TO) throw new Error(`the staged feed offers ${manifest.version}, not ${TO}`);
+  if (!offered?.url || !offered?.signature) throw new Error("the feed has no Linux entry");
   if (!newer(manifest.version, FROM)) {
-    throw new Error(`the live manifest (${manifest.version}) is not newer than ${FROM}; nothing to update to`);
+    throw new Error(`the feed (${manifest.version}) is not newer than ${FROM}; nothing to update to`);
   }
   const digest = run("gh", [
     "api",
@@ -405,6 +424,12 @@ try {
     throw new Error(`the app was offered ${available?.version ?? "nothing"}, the manifest says ${manifest.version}`);
   }
   if (available.current_version !== FROM) throw new Error(`the app reports it is ${available.current_version}`);
+  if (TO) {
+    // Proof that the app read THIS runner's staged feed: its updater asked the server, and got these notes.
+    note("staged feed requests", { requests: stagedFeedRequests() });
+    if (!updaterReadTheStagedFeed()) throw new Error("the app's updater never asked this runner's staged feed");
+    if (available.notes !== manifest.notes) throw new Error("the app was offered notes that are not the staged feed's");
+  }
   const staged = await invoke(session, "download_update", { timeout: 300_000 });
   note("download_update", { staged });
 

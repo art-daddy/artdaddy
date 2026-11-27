@@ -282,6 +282,17 @@ jobs:
           # value so a mismatch against the shipped pubkey is diagnosable from the log alone.
           echo "  signature: $(cat "$SIG")"
 
+      # A .sig that exists proves only that the signer ran. Every installed app accepts an update only if its
+      # signature verifies against the public key compiled into it (tauri.conf.json): one made with any other key
+      # leaves every user where they are, silently. So check that, on the very tarball that is uploaded.
+      - name: The updater signature must verify against the shipped key
+        if: inputs.enable_auto_update
+        run: |
+          node scripts/verify-release-signature.mjs "${{ steps.updater.outputs.tarball }}" "${{ steps.updater.outputs.sig }}" || {
+            echo "::error::the tarball's updater signature does not verify against the public key in tauri.conf.json"
+            exit 1
+          }
+
       # The dmg that shipped 0.3.0 pointed every user at their own machine. Nothing caught it,
       # because "the workflow sets the variable" is not evidence the bundle received it. dist/ is
       # what tauri just embedded, so assert against that rather than against the env.

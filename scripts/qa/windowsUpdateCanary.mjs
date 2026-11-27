@@ -1,7 +1,7 @@
 // In-place update canary for Windows. Installs a PUBLIC release on a disposable CI runner and updates
-// it through the live updater manifest the way a user's app does: the app itself checks, downloads
-// and verifies the signed installer, runs it over itself and is relaunched. It reads the public
-// release and the public manifest only; nothing is published or changed.
+// it through the update feed the way a user's app does (the live feed, or a candidate's staged feed, below):
+// the app itself checks, downloads and verifies the signed installer, runs it over itself and is relaunched.
+// It reads public releases and the feed only; nothing is published or changed.
 //
 // The updater commands (check_for_update, download_update, install_update) are called through the
 // webview's own invoke, over a WebView2 remote-debugging port, because a signed-out app shows the
@@ -13,8 +13,12 @@
 // overrides, so the port is requested through HKLM policy. If it still does not open, the installer step
 // alone is rehearsed (started the way the updater starts it) and the result says the app did not drive it.
 //
-// TO_VERSION (optional) judges that release's installer directly instead of the live manifest's: the old app
-// is replaced the way the updater replaces it, so a release can be tested without offering it to anyone.
+// TO_VERSION (optional) names a candidate release. With the staged feed this job serves for it
+// (scripts/qa/stagedFeed.mjs: the candidate's feed at the live feed's address, on this runner only), the
+// old app's own updater reads that feed, downloads and verifies the candidate and installs it, before the
+// live feed offers it to anyone. Without a staged feed, the candidate's installer is judged directly: the
+// old app is replaced the way the updater replaces it. FROM_VERSION, when empty, is the latest shipped
+// release older than the one updated to.
 // Whenever the new version does not land, state-*.txt/png record who ran, where Windows says the app is
 // installed, what the installer left behind, what Defender and the Application log said, and the screen.
 import { spawn, spawnSync } from "node:child_process";
@@ -23,23 +27,30 @@ import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "nod
 import { createRequire } from "node:module";
 import path from "node:path";
 import { normalizeProductVersion, updateSeenAsARestart } from "../updateCanaryChecks.mjs";
+import {
+  STAGED_FEED,
+  feedTheAppReads,
+  releaseToUpdateFrom,
+  stagedFeedRequests,
+  updaterReadTheStagedFeed,
+} from "./canaryFeed.mjs";
 
 if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") {
   throw new Error("The update canary runs only on a disposable GitHub-hosted Windows runner");
 }
 
 const REPOSITORY = process.env.GITHUB_REPOSITORY;
-const FROM = process.env.FROM_VERSION;
-// Optional: judge THIS release's installer directly (installer-only mode) instead of whatever the live
-// manifest offers, so a release can be tested before, or without, offering it to anyone.
+// Chosen once the feed is read, unless given.
+let FROM = process.env.FROM_VERSION ?? "";
+// Optional: the candidate. Through the staged feed when this job serves one, else its installer directly.
 const TO = process.env.TO_VERSION ?? "";
-const MANIFEST_URL = "https://artdaddy.app/updates/latest.json";
+const STAGED = Boolean(TO && STAGED_FEED);
 const PORT = 18877;
 const CDP = `http://127.0.0.1:${PORT}`;
 const TEMP = process.env.RUNNER_TEMP;
 const OUT = path.resolve("reports/qa/updater-canary");
-if (!REPOSITORY || !/^\d+\.\d+\.\d+$/.test(FROM ?? "") || !TEMP) {
-  throw new Error("GITHUB_REPOSITORY, RUNNER_TEMP and FROM_VERSION (x.y.z) are required");
+if (!REPOSITORY || !TEMP) {
+  throw new Error("GITHUB_REPOSITORY and RUNNER_TEMP are required");
 }
 if (TO && !/^\d+\.\d+\.\d+$/.test(TO)) throw new Error("TO_VERSION must be x.y.z when given");
 mkdirSync(OUT, { recursive: true });
@@ -248,12 +259,21 @@ function snapshot(label, exe) {
 
 let failure = null;
 try {
-  // 1. The live manifest says what the app should be offered.
-  const manifest = await (await fetch(MANIFEST_URL, { headers: { "cache-control": "no-cache" } })).json();
+  // 1. The feed the app will read: the candidate's staged feed on this runner, or the live one.
+  const manifest = await feedTheAppReads();
   const offered = manifest.platforms?.["windows-x86_64"];
-  note("live manifest", { version: manifest.version, windowsUrl: offered?.url, judging: TO ? `${TO} directly, not through the manifest` : undefined });
   const target = TO || manifest.version;
-  if (!TO && (!offered?.url || !offered?.signature)) throw new Error("the live manifest has no Windows entry");
+  FROM = releaseToUpdateFrom(REPOSITORY, target);
+  evidence.from = FROM;
+  evidence.feed = STAGED ? "staged" : "live";
+  note(STAGED ? "staged feed" : "live manifest", {
+    version: manifest.version,
+    windowsUrl: offered?.url,
+    from: FROM,
+    judging: TO && !STAGED ? `${TO}'s installer directly, not through a feed` : undefined,
+  });
+  if (STAGED && manifest.version !== TO) throw new Error(`the staged feed offers ${manifest.version}, not ${TO}`);
+  if ((!TO || STAGED) && (!offered?.url || !offered?.signature)) throw new Error("the feed has no Windows entry");
   if (!newer(target, FROM)) {
     throw new Error(`${TO ? "the release" : "the live manifest"} (${target}) is not newer than ${FROM}; nothing to update to`);
   }
@@ -303,7 +323,11 @@ try {
   screenshot("before-update.png");
   const installStarted = Date.now();
 
-  if (portOpened && !TO) {
+  if (STAGED && !portOpened) {
+    diagnose("no-port");
+    throw new Error("the old app opened no debugging port, so its own updater could not be driven through the staged feed");
+  }
+  if (portOpened && (!TO || STAGED)) {
     // 5. Let the app itself check, download and verify the update.
     const browser = await chromium.connectOverCDP(CDP);
     const page = await pageOf(browser);
@@ -316,6 +340,12 @@ try {
       throw new Error(`the app was offered ${available?.version ?? "nothing"}, the manifest says ${manifest.version}`);
     }
     if (available.current_version !== FROM) throw new Error(`the app reports it is ${available.current_version}`);
+    if (STAGED) {
+      // Proof that the app read THIS runner's staged feed: its updater asked the server, and got these notes.
+      note("staged feed requests", { requests: stagedFeedRequests() });
+      if (!updaterReadTheStagedFeed()) throw new Error("the app's updater never asked this runner's staged feed");
+      if (available.notes !== manifest.notes) throw new Error("the app was offered notes that are not the staged feed's");
+    }
     const staged = await invoke("download_update");
     note("download_update", { staged });
 

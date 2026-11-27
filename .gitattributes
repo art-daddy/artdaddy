@@ -8,3 +8,5 @@ src/timeline/__golden.export.txt text eol=lf
 # Project folders written by older releases (src/tools/project.goldens.test.ts): kept byte for byte as
 # those releases wrote them, on every platform.
 src/tools/__fixtures__/goldenProjects/** -text
+# The update feed exactly as it is served: tests compare its bytes, so git must not change its line endings.
+src-tauri/tests/fixtures/updater/*.json -text
