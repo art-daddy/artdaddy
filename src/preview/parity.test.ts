@@ -112,6 +112,9 @@ describe("preview <-> render parity: render-only features (preview GAPS)", () =>
     ["custom ffmpeg filter", { effects: [{ type: "custom", params: { expr: "hflip" } }] }],
     // A .cube LUT needs the file loaded + a 3D texture; the preview has no asset path for it yet.
     ["3D LUT (.cube)", { color: { lut: "media_1.cube" } }],
+    // Hub mismatch 2 (art-daddy/backlog#83): neither is in the preview's shader.
+    ["colour wheels", { color: { shadowsHue: 210, shadowsAmount: 0.8 } }],
+    ["vibrance", { color: { vibrance: 1.5 } }],
   ];
   for (const [name, extra] of gaps) {
     it(`${name}: render reacts`, () => {
@@ -139,4 +142,121 @@ describe("preview <-> render parity: APPROXIMATED (both react, pixels differ by 
       expect(previewReacts(extra)).toBe(true);
     });
   }
+});
+
+/** The text a title carries: its own `text`, unless `extra` gives it runs (a caption has only runs). */
+const words = (extra: Any): Any => ("content" in extra ? extra : { text: "Parity", ...extra });
+
+/** The preview's text layer for one title carrying `extra`, and the export's caption file for it. */
+function previewText(extra: Any): Any {
+  const t = {
+    units: "frames",
+    canvas: { width: 1000, height: 1000, fps: 30 },
+    tracks: [
+      {
+        id: "t",
+        kind: "text",
+        z: 0,
+        clips: [{ id: "c", kind: "text", timeline_in: 0, timeline_out: 60, ...words(extra) }],
+      },
+    ],
+  } as Timeline;
+  return buildScene(t, 0, DIMS).textLayers[0];
+}
+function renderAss(extra: Any): string {
+  const t = {
+    canvas: { width: 1920, height: 1080, fps: 30 },
+    tracks: [
+      {
+        id: "t",
+        kind: "text",
+        z: 0,
+        clips: [{ kind: "text", timeline_in: 0, timeline_out: 2, ...words(extra) }],
+      },
+    ],
+  } as Timeline;
+  return buildRenderCommand(t, "/o.mp4")
+    .assFiles.map((f) => f.content)
+    .join("\n");
+}
+
+// Hub mismatch 11 (art-daddy/backlog#83): text the export draws one way and the preview another.
+// The pixels are in e2e/ui/parity.spec.ts (run-style, raw-ass); these say which side reacts.
+describe("preview <-> render parity: text the preview draws in its base style (GAPS, row 11)", () => {
+  const runs = (style?: Any) => ({
+    content: [{ text: "only" }, { text: "this", ...(style ? { style } : {}) }, { text: "word" }],
+  });
+  const gaps: Array<[string, Any, Any]> = [
+    ["raw_ass override", {}, { raw_ass: "{\\c&H2020FF&}Parity" }],
+    ["a run in its own colour", runs(), runs({ color: "#FF2020" })],
+  ];
+  for (const [name, base, extra] of gaps) {
+    it(`${name}: render reacts, and the preview still draws the text`, () => {
+      expect(renderAss(extra)).not.toBe(renderAss(base));
+      expect(previewText(extra)?.text, "the preview drew no text at all").toBeTruthy();
+    });
+    it.fails(`${name}: preview reacts (GAP: flip to it when preview gains it)`, () => {
+      expect(JSON.stringify(previewText(extra))).not.toBe(JSON.stringify(previewText(base)));
+    });
+  }
+});
+
+// Hub mismatch 14 (art-daddy/backlog#83), account policy rather than a look: an export of an
+// account that is not exempt carries the watermark and the end card (pixels:
+// src/timeline/branding.smoke.e2e.ts); the preview never draws either.
+describe("preview <-> render parity: branding (row 14)", () => {
+  const branding = { watermark: "/brand/wm.png", endcard: "/brand/end.mp4", endcardDuration: 2 };
+
+  it("the export opens the watermark and the end card for a branded account", () => {
+    const seconds = {
+      canvas: { width: 1920, height: 1080, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: [
+            {
+              media_ref: "/v.mp4",
+              kind: "video",
+              source_in: 0,
+              source_out: 2,
+              timeline_in: 0,
+              timeline_out: 2,
+            },
+          ],
+        },
+      ],
+    } as Timeline;
+    const plan = buildRenderCommand(seconds, "/o.mp4", { branding });
+    expect(plan.args).toContain("/brand/wm.png");
+    expect(plan.args).toContain("/brand/end.mp4");
+  });
+
+  it.fails("row 14: the preview draws the watermark the export burns in", () => {
+    const frames = {
+      units: "frames",
+      canvas: { width: 1000, height: 1000, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: [
+            {
+              id: "c",
+              kind: "video",
+              media_ref: "v.mp4",
+              source_in: 0,
+              source_out: 60,
+              timeline_in: 0,
+              timeline_out: 60,
+            },
+          ],
+        },
+      ],
+    } as Timeline;
+    const sources = buildScene(frames, 0, DIMS).layers.map((l) => l.source);
+    expect(sources).toContain("/brand/wm.png");
+  });
 });

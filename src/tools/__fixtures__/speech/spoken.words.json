@@ -1,0 +1,26 @@
+{
+  "made_by": "scripts/genSpeechFixture.ps1",
+  "voice": "Microsoft Zira Desktop",
+  "text": "Captions should follow the voice. Every word appears while it is spoken. The picture and the sound stay together.",
+  "words": [
+    { "word": "Captions", "start": 0.7 },
+    { "word": "should", "start": 1.18 },
+    { "word": "follow", "start": 1.4 },
+    { "word": "the", "start": 1.76 },
+    { "word": "voice", "start": 1.85 },
+    { "word": "Every", "start": 4.375 },
+    { "word": "word", "start": 4.645 },
+    { "word": "appears", "start": 4.895 },
+    { "word": "while", "start": 5.305 },
+    { "word": "it", "start": 5.6 },
+    { "word": "is", "start": 5.705 },
+    { "word": "spoken", "start": 5.83 },
+    { "word": "The", "start": 8.395 },
+    { "word": "picture", "start": 8.48 },
+    { "word": "and", "start": 8.935 },
+    { "word": "the", "start": 9.055 },
+    { "word": "sound", "start": 9.13 },
+    { "word": "stay", "start": 9.49 },
+    { "word": "together", "start": 9.765 }
+  ]
+}

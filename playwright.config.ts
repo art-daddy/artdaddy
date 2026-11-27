@@ -79,6 +79,7 @@ export default defineConfig({
               "chromaKey.spec.ts",
               "rotation.spec.ts",
               "stream.spec.ts",
+              "parity.spec.ts",
               "osdrop.spec.ts",
             ]
           : [],

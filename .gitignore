@@ -93,6 +93,7 @@ preview-parity.html
 !preview-probe-chroma.html
 !preview-probe-rotation.html
 !preview-probe-stream.html
+!preview-probe-parity.html
 
 # Scratch output from local runs
 _*.txt
