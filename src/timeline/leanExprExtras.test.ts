@@ -96,6 +96,7 @@ const ARITY: Record<string, number> = {
   gte: 2,
   eq: 2,
   max: 2,
+  min: 2,
   between: 3,
   clip: 3,
   if: 3,
@@ -105,7 +106,7 @@ const ARITY: Record<string, number> = {
   ceil: 1,
 };
 
-/** The reference: ffmpeg's definitions written out again, over the tree. `min` is left out of the trees: see the todo below. */
+/** The reference: ffmpeg's definitions written out again, over the tree. */
 const REFERENCE: Record<string, (...a: number[]) => number> = {
   lt: (a, b) => (a < b ? 1 : 0),
   lte: (a, b) => (a <= b ? 1 : 0),
@@ -113,6 +114,7 @@ const REFERENCE: Record<string, (...a: number[]) => number> = {
   gte: (a, b) => (a >= b ? 1 : 0),
   eq: (a, b) => (a === b ? 1 : 0),
   max: (a, b) => (a > b ? a : b),
+  min: (a, b) => (a < b ? a : b),
   between: (x, lo, hi) => (x >= lo && x <= hi ? 1 : 0),
   not: (x) => (x === 0 ? 1 : 0),
   abs: Math.abs,
@@ -181,12 +183,19 @@ function astArb(depth: number): fc.Arbitrary<Ast> {
 }
 
 describe("leanExpr: agreement with the tree it was written from", () => {
-  // Found by this test: ffmpeg's min(d, d2) is `d < d2 ? d : d2` (inferred from libavutil/eval.c as remembered, not re-read), so a NaN second
-  // argument gives NaN, while leanExpr's min gives the FIRST argument when the comparison fails (min(0, 0/0) is 0 here, NaN in ffmpeg). Only a NaN
-  // can tell them apart, and no expression the exporter writes has min over a NaN; the file is not changed here (not part of the window work).
-  it.todo(
-    "min gives the second argument when the first is not below it, a NaN included, as ffmpeg does (an existing difference, see HANDOFF)",
-  );
+  // ffmpeg's min(d, d2) is `d < d2 ? d : d2` (libavutil/eval.c, re-read on 28 Nov 2026), so when the first is not below the second, a NaN on either
+  // side or a zero against one of the other sign, it gives the SECOND. The shipped ffmpeg, asked through aevalsrc, gave exactly these: min(0,0/0) NaN,
+  // min(0/0,0) 0, min(0,-0) -0, min(-0,0) 0. No expression the exporter writes has min over a NaN, but this evaluator stands in for ffmpeg's.
+  it("min gives the second argument when the first is not below it, a NaN or a zero of the other sign included, as ffmpeg does", () => {
+    expect(run("min(1,2)")).toBe(1);
+    expect(run("min(2,1)")).toBe(1);
+    expect(run("min(0,0/0)")).toBeNaN();
+    expect(Object.is(run("min(0/0,0)"), 0)).toBe(true);
+    expect(Object.is(run("min(0,-0)"), -0)).toBe(true);
+    expect(Object.is(run("min(-0,0)"), 0)).toBe(true);
+    expect(run("max(0,0/0)")).toBeNaN();
+    expect(Object.is(run("max(0/0,0)"), 0)).toBe(true);
+  });
   it("gives the reference's double for random trees over every function and variable, X, Y, between, eq and not included", () => {
     fc.assert(
       fc.property(

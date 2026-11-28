@@ -105,7 +105,8 @@ const FUNCTIONS: Record<string, { arity: number; fn: Fn }> = {
   eq: { arity: 2, fn: (a, b) => (a === b ? 1 : 0) },
   not: { arity: 1, fn: (x) => (x === 0 ? 1 : 0) },
   max: { arity: 2, fn: (a, b) => (a > b ? a : b) },
-  min: { arity: 2, fn: (a, b) => (a > b ? b : a) },
+  // libavutil/eval.c: `d < d2 ? d : d2`, so a NaN on either side, or a zero of either sign against one of the other, gives the second
+  min: { arity: 2, fn: (a, b) => (a < b ? a : b) },
   round: { arity: 1, fn: cRound },
   floor: { arity: 1, fn: Math.floor },
   ceil: { arity: 1, fn: Math.ceil },

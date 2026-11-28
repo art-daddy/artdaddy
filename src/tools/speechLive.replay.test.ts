@@ -213,6 +213,11 @@ const stoppedAtMs = (r: MonitorReplay): number | null => r.stoppedAt?.tMs ?? nul
 describe.each(CAPTURES)("the capture %s", (name, cap) => {
   const stats = segmentStats(cap.chunks);
   const full = replayMonitor(cap, { liveStop: false });
+  /** `it` for a case that applies to this capture, nothing for one that does not: a case that cannot apply is not a skip
+   *  to report. A generated capture has no proof note; only a capture from the live harness has a Cancel or a run through
+   *  the app. No committed capture has the latter: CI's Linux export job makes one with the harness's stand-in engine and
+   *  replays it here through ARTDADDY_LIVE_CAPTURE_IN. */
+  const itIf = (applies: boolean): typeof it | undefined => (applies ? it : undefined);
 
   it("is a capture the schema accepts, of enough audio for a rate to mean something and for the live stop to be shown", () => {
     expect(validateCapture(cap)).toEqual([]);
@@ -282,7 +287,7 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     expect(full.final.snapshot.noGpu).toBe(cap.engine.backend === "cpu");
   });
 
-  it.skipIf(name.startsWith("generated"))(
+  itIf(!name.startsWith("generated"))?.(
     "reports the numbers of the proof's note, every one of them a number",
     () => {
       const round = (n: number | null | undefined, places = 1): number | null =>
@@ -504,7 +509,7 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     expect(replay.final.live.clamped).toBe(true);
   });
 
-  it.skipIf(cap.killed === undefined)(
+  itIf(cap.killed !== undefined)?.(
     "has a Cancel that stops the process quickly, leaves no output, is answered as a stop and not a crash, and leaves the monitor consistent",
     () => {
       const killed = cap.killed!;
@@ -530,7 +535,7 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     },
   );
 
-  it.skipIf(cap.app === undefined)(
+  itIf(cap.app !== undefined)?.(
     "shows the chip, through the app's own path, what the replay shows it: the same first words, position, speed and time left after every output",
     async () => {
       const app = cap.app!;
@@ -562,7 +567,7 @@ describe.each(CAPTURES)("the capture %s", (name, cap) => {
     },
   );
 
-  it.skipIf(cap.killed === undefined && cap.app === undefined)(
+  itIf(cap.killed !== undefined || cap.app !== undefined)?.(
     "has the app's own run end as the capture says: a finished run is done, a stopped one is a stop",
     () => {
       for (const run of [cap.killed, cap.app]) {

@@ -129,7 +129,14 @@ const loaded: { label: string; path: string }[] = [
 
 // Sidecars are fetched by a separate script, so a clean checkout has nothing to inspect.
 // Scoped to "the directory is empty" rather than per-file, so a PARTIAL stage still fails.
-describe.skipIf(stagedDlls.length === 0)("staged whisper binaries: runtime dependencies", () => {
+// Where the set IS staged on purpose (CI's Windows export job, after fetch-sidecars), ARTDADDY_WHISPER_REQUIRED=1
+// turns "nothing staged" into a failure: the check must not skip itself in the one place it is meant to run.
+const optional = stagedDlls.length === 0 && process.env.ARTDADDY_WHISPER_REQUIRED !== "1";
+describe.skipIf(optional)("staged whisper binaries: runtime dependencies", () => {
+  it("has the staged set to check", () => {
+    expect(stagedDlls.length, `nothing staged in ${whisperDir}`).toBeGreaterThan(0);
+  });
+
   it("parses real import tables (guards the parser itself)", () => {
     expect(exe, "no artdaddy-whisper-cli executable to check").not.toBeNull();
 
