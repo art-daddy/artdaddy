@@ -12,7 +12,7 @@
 // with, and grade against `gradingBaseline`, exactly as the harness does.
 import { composeModelText } from "../agent/compose";
 import { attachmentsFromUploads } from "../components/chatMedia";
-import { applyOp } from "../timeline/engine";
+import { applyOp, applyTimelineTransition } from "../timeline/engine";
 import type { Timeline } from "../timeline/model";
 import type { ProjectStoreAccess } from "../tools/store";
 import { footageClip, type FootageClip } from "./footage";
@@ -39,7 +39,8 @@ export function attachedFiles(scenario: Scenario, turn: number): FootageClip[] {
   const refs = turnContextOf(scenario, turn)?.attach ?? [];
   return refs.map((ref) => {
     const c = scenario.footage ? footageClip(scenario.footage, ref) : undefined;
-    if (!c) throw new Error(`${scenario.id}: turn ${turn} attaches ${ref}, which is not in its footage`);
+    if (!c)
+      throw new Error(`${scenario.id}: turn ${turn} attaches ${ref}, which is not in its footage`);
     return c;
   });
 }
@@ -76,13 +77,23 @@ export async function applyOutsideEdit(
 
 /** The timeline the agent's changes are judged against: the seed with the person's own edits made
  *  on it, in turn order. What the person changed by hand is not the agent's doing, so it must not
- *  read as collateral or as a deletion nobody asked for. */
+ *  read as collateral or as a deletion nobody asked for. A case's edit must therefore come out the
+ *  same on the seed as on the live timeline: it names clips by id and puts them at fixed frames,
+ *  and the turns before it must not move what it touches. */
 export function gradingBaseline(scenario: Scenario, seeded: Timeline): Timeline {
   const edits = [...(scenario.turnContext ?? [])]
     .filter((c) => c.editedBefore)
     .sort((a, b) => a.turn - b.turn);
-  if (!edits.length) return seeded;
-  const base = JSON.parse(JSON.stringify(seeded)) as Timeline;
-  for (const c of edits) c.editedBefore!.apply(base);
+  let base = seeded;
+  for (const c of edits) {
+    const edit = c.editedBefore!;
+    // The commit's own pure pipeline (mutate, normalize, validate), as the live edit ran it.
+    const r = applyTimelineTransition(base, `editor: ${edit.what}`, (tl) => {
+      edit.apply(tl);
+    });
+    if (!r.ok)
+      throw new Error(`${scenario.id}: the person's edit (${edit.what}) failed: ${r.error}`);
+    base = r.next;
+  }
   return base;
 }

@@ -11,6 +11,7 @@ import type { Timeline } from "../timeline/model";
 import { EVAL_PAID_TOOLS } from "./checks";
 import { gradeRun, KNOWN_FAILURE_REF } from "./oracle";
 import { ALL_SCENARIOS, DISABLED_SCENARIOS, RECOVERY_LANE } from "./scenarios";
+import { gradingBaseline } from "./turns";
 import type { Scenario, ToolCall, Trace } from "./types";
 
 const every: Scenario[] = [...ALL_SCENARIOS, ...DISABLED_SCENARIOS, ...RECOVERY_LANE];
@@ -47,7 +48,11 @@ describe("what each case declares is about its own seed and the real catalog", (
   for (const s of every) {
     it(s.id, () => {
       const seed = s.seed();
-      const clipIds = new Set((seed.tracks ?? []).flatMap((t) => (t.clips ?? []).map((c) => c.id)));
+      // A clip the person makes by hand between turns (eval/turns.ts) is part of the case's project too.
+      const project = [seed, gradingBaseline(s, s.seed())];
+      const clipIds = new Set(
+        project.flatMap((tl) => (tl.tracks ?? []).flatMap((t) => (t.clips ?? []).map((c) => c.id))),
+      );
       const trackIds = new Set((seed.tracks ?? []).map((t) => t.id));
       for (const name of s.paidTools ?? [])
         expect(EVAL_PAID_TOOLS.has(name), `paidTools names ${name}, which is not paid`).toBe(true);
