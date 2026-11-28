@@ -14,7 +14,6 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
-import { composeModelText } from "../agent/compose";
 import { readStateBlock } from "../agent/stateBlock";
 import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
@@ -44,6 +43,7 @@ import { type Budget, costFromUsage } from "./pricing";
 import { analyzeTrace } from "./signals";
 import type { CampaignSetup } from "./setup";
 import { RecoveryRuntime, recoveryContext, recoveryProjectDir } from "./recovery";
+import { applyOutsideEdit, composeTurn, gradingBaseline, turnContextOf } from "./turns";
 import {
   HARNESS_UNAVAILABLE as HARNESS_MARK,
   type RoundClock,
@@ -515,20 +515,19 @@ export async function driveScenario(
     const runner = new ClientTurnRunner(deps);
     // The app reads the project for the model before its first round (store/chat.ts, agent/stateBlock.ts). The
     // flag lets an eval measure that: the same scenarios, with and without it.
-    let firstMessage = scenario.prompt;
-    let stateBlock = false;
-    if (process.env.ARTDADDY_EVAL_PRELOAD === "1" && !recovery) {
-      const block = await readStateBlock({
+    const preload = process.env.ARTDADDY_EVAL_PRELOAD === "1" && !recovery;
+    const readBlock = () =>
+      readStateBlock({
         has: (n: string) => registry.has(n),
         run: async (n, a, o) =>
           registry.run(n, a, o.trace?.context ?? agentEventContext(), o.trace),
       });
-      if (block) {
-        firstMessage = composeModelText(scenario.prompt, [], [], { stateBlock: block });
-        stateBlock = true;
-      }
-    }
-    await runner.start(firstMessage);
+    const firstBlock = preload ? await readBlock() : null;
+    const stateBlock = !!firstBlock;
+    // Each message as the app composes it: the words, plus what came with them (eval/turns.ts).
+    await runner.start(
+      composeTurn(scenario, 0, scenario.prompt, { stateBlock: firstBlock ?? undefined }),
+    );
     turnTexts.push(finalText);
     await recovery?.recordClaim(finalText);
     if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
@@ -545,7 +544,17 @@ export async function driveScenario(
       if (opts.budget.exceeded() || roundLimitReached) break;
       recovery?.releaseQueuedFailure();
       turn += 1;
-      await runner.start(followUp);
+      // The person changed the timeline by hand before this message: made as the editor makes it,
+      // and the message then says so, or carries a fresh read of the project instead (store/chat.ts).
+      const edit = turnContextOf(scenario, turn)?.editedBefore;
+      if (edit) await applyOutsideEdit(store, edit);
+      const block = edit && preload ? await readBlock() : null;
+      await runner.start(
+        composeTurn(scenario, turn, followUp, {
+          timelineChanged: !!edit,
+          stateBlock: block ?? undefined,
+        }),
+      );
       turnTexts.push(finalText);
       await recovery?.recordClaim(finalText);
       if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
@@ -578,7 +587,7 @@ export async function driveScenario(
     // budget defaults to 0 and is raised only by a scenario that provokes an error
     // on purpose — see evalTier0. The diff runs from the seed AS LOADED, so nothing the
     // load itself normalises reads as the model's change.
-    const grade = gradeRun(scenario, seeded, final, trace);
+    const grade = gradeRun(scenario, gradingBaseline(scenario, seeded), final, trace);
     trace.diff = grade.diff;
     trace.checks = grade.checks;
     const signals = analyzeTrace(scenario, trace, grade.tier0.violations);
