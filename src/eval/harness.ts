@@ -30,6 +30,7 @@ import { ClientToolRegistry } from "../tools/registry";
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import { gradeRun } from "./oracle";
 import { registerJourneyStubs } from "./journey";
+import { registerJobStubs, type JobBoard } from "./jobs";
 import {
   emptyStudioState,
   registerStudioStubs,
@@ -249,6 +250,7 @@ export async function driveScenario(
   let finalText = "";
   const turnTexts: string[] = [];
   let recovery: RecoveryRuntime | null = null;
+  let board: JobBoard | null = null;
   let providerError = "";
   let roundLimitReached = false;
   const usage: Trace["usage"] = {
@@ -365,9 +367,15 @@ export async function driveScenario(
     // widens that to the WHOLE non-timeline catalog (see studio.ts) — same rule:
     // no network, no paid inference, no ffmpeg.
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
-    else if (scenario.surface === "studio")
+    else if (scenario.surface === "studio") {
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
-    else if (scenario.surface === "recovery") {
+      // Generations and exports that run past the turn, landing when a later user turn begins (jobs.ts).
+      if (scenario.jobs)
+        board = registerJobStubs(registry, studio, scenario.jobs, {
+          store,
+          timeline: () => loadTimeline(store),
+        });
+    } else if (scenario.surface === "recovery") {
       recovery = new RecoveryRuntime(scenario.recovery, ctx);
       await recovery.initialize();
       const surfaceResponse = await authedFetch(`${opts.server}/contract/tools`);
@@ -542,6 +550,8 @@ export async function driveScenario(
       if (opts.budget.exceeded() || roundLimitReached) break;
       recovery?.releaseQueuedFailure();
       turn += 1;
+      // Work due by this turn lands before any of its calls run, as the app's job lands before its message arrives.
+      await board?.atTurn(turn);
       await runner.start(followUp);
       turnTexts.push(finalText);
       await recovery?.recordClaim(finalText);
