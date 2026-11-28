@@ -1,25 +1,27 @@
 // The cases the first eval baseline (27 Nov 2026) showed to be broken, where the rig and not the
 // agent failed the run. Each is driven offline through the real harness, agent loop, tools,
-// stand-ins and oracle with the model's rounds scripted: the known-right run passes, and the run
-// the baseline recorded fails only where the agent was wrong. No network and no model is reached
-// (fetch is a spy that throws, and every test checks it was never called).
+// stand-ins and oracle with the model's rounds scripted (reference.ts): the known-right run passes,
+// and the run the baseline recorded fails only where the agent was wrong. No network and no model
+// is reached (fetch is a spy that throws, and every test checks it was never called).
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EXTERNAL_FETCH_TOOLS } from "../agent/loop";
-import type { PendingCall, RoundResultDTO } from "../agent/types";
-import { DEFAULT_MODEL } from "../store/chatControls";
 import { registerTimelineTools } from "../timeline/ops";
 import type { Timeline } from "../timeline/model";
 import type { ClientToolContext } from "../tools/context";
 import { ClientToolRegistry } from "../tools/registry";
 import { EVAL_PAID_TOOLS } from "./checks";
-import { driveScenario, type InferenceRequest } from "./harness";
+import type { InferenceRequest } from "./harness";
 import { caseLibrary, LOOK_TOOLS, registerLookStubs } from "./look";
 import { gradeRun } from "./oracle";
-import { Budget } from "./pricing";
+import {
+  driveScripted,
+  type ReferenceCalls as Calls,
+  type ReferenceStep as Step,
+} from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
 import {
   emptyStudioState,
@@ -33,46 +35,8 @@ import {
 } from "./studio";
 import { HARNESS_UNAVAILABLE, type Scenario, type ToolCall, type Trace } from "./types";
 
-type Calls = [string, Record<string, unknown>][];
-type Step = { text: string } | { calls: Calls };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
-
-/** A model that answers from a script, one step per round. */
-function scripted(steps: Step[]) {
-  let i = 0;
-  const requests: InferenceRequest[] = [];
-  const usage = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    requests.push(req);
-    const step = steps[i++] ?? { text: "" };
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage,
-        provider_snapshot: {},
-      };
-    const pending: PendingCall[] = step.calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage,
-      provider_snapshot: {},
-    };
-  };
-  return { send, requests };
-}
 
 const WORK = path.resolve("reports", "eval", `baseline-fixes-${process.pid}`);
 const byId = (id: string): Scenario => ALL_SCENARIOS.find((s) => s.id === id)!;
@@ -101,13 +65,7 @@ async function drive(id: string, steps: Step[]) {
       base.expect?.(tl);
     },
   } as Scenario;
-  const { send, requests } = scripted(steps);
-  const result = await driveScenario(scenario, DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(2),
-    send,
-    workDir: WORK,
-  });
+  const { result, requests } = await driveScripted(scenario, steps, { workDir: WORK });
   expect(result.harnessError).toBeUndefined();
   return { result, requests, final: final! };
 }

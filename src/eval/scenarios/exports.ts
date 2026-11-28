@@ -206,6 +206,13 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       if (renders(trace)[1].args?.resolution !== "720p")
         throw new Error("the second export did not use the new setting");
     },
+    reference: [
+      { calls: [["export", {}]] },
+      { text: "Your video is exporting to your Downloads folder." },
+      { calls: [["manage_exports", { action: "cancel", job_id: "job_1" }]] },
+      { calls: [["export", { resolution: "720p" }]] },
+      { text: "Stopped the first export and started it again at 720p." },
+    ],
   },
 ];
 

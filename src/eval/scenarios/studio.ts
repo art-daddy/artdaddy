@@ -22,6 +22,7 @@ import {
   STUDIO_MUSIC_REF,
   STUDIO_PROJECTS,
   STUDIO_REPLAY_REF,
+  STUDIO_REPLAY_URL,
   STUDIO_SCREENSHOT_REF,
   STUDIO_URL,
   STUDIO_VIDEO_REF,
@@ -283,6 +284,12 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (studioDownloadRef(url) !== STUDIO_REPLAY_REF)
         throw new Error(`downloaded the wrong result: "${url}"`);
     },
+    reference: [
+      { calls: [["youtube_search", { query: "rocket launch full replay" }]] },
+      { calls: [["download_video", { url: STUDIO_REPLAY_URL, output_name: "launch-replay.mp4" }]] },
+      { calls: [["add_clips", { entries: [{ media_ref: STUDIO_REPLAY_REF, timeline_in: 300 }] }]] },
+      { text: "Found the 12:34 full replay on YouTube and added it right after your shot." },
+    ],
   },
   {
     id: "metadata_before_download",
@@ -561,11 +568,20 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expectTools: ["generate_voiceover", "add_clips"],
     paidTools: ["generate_voiceover"],
     maxRounds: 12,
+    inAppOnly:
+      "Over MCP nothing tells the agent when the generated voiceover is ready to place, and it is told to end its turn rather than wait, so the run ends before the voiceover can be laid under the video.",
     expect: (final) => {
       const hit = placed(final, STUDIO_VOICEOVER_REF);
       const kind = trackKindOf(final, String(hit.id));
       if (kind !== "audio") throw new Error(`voiceover landed on a ${kind} track`);
     },
+    reference: [
+      { calls: [["generate_voiceover", { text: "Welcome to the launch" }]] },
+      {
+        calls: [["add_clips", { entries: [{ media_ref: STUDIO_VOICEOVER_REF, timeline_in: 0 }] }]],
+      },
+      { text: "Recorded the voiceover and laid it under the video from the start." },
+    ],
   },
   {
     id: "generate_music_bed",
@@ -678,6 +694,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!/teaser/i.test(t.finalText))
         throw new Error("the answer does not name the other project (Teaser)");
     },
+    // The app's own lane, where open_project is the only way to the other project.
+    reference: [
+      { calls: [["list_projects", {}]] },
+      { calls: [["open_project", { project: STUDIO_PROJECTS[1].id }]] },
+      {
+        text: "Your other project is Teaser. I can't switch the editor from here, so open it from File > Open Project.",
+      },
+    ],
   },
   {
     id: "project_state_question",
@@ -757,6 +781,16 @@ export const STUDIO_SCENARIOS: Scenario[] = [
           `tagged as b-roll what the person keeps elsewhere: ${wrong.map((r) => `${r.filename} (${r.folder})`).join(", ")}`,
         );
     },
+    reference: [
+      { calls: [["library_op", { action: "list" }]] },
+      {
+        calls: [
+          ["library_op", { action: "update", id: "media_broll_city", tags: ["broll"] }],
+          ["library_op", { action: "update", id: "media_broll_ocean", tags: ["broll"] }],
+        ],
+      },
+      { text: "Tagged city.mp4 and ocean.mp4, the two clips in your broll folder, as 'broll'." },
+    ],
   },
   {
     id: "library_place_from_catalog",

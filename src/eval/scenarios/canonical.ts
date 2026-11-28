@@ -215,6 +215,18 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["insert_clips"],
     maxRounds: 6,
+    reference: [
+      { calls: [["get_project_state", {}]] },
+      {
+        calls: [
+          [
+            "insert_clips",
+            { at: 30, track_id: "v2", entries: [{ media_ref: "intro.mp4", duration: 30 }] },
+          ],
+        ],
+      },
+      { text: "Inserted one second of intro.mp4 between the clips; the second clip moved back." },
+    ],
   },
   {
     id: "remove_last",
@@ -344,6 +356,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["apply_color", "apply_effects"],
     maxRounds: 5,
+    reference: [
+      { calls: [["inspect_color", { clip_id: "a" }]] },
+      { calls: [["apply_color", { clip_ids: ["a"], temperature: 7200, saturation: 1.1 }]] },
+      { text: "Warmed the clip to 7200 K and raised its saturation a little." },
+    ],
   },
   {
     id: "title_text",
@@ -709,6 +726,16 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["apply_color", "apply_effects", "set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      {
+        calls: [
+          ["inspect_color", { clip_id: "a" }],
+          ["inspect_media", { clip_id: "a" }],
+        ],
+      },
+      { calls: [["apply_color", { clip_ids: ["a"], contrast: 1.2, saturation: 1.2 }]] },
+      { text: "Added contrast and colour so the shot pops." },
+    ],
   },
 
   // ── multi-turn follow-ups (needs the harness followUps extension) ────────────
@@ -807,6 +834,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["apply_color"],
     maxRounds: 5,
+    reference: [
+      { calls: [["inspect_color", { clip_id: "a" }]] },
+      { calls: [["apply_color", { clip_ids: ["a"], contrast: 1.25 }]] },
+      { text: "Raised the clip's contrast to 1.25." },
+    ],
   },
 
   // ── crop / flip / rotate / glow / blend / transform ──────────────────────────
