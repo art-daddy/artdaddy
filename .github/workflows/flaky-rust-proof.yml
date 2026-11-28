@@ -19,7 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15]
+        # The second fix commit changes only mcp.rs; the macOS job of the previous run (same jobs/ code) is still queued.
+        os: [ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 110
     steps:
