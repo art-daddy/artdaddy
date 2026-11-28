@@ -16,6 +16,7 @@ import type { Page } from "@playwright/test";
 import { expect, test, type AgentRig } from "../agent-and-models/lib/qa";
 import { measure, startTimer } from "../../lib/timing";
 import {
+  canPlaySound,
   colourName,
   expectStage,
   fileMenu,
@@ -187,9 +188,20 @@ test.describe("the live preview", () => {
     const transport = stage(qa.page);
 
     await transport.getByRole("button", { name: "play" }).click();
-    await expect
-      .poll(meter, { timeout: 15_000, message: "no sound reached the meter" })
-      .toBeGreaterThan(5);
+    // Sound is judged only where this machine can play any (a CI runner has no audio device).
+    const sound = await canPlaySound(qa.page);
+    if (sound.ok)
+      await expect
+        .poll(meter, {
+          timeout: 15_000,
+          message: `no sound reached the meter, though this browser plays a tone: ${JSON.stringify(sound)}`,
+        })
+        .toBeGreaterThan(5);
+    else
+      test.info().annotations.push({
+        type: "sound not judged",
+        description: `this machine plays no sound: ${JSON.stringify(sound)}`,
+      });
     await expect.poll(() => playheadSeconds(qa.page), { timeout: 15_000 }).toBeGreaterThan(1.2);
     await transport.getByRole("button", { name: "pause" }).click();
     const held = await playheadSeconds(qa.page);

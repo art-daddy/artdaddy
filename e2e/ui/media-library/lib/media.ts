@@ -292,3 +292,41 @@ export async function expectStage(page: Page, colour: string, timeout = 20_000):
 export function previewCannotDrawHere(browserName: string): boolean {
   return browserName === "webkit" && process.platform === "win32";
 }
+
+/** Can this browser, on this machine, play sound at all? A CI runner has no audio device, and there Web Audio may not
+ *  run, so no meter can move whatever the app does. Asked with a tone of the page's own, right after a click (Web Audio
+ *  starts only on a person's gesture): it must run, its clock must move and the tone must reach an analyser. */
+export async function canPlaySound(
+  page: Page,
+): Promise<{ ok: boolean; state: string; advanced: number; peak: number }> {
+  return page.evaluate(async () => {
+    const Ctor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return { ok: false, state: "no AudioContext", advanced: 0, peak: 0 };
+    const ctx = new Ctor();
+    try {
+      await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 1000))]);
+      const osc = ctx.createOscillator();
+      const analyser = ctx.createAnalyser();
+      osc.connect(analyser);
+      analyser.connect(ctx.destination);
+      osc.start();
+      const t0 = ctx.currentTime;
+      await new Promise((r) => setTimeout(r, 500));
+      const samples = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(samples);
+      const peak = samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+      const advanced = ctx.currentTime - t0;
+      osc.stop();
+      return {
+        ok: ctx.state === "running" && advanced > 0.1 && peak > 0.01,
+        state: ctx.state,
+        advanced,
+        peak,
+      };
+    } finally {
+      await ctx.close().catch(() => {});
+    }
+  });
+}
