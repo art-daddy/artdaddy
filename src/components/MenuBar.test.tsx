@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ed = {
   selection: null as string | null,
@@ -68,6 +68,8 @@ import { useMcpPanel } from "../store/mcpPanel";
 import { unknownParams } from "../contract/params";
 import { plainFailure } from "../timeline/exportWords";
 import { __setExportFlag } from "../api/exportFlags";
+import { SECTIONS, SHORTCUTS, shortcutLabels } from "../timeline/shortcuts";
+import { useChat } from "../store/chat";
 
 type ToolReply = {
   ok: boolean;
@@ -600,5 +602,86 @@ describe("View shortcuts, on the keys each platform really sends", () => {
     press({ key: "0", code: "Digit0" });
     press({ altKey: true, key: "å", code: "KeyA" });
     expect(usePanes.getState().visible).toEqual(ALL);
+  });
+});
+
+// The sheet claims "a key listed on this sheet is the key that fires"; TimelineEditor.shortcuts.test.tsx proves each
+// key acts. This proves the person can find every one: an entry whose section the sheet does not draw, or whose keys it
+// leaves out, is a shortcut nobody learns.
+describe("Edit → Keyboard Shortcuts…", () => {
+  const open = () => {
+    renderBar();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByText("Keyboard Shortcuts…"));
+    return screen.getByText(/Shortcuts work while the timeline has focus/).parentElement!;
+  };
+
+  it("lists every shortcut once, under its own section, with every key that fires it and its note", () => {
+    const sheet = open();
+    expect(
+      within(sheet)
+        .getAllByRole("heading")
+        .map((h) => h.textContent),
+    ).toEqual([...SECTIONS]);
+    for (const s of SHORTCUTS) {
+      const row = within(sheet).getByText(s.label).closest("li")!;
+      expect(row.closest("section")!.querySelector("h3")!.textContent, s.id).toBe(s.section);
+      const keys = [...row.querySelectorAll("kbd")].map((k) => k.textContent);
+      expect(keys, s.id).toEqual(shortcutLabels(s.id));
+      expect(keys.length, s.id).toBe(s.combos.length);
+      if (s.note) expect(row.textContent, s.id).toContain(s.note);
+    }
+    expect(within(sheet).getAllByRole("listitem")).toHaveLength(SHORTCUTS.length);
+  });
+
+  it("goes away on Close", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(
+      screen.queryByText(/Shortcuts work while the timeline has focus/),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("Help → Report a Problem…", () => {
+  const sendFeedback = vi.fn();
+  const real = useChat.getState().sendFeedback;
+  beforeEach(() => {
+    sendFeedback.mockReset();
+    useChat.setState({ sendFeedback } as never);
+  });
+  afterEach(() => useChat.setState({ sendFeedback: real }));
+  const report = (note: string) => {
+    renderBar("/p/test");
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    fireEvent.click(screen.getByText("Report a Problem…"));
+    fireEvent.change(screen.getByRole("textbox", { name: "What went wrong?" }), {
+      target: { value: note },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send report" }));
+  };
+
+  it("sends what the person typed, closes, and says it was sent", async () => {
+    sendFeedback.mockResolvedValue(true);
+    report("  The export stopped at 80%.  ");
+    await waitFor(() => expect(screen.getByText("Report sent — thank you")).toBeInTheDocument());
+    expect(sendFeedback).toHaveBeenCalledWith("report", { note: "The export stopped at 80%." });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the dialog and the words when the report could not be sent", async () => {
+    sendFeedback.mockResolvedValue(false);
+    report("The export stopped at 80%.");
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "What went wrong?" })).toHaveValue(
+      "The export stopped at 80%.",
+    );
+    expect(screen.queryByText("Report sent — thank you")).not.toBeInTheDocument();
+  });
+
+  it("cannot be opened with no project open, since there is nothing to report on", () => {
+    renderBar("/");
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    expect(screen.getByText("Report a Problem…").closest("button")).toBeDisabled();
   });
 });

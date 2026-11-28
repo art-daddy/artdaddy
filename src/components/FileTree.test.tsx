@@ -28,6 +28,7 @@ import { listProjectFiles } from "../lib/files";
 import { relinkMedia } from "../lib/mediaLink";
 import { importPaths, uploadFiles } from "../lib/upload";
 import { useEditor } from "../store/editor";
+import { useProjectNotice } from "../store/projectNotice";
 import { useProxyJobs } from "../store/proxyJobs";
 import { useCompatibility } from "../update/compatibility";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -346,5 +347,72 @@ describe("FileTree", () => {
         useEditor.setState({ store: null });
       }
     });
+  });
+});
+
+// The doors into the library the tests above do not open: pasting, the + button where there is no system dialog (the
+// page's own picker), and what the person is told when an import through them fails.
+describe("bringing media in from the library panel", () => {
+  const clip = new File(["x"], "clip.mov", { type: "video/quicktime" });
+  const fileItem = (file: File) => ({ kind: "file", type: file.type, getAsFile: () => file });
+  const textItem = { kind: "string", type: "text/plain", getAsFile: () => null };
+  /** A paste of `items` on the panel; true when the panel took it (cancelled the browser's own paste). */
+  const paste = (root: Element, items: unknown[]): boolean => {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.assign(event, { clipboardData: { items } });
+    root.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  async function panel(): Promise<Element> {
+    const { container } = render(<FileTree projectId="p1" />);
+    await screen.findByText(/No files yet/);
+    return container.firstChild as Element;
+  }
+
+  beforeEach(() => {
+    platformName = "web";
+    useCompatibility.setState({ status: "allowed" });
+    getFiles.mockResolvedValue([]);
+    vi.mocked(uploadFiles).mockReset().mockResolvedValue([]);
+    vi.mocked(importPaths).mockReset().mockResolvedValue([]);
+    useProjectNotice.getState().clear();
+  });
+
+  it("imports media pasted into it, and leaves a paste of text to the page", async () => {
+    const root = await panel();
+    expect(paste(root, [textItem])).toBe(false);
+    expect(paste(root, [textItem, fileItem(clip)])).toBe(true);
+    await waitFor(() => expect(uploadFiles).toHaveBeenCalledWith("p1", [clip]));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why a paste could not be imported", async () => {
+    vi.mocked(uploadFiles).mockRejectedValue(new Error("the disk is full"));
+    paste(await panel(), [fileItem(clip)]);
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toBe("Couldn't import: the disk is full"),
+    );
+  });
+
+  it("the + button opens the page's own picker on the web, and imports what it returns", async () => {
+    const root = await panel();
+    const input = root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const opened = vi.spyOn(input, "click");
+    fireEvent.click(screen.getByRole("button", { name: "import media" }));
+    await waitFor(() => expect(opened).toHaveBeenCalledTimes(1));
+    fireEvent.change(input, { target: { files: [clip] } });
+    await waitFor(() => expect(uploadFiles).toHaveBeenCalledWith("p1", [clip]));
+  });
+
+  it("says why the + button's import failed", async () => {
+    platformName = "tauri";
+    vi.mocked(open).mockRejectedValue(new Error("the dialog could not open"));
+    await panel();
+    fireEvent.click(screen.getByRole("button", { name: "import media" }));
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toBe(
+        "Couldn't import: the dialog could not open",
+      ),
+    );
   });
 });
