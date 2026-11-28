@@ -873,7 +873,7 @@ const WRONG: Record<string, { what: string; why: RegExp; steps: ReferenceStep[] 
             })),
           },
         ]),
-        step(["import_media", { source: { path: "C:\\Users\\me\\Videos\\garden\\garden_5.mp4" } }]),
+        step(["import_media", { source: { path: "D:\\Videos\\garden\\garden_5.mp4" } }]),
         say("Garden 1 to 4 are on; garden_5 and garden_6 are still importing."),
       ],
     },

@@ -1275,7 +1275,7 @@ const introSeed = (): Timeline =>
 
 /** The reply names what is still importing, as the import note asks (agent/importNote.ts). */
 const IMPORTING_ROWS = GARDEN.importing.map((name, i) => ({
-  path: `C:/Users/me/Videos/garden/${name}`,
+  path: `D:/Videos/garden/${name}`,
   name,
   fraction: i === 0 ? 0.4 : null,
 }));
