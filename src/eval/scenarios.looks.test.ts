@@ -12,6 +12,7 @@ import { ALL_SCENARIOS, DISABLED_SCENARIOS, RECOVERY_LANE } from "./scenarios";
 import { CANONICAL } from "./scenarios/canonical";
 import { EFFECT_SCENARIOS } from "./scenarios/effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./scenarios/exports";
+import { COMPLAINT_SCENARIOS } from "./scenarios/gap_complaints";
 import { timeline, ttrack, vclip, vtrack } from "./scenarios/helpers";
 import { JOURNEYS } from "./scenarios/journeys";
 import { REGRESSIONS } from "./scenarios/regressions";
@@ -89,6 +90,7 @@ describe("caption-look eval graders (validated without the model)", () => {
       ...JOURNEYS,
       ...EXPORT_SCENARIOS,
       ...STUDIO_SCENARIOS,
+      ...COMPLAINT_SCENARIOS,
     ];
     const withdrawn = new Set(
       catalog.tools.filter((tool) => tool.status === "withdrawn").map((tool) => tool.name),
