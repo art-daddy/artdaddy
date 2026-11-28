@@ -1,73 +1,25 @@
 // The real harness, offline: the real agent loop, real timeline tools and stand-ins, the real
-// oracle and records, with the model's rounds SCRIPTED. No network and no model is reached (fetch
-// is replaced by a spy that throws, and every test checks it was never called), so this runs in
-// the unit lane and costs nothing.
+// oracle and records, with the model's rounds SCRIPTED (reference.ts). No network and no model is
+// reached (fetch is replaced by a spy that throws, and every test checks it was never called), so
+// this runs in the unit lane and costs nothing.
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
 import { catalogIdentity } from "../contract";
 import { DEFAULT_EFFORT, DEFAULT_MODEL } from "../store/chatControls";
-import { driveScenario, EVAL_PROJECT_NAME, type InferenceRequest } from "./harness";
+import { EVAL_PROJECT_NAME } from "./harness";
 import { runStatus } from "./oracle";
 import { Budget } from "./pricing";
+import {
+  driveScripted,
+  type ReferenceCalls as Calls,
+  type ReferenceStep as Step,
+} from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
 import type { CampaignSetup } from "./setup";
 import type { Scenario } from "./types";
-
-type Calls = [string, Record<string, unknown>][];
-/** One scripted round: a reply, or tool calls (fixed, or made from the request the model got, for
- *  a call that needs an id an earlier tool minted). */
-type Step =
-  | { text: string; usage?: Usage }
-  | { calls: Calls | ((req: InferenceRequest) => Calls); usage?: Usage };
-
-const USAGE: Usage & { cached_tokens: number } = {
-  input_tokens: 1000,
-  output_tokens: 50,
-  cost_usd: 0.0002,
-  cached_tokens: 800,
-};
-
-/** A model that answers from a script, one step per round, after `delayMs` of "thinking". */
-function scripted(steps: Step[], delayMs = 0) {
-  let i = 0;
-  const requests: InferenceRequest[] = [];
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    requests.push(req);
-    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
-    const step = steps[i++] ?? { text: "" };
-    const usage = step.usage ?? USAGE;
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage,
-        provider_snapshot: {},
-      };
-    const calls = typeof step.calls === "function" ? step.calls(req) : step.calls;
-    const pending: PendingCall[] = calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage,
-      provider_snapshot: {},
-    };
-  };
-  return { send, requests };
-}
 
 const WORK = path.resolve("reports", "eval", `scripted-${process.pid}`);
 const SETUP: CampaignSetup = {
@@ -94,15 +46,7 @@ afterEach(() => {
 afterAll(() => fsp.rm(WORK, { recursive: true, force: true }));
 
 async function drive(scenario: Scenario, steps: Step[], budget = new Budget(2), delayMs = 0) {
-  const { send, requests } = scripted(steps, delayMs);
-  const result = await driveScenario(scenario, DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget,
-    send,
-    setup: SETUP,
-    workDir: WORK,
-  });
-  return { result, requests };
+  return driveScripted(scenario, steps, { budget, delayMs, setup: SETUP, workDir: WORK });
 }
 
 describe("a run records its setup and its clocks", () => {
