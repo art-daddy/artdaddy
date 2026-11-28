@@ -24,7 +24,7 @@ type Step = { text: string } | { calls: Calls | ((req: InferenceRequest) => Call
 
 const USAGE: Usage = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
 
-/** A model that answers from a script, one step per round. */
+/** A model that answers from a script, one step per round; `rounds()` says how many it was asked. */
 function scripted(steps: readonly Step[]) {
   let i = 0;
   const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
@@ -55,7 +55,7 @@ function scripted(steps: readonly Step[]) {
       provider_snapshot: {},
     };
   };
-  return send;
+  return { send, rounds: () => i };
 }
 
 const WORK = path.resolve("reports", "eval", `complaints-${process.pid}`);
@@ -80,12 +80,19 @@ const byId = (id: string): ComplaintCase => {
 };
 
 async function drive(id: string, steps: readonly Step[]): Promise<ScenarioResult> {
-  return driveScenario(byId(id), DEFAULT_MODEL, {
+  return (await driveCounted(id, steps)).result;
+}
+
+/** Drive a case, and say how many model rounds the run asked for. */
+async function driveCounted(id: string, steps: readonly Step[]) {
+  const model = scripted(steps);
+  const result = await driveScenario(byId(id), DEFAULT_MODEL, {
     server: "http://offline.invalid",
     budget: new Budget(2),
-    send: scripted(steps),
+    send: model.send,
     workDir: WORK,
   });
+  return { result, rounds: model.rounds() };
 }
 
 /** Why the run failed: every tier's and every check's violations. */
@@ -170,9 +177,11 @@ describe("the complaint cases are registered and well formed", () => {
 describe("each complaint case passes its correct run, offline", () => {
   for (const s of COMPLAINT_SCENARIOS)
     it(s.id, async () => {
-      const r = await drive(s.id, s.reference);
+      const { result: r, rounds } = await driveCounted(s.id, s.reference);
       expect(why(r)).toEqual([]);
       expect(r.passed).toBe(true);
+      // Every step was a round of the run, and the run asked for no round past the last one.
+      expect(rounds).toBe(s.reference.length);
       // Both turns ran: the complaint was answered on the same project.
       expect(r.trace.turnTexts).toHaveLength(2);
     });
@@ -655,6 +664,14 @@ describe("what the agent cannot change is explained, not worked around", () => {
     await rejects(
       withAnswer(id, [READ, say("Fixed the audio balance.")]),
       /does not say the music track is soloed/,
+    );
+    // Moving the music off the soloed track makes both heard by dodging the person's own switch.
+    await rejects(
+      withAnswer(id, [
+        call("move_clips", { moves: [{ clip_id: "music", to_track: "a3" }] }),
+        say("The music track was soloed, so I moved the music to a new track; you hear both now."),
+      ]),
+      /outside the request: track a3 added/,
     );
   });
 
