@@ -16,6 +16,7 @@ import { COMPLAINT_SCENARIOS } from "./scenarios/gap_complaints";
 import { GAP_FOLLOWUPS } from "./scenarios/gap_followups";
 import { GAP_CONTEXT_SCENARIOS } from "./scenarios/gap_context";
 import { GAP_WHOLEVIDEO } from "./scenarios/gap_wholevideo";
+import { GAP_MEDIA_SCENARIOS } from "./scenarios/gap_media";
 import { timeline, ttrack, vclip, vtrack } from "./scenarios/helpers";
 import { JOURNEYS } from "./scenarios/journeys";
 import { REGRESSIONS } from "./scenarios/regressions";
@@ -97,6 +98,7 @@ describe("caption-look eval graders (validated without the model)", () => {
       ...GAP_FOLLOWUPS,
       ...GAP_CONTEXT_SCENARIOS,
       ...GAP_WHOLEVIDEO,
+      ...GAP_MEDIA_SCENARIOS,
     ];
     const withdrawn = new Set(
       catalog.tools.filter((tool) => tool.status === "withdrawn").map((tool) => tool.name),

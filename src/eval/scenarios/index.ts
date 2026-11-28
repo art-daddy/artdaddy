@@ -7,6 +7,7 @@ import { COMPLAINT_SCENARIOS } from "./gap_complaints";
 import { GAP_FOLLOWUPS } from "./gap_followups";
 import { GAP_CONTEXT_SCENARIOS } from "./gap_context";
 import { GAP_WHOLEVIDEO } from "./gap_wholevideo";
+import { GAP_MEDIA_SCENARIOS } from "./gap_media";
 import { JOURNEYS } from "./journeys";
 import { REGRESSIONS } from "./regressions";
 import { STUDIO_SCENARIOS } from "./studio";
@@ -33,6 +34,7 @@ const scenarios: Scenario[] = [
   ...GAP_FOLLOWUPS,
   ...GAP_CONTEXT_SCENARIOS,
   ...GAP_WHOLEVIDEO,
+  ...GAP_MEDIA_SCENARIOS,
 ];
 
 const withdrawn = new Set(WITHDRAWN_TOOLS);
