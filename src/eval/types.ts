@@ -112,6 +112,26 @@ export interface CaseTranscript {
   words: readonly (readonly [string, number, number])[];
 }
 
+/** Background work in a case (src/eval/jobs.ts): when the generations and exports it starts land. */
+export interface JobPlan {
+  /** The first user turn at which a job may land: 0 is the request, 1 the first follow-up (the default). A job lands at
+   *  the first turn at or after this one that comes after the turn that started it. */
+  landsAtTurn?: number;
+  /** Jobs that fail instead of landing: for a generation tool, the reason the app reports; for `export`, the failure
+   *  code (api/exportReason.ts). */
+  fail?: {
+    generate_image?: string;
+    generate_video?: string;
+    generate_voiceover?: string;
+    generate_music?: string;
+    export?: string;
+  };
+  /** Speech whose words are made in the background: the first call that needs them (get_transcript, add_captions)
+   *  is told they are not ready and starts the job, and they land like any other job. Those two tools then answer
+   *  from these words. */
+  words?: CaseTranscript;
+}
+
 export interface ClipRef {
   id: string;
   track: string;
@@ -332,6 +352,9 @@ interface ScenarioBase {
   scope?: EditScope;
   /** What is spoken in a source the case places, for the craft checks on cuts and captions. */
   transcript?: CaseTranscript;
+  /** Generations and exports run past the turn that starts them, as in the app, and land when a later user turn begins
+   *  (src/eval/jobs.ts). Studio cases only. Without it the studio stand-ins land everything at once. */
+  jobs?: JobPlan;
   /** A known failure with no fix yet: the backlog item that tracks it, as "owner/repo#N" (for
    *  example "art-daddy/backlog#93"). While the case fails, a report lists it as a known failure,
    *  not a regression; the first run where it passes reports it as fixed, and then this field
