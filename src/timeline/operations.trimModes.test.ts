@@ -347,9 +347,24 @@ describe("slip (move the footage inside a clip that stays put)", () => {
   // the last frame the way a slip into the head stops at the first.
   it.fails("stops at the last frame of the footage, keeping its place and length", () => {
     const t = tl(track("v1", "video", [vid("a", 30, 90, 100)]));
-    slipClip(t, "a", 60, new Map([["a", 200]]));
+    slipClip(t, "a", 50, new Map([["a", 200]]));
     expect(at(t, "a")).toEqual([30, 90]);
     expect(footage(t, "a")).toEqual([140, 200]);
+  });
+
+  // KNOWN BUG (found 2026-11-28 by the testing catch-up; pre-existing). Remove `.fails` once fixed.
+  // A slip by the clip's own length or more is refused outright ("source_out must be after
+  // source_in"), even when the file has all the footage it needs: the new in-point is checked against
+  // the OLD out-point before the window is worked out.
+  it.fails("slips by more than the clip's own length when the file has the footage", () => {
+    const t = tl(track("v1", "video", [vid("a", 30, 90, 100)]));
+    try {
+      slipClip(t, "a", 60, new Map([["a", 300]]));
+    } catch {
+      // the refusal is the bug: the outcome below is what a person expects
+    }
+    expect(at(t, "a")).toEqual([30, 90]);
+    expect(footage(t, "a")).toEqual([160, 220]);
   });
 
   it("refuses a still, which has no footage to slip", () => {

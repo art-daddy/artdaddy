@@ -250,7 +250,8 @@ describe("edges dragged outward never make a clip play past the end of its own f
 
   it("slip", async () => {
     await open(tl(30, track("v1", "video", [vid("a", 0, 60, 30)])), { "a.mp4": 4 });
-    await ed().slipClip("a", 60);
+    await ed().slipClip("a", 50);
+    expect(clipOf("a").source_in).toBe(80); // the footage did move
     lastFrame("a", 120);
   });
 
