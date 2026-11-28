@@ -3,6 +3,7 @@
 // REAL agent loop + REAL model, then scores it (oracle) and mines friction signals
 // from the full trace. See src/eval/README-less note in docs/ARCHITECTURE.md §14.
 import type { Timeline } from "../timeline/model";
+import type { Footage } from "./footage";
 
 /** Marker error for a tool the timeline-only harness didn't execute (the model
  *  reached beyond the timeline surface) — NOT a real tool failure or capability gap. */
@@ -331,6 +332,9 @@ interface ScenarioBase {
   scope?: EditScope;
   /** What is spoken in a source the case places, for the craft checks on cuts and captions. */
   transcript?: CaseTranscript;
+  /** The case's own library of clips with known content (footage.ts), on the "studio" surface: the
+   *  library, look, speech and caption stand-ins answer from it, and the probe knows its files. */
+  footage?: Footage;
   /** A known failure with no fix yet: the backlog item that tracks it, as "owner/repo#N" (for
    *  example "art-daddy/backlog#93"). While the case fails, a report lists it as a known failure,
    *  not a regression; the first run where it passes reports it as fixed, and then this field
