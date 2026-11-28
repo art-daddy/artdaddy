@@ -2403,7 +2403,7 @@ const CASES: Scenario[] = [
     prompt:
       "Can you make the recap video for our meetup page? Between a minute and a half and two minutes. Open on the entrance banner so people know which " +
       "event it is. When Ana gives her welcome speech, put her name on screen in the lower third as 'Ana Ruiz, Organiser'. Include the kids building " +
-      "robots at the workshop, and the guy in the beanie saying why he came: caption what he says. Leave out the blurry shot of the carpet. Finish on the " +
+      "robots at the workshop, and the guy in the beanie saying why he came: caption what he says. Leave out the out-of-focus shot of the carpet. Finish on the " +
       "volunteers waving. Put the theme track from the library under all of it. Landscape, and no black gaps.",
     scope: NEW_PROJECT_SCOPE,
     mustNotCall: ["generate_music"],

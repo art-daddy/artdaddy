@@ -218,7 +218,7 @@ export const TRIP: Footage = {
       T.pocket,
       "IMG_3372.MOV",
       6,
-      "a blurry, shaking view of grass and the toe of a shoe: the phone was recording by accident in a pocket",
+      "an out-of-focus, shaking view of grass and the toe of a shoe: the phone was recording by accident in a pocket",
       {
         sound: "rustling fabric",
       },
