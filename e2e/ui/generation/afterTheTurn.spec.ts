@@ -187,7 +187,10 @@ test.describe("a generation after its turn", () => {
     const id = await qa.openProject("sweep_qa_gen_lost");
     await qa.send("Make an opening picture of a paper boat");
     await expect(gen.allowButton).toBeVisible({ timeout: 15_000 });
-    const ref = await startPicture(gen, id);
+    // The order is ready at once, so on a fast machine the picture can land before its placeholder is
+    // read: wait for the row, whatever state it is in by then.
+    await gen.allowButton.click();
+    const ref = String((await gen.placeholder(id)).id);
     const row = await gen.settled(ref, id);
     expect(row.status).toBeUndefined();
     expect(await gen.fileOf(row)).toEqual(STILL_PNG);
