@@ -243,7 +243,7 @@ export const REGRESSIONS: Scenario[] = [
         "The clip is still playing its footage at normal speed; only its framing changed. A " +
           "talking shot with little movement can look still once it is cropped this tight, and " +
           "the 480p source is already shown 4 times larger than it was filmed. Zooming in further " +
-          "would only make it softer.",
+          "would only enlarge its pixels more; it would not add any movement.",
       ),
       say(
         "I have not zoomed in again: the picture is already magnified 4 times, and more would " +
