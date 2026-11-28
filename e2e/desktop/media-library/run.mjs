@@ -21,12 +21,17 @@
 // when a check failed.
 import { spawnSync } from "node:child_process";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
+  rmSync,
+  statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import path from "node:path";
 
@@ -131,6 +136,26 @@ function colourName([r, g, b]) {
 }
 /** The fixture's colour at `t` seconds: red, green, blue, one second each. */
 const colourAt = (t) => (t < 1 ? "red" : t < 2 ? "green" : t < 3 ? "blue" : "black");
+
+/** A copy of the MP4 `src` at `dst`, made `total` bytes long by a `free` box after it: every MP4 reader skips such a
+ *  box, so the file still plays, but the app reads all of it to identify it. Written in chunks. Returns its size. */
+function withFreeBox(src, dst, total) {
+  copyFileSync(src, dst);
+  const pad = total - statSync(dst).size;
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(pad, 0);
+  head.write("free", 4, "ascii");
+  const fd = openSync(dst, "a");
+  try {
+    writeSync(fd, head);
+    const chunk = Buffer.alloc(64 * 1024 * 1024);
+    for (let left = pad - 8; left > 0; left -= chunk.length)
+      writeSync(fd, chunk, 0, Math.min(chunk.length, left));
+  } finally {
+    closeSync(fd);
+  }
+  return statSync(dst).size;
+}
 
 let shots = 0;
 /** What the stage shows now: the colour of the middle of its canvas, from a screenshot of the page. */
@@ -326,6 +351,70 @@ async function main() {
       JSON.stringify(row),
     );
 
+    // 1b. A large file: the import row counts up while the app reads it, then the tile arrives. The file is the clip
+    // with a 1 GB `free` box after it (a box every MP4 reader skips), so it is large on disk and still plays.
+    console.log("\n▶ a 1 GB file through the Open dialog");
+    const bigDir = path.join(footage, "big");
+    mkdirSync(bigDir, { recursive: true });
+    const big = path.join(bigDir, "long take.mp4");
+    const bigBytes = withFreeBox(path.join(FIXTURES, "rgb_3s.mp4"), big, 1_000_000_000);
+    await d.click('[data-artdaddy-drop="library"] button[aria-label="import media"]');
+    const b0 = performance.now();
+    const bigPicked = nativeDialog(app.pid, [
+      "-Kind",
+      "save",
+      "-Title",
+      "Import media",
+      "-Path",
+      big,
+      "-TimeoutMs",
+      "60000",
+    ]);
+    check("the dialog takes the large file", bigPicked.ok, JSON.stringify(bigPicked));
+    // From the moment the dialog closed: the part of the wait the app owns.
+    const reading = performance.now();
+    const percents = new Set();
+    let rowSeen = false;
+    let bigTile = null;
+    const bigUntil = Date.now() + 300_000;
+    while (!bigTile && Date.now() < bigUntil) {
+      const shown = await d.eval(
+        `[...document.querySelectorAll('[data-testid="import-pct"]')].map((e) => e.dataset.pct)`,
+      );
+      if (shown?.length) rowSeen = true;
+      for (const p of shown ?? []) if (p) percents.add(Number(p));
+      bigTile = await d.eval(
+        `[...document.querySelectorAll('[data-artdaddy-drop="library"] button[title]')].some((b) => b.title === 'long take.mp4')`,
+      );
+      if (!bigTile) await sleep(100);
+    }
+    const readMs = performance.now() - reading;
+    if (bigTile)
+      time(
+        "import: a 1 GB video linked through the Open dialog (dev build)",
+        performance.now() - b0,
+      );
+    check("the large file shows in the library", !!bigTile, `${(bigBytes / 1e9).toFixed(2)} GB`);
+    // A wait a person feels says how far it has got; one over before it is felt needs no row.
+    const counted = [...percents].some((p) => p > 0 && p < 100);
+    const bigSeen = `${rowSeen ? "a row" : "no row"}; ${[...percents].sort((a, b) => a - b).join(", ") || "no percent"}; ${(readMs / 1000).toFixed(1)} s after the dialog`;
+    if (readMs > 3000)
+      check(
+        "a wait of over 3 s shows its import row counting up (0 < n < 100 %)",
+        counted,
+        bigSeen,
+      );
+    else {
+      report.notes = [...(report.notes ?? []), `the 1 GB import took under 3 s (${bigSeen})`];
+      console.log(`  note the 1 GB import took under 3 s (${bigSeen})`);
+    }
+    const bigRow = rows(id).find((r) => r.filename === "long take.mp4");
+    check(
+      "it is linked where it lies, not copied",
+      bigRow?.external === true && Number(bigRow?.size_bytes) === bigBytes,
+      JSON.stringify(bigRow),
+    );
+
     // 2. Real playback: the picture follows the playhead.
     console.log("\n▶ playback");
     const placed = await d.eval(
@@ -432,7 +521,7 @@ async function main() {
       .waitFor("document.body.innerText.includes('Relinked 1 file.')", 20_000)
       .catch(() => false);
     check("the library says Relinked 1 file.", relinked);
-    const [after] = rows(id);
+    const after = rows(id).find((r) => r.filename === "wide.mp4");
     check(
       "the row now names the moved file",
       path.resolve(after?.path ?? ".") === path.resolve(path.join(moved, "wide.mp4")),
@@ -481,6 +570,14 @@ async function main() {
     await page.close();
     report.standIn = backend.seen;
     await backend.close();
+    // The 1 GB file is not evidence: it goes, and the web view's own storage with it.
+    for (const leftover of [path.join(footage, "big"), path.join(runDir, "webview")]) {
+      try {
+        rmSync(leftover, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+      } catch (e) {
+        report.notRemoved = [...(report.notRemoved ?? []), `${leftover}: ${e.message}`];
+      }
+    }
     report.finished = new Date().toISOString();
     writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2));
     console.log(
