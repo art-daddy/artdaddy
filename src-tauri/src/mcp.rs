@@ -930,16 +930,18 @@ mod tests {
 
   #[test]
   fn the_probe_finds_a_copy_of_this_app_another_program_nobody_and_a_holder_that_never_answers() {
-    let ours: &'static str = Box::leak(event_stream_declined().into_boxed_str());
-    assert_eq!(probe_holder(answer_once(ours, false)), Holder::ArtDaddy);
-    assert_eq!(probe_holder(answer_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", false)), Holder::Other);
-    // Accepted but silent: a program that holds the port and says nothing is still another program, and the probe gives up.
-    let started = std::time::Instant::now();
-    assert_eq!(probe_holder(answer_once("", true)), Holder::Other);
-    assert!(started.elapsed() < Duration::from_secs(3), "the probe must not wait on a silent holder");
-    // Nothing listening: a port that was bound a moment ago and let go.
-    let free = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
-    assert_eq!(probe_holder(free), Holder::Nobody);
+    // In a process of its own for the last case, which reads the port at the instant after it was let go (see `alone`).
+    alone("the_probe_finds_a_copy_of_this_app_another_program_nobody_and_a_holder_that_never_answers", || {
+      let ours: &'static str = Box::leak(event_stream_declined().into_boxed_str());
+      assert_eq!(probe_holder(answer_once(ours, false)), Holder::ArtDaddy);
+      assert_eq!(probe_holder(answer_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", false)), Holder::Other);
+      // Accepted but silent: a program that holds the port and says nothing is still another program, and the probe gives up.
+      let started = std::time::Instant::now();
+      assert_eq!(probe_holder(answer_once("", true)), Holder::Other);
+      assert!(started.elapsed() < Duration::from_secs(3), "the probe must not wait on a silent holder");
+      // Nothing listening: a port that was bound a moment ago and let go (`scratch_port` binds it to see that it is free).
+      assert_eq!(probe_holder(scratch_port()), Holder::Nobody);
+    });
   }
 
   const NETSTAT: &str = "
@@ -1009,6 +1011,34 @@ Active Connections
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)).is_ok()
   }
 
+  // The port tests below rely on a socket's state at one instant: once a stop has returned, nothing accepts on the port and a
+  // new bind gets it; a port `scratch_port` has just let go can be listened on. That instant is the test's own only in a
+  // process of its own. A child process holds a copy of every socket of the process that starts it, from the moment it is
+  // created until it starts its program, which closes them (they are all close-on-exec), and the other tests of this binary
+  // start child processes all the time from their own threads. One that was being created just as a stop closed the listener
+  // kept the port accepting for that moment: on Linux CI (28 Nov) a connection made right after the stop got through, one made
+  // a moment later was refused, and nothing was listening. With child processes started beside them on purpose, the same tests
+  // also found the port `scratch_port` had just checked still taken ("address in use"). So each runs again in a process of its
+  // own, this test binary started for that one test, where the only child is the one the test starts. The app has the same
+  // moment when a sidecar is being started as the server stops; starting the server again retries a taken port for up to 10 s
+  // (src/mcp/service.ts), so there it costs one retry at most.
+  const ALONE: &str = "ARTDADDY_MCP_TEST_ALONE";
+
+  fn alone(test: &str, body: impl FnOnce()) {
+    if std::env::var(ALONE).as_deref() == Ok(test) {
+      return body();
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+      .args(["--exact", &format!("mcp::tests::{test}"), "--test-threads=1", "--nocapture"])
+      .env(ALONE, test)
+      .stdin(std::process::Stdio::null())
+      .output()
+      .expect("this test binary to start again");
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    // "1 passed" also catches a name that matches no test, which would run nothing and succeed.
+    assert!(output.status.success() && printed.contains("1 passed"), "{test}, run in a process of its own:\n{printed}");
+  }
+
   // A port for a test to listen on. NOT one the system picks (`bind` on port 0): the moment a test frees it, another test that binds
   // port 0 can be handed the same number, and "nothing answers on it any more" was then read off that other test's listener (seen
   // once on macOS, where these tests share the last second of the run with four others that churn ports). These come from a range
@@ -1042,101 +1072,111 @@ Active Connections
     format!("lsof:\n{listed}\n{connection}")
   }
 
+  // A child that is running its own program, so it keeps nothing of this process but what it inherited, and lives on for half
+  // a minute unless it is killed. It says so on its first line: waited for, not given a fixed time.
   fn long_lived_child() -> std::process::Child {
     #[cfg(windows)]
     let mut command = {
       let mut c = std::process::Command::new("powershell");
-      c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+      c.args(["-NoProfile", "-Command", "Write-Output started; Start-Sleep -Seconds 30"]);
       c
     };
     #[cfg(not(windows))]
     let mut command = {
-      let mut c = std::process::Command::new("sleep");
-      c.arg("30");
+      let mut c = std::process::Command::new("sh");
+      c.args(["-c", "echo started; exec sleep 30"]);
       c
     };
-    command
+    let mut child = command
       .stdin(std::process::Stdio::null())
-      .stdout(std::process::Stdio::null())
+      .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::null())
       .spawn()
-      .expect("a child process to start")
+      .expect("a child process to start");
+    let mut line = String::new();
+    let _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+    assert_eq!(line.trim(), "started", "the child process did not start");
+    child
   }
 
   #[test]
   fn a_stop_frees_the_port_while_a_child_started_beside_the_server_is_still_running() {
-    let port = scratch_port();
-    let running = Arc::new(AtomicBool::new(false));
-    let closed = listen(port, &running, drop).expect("listen");
-    assert!(accepting(port), "the server is up");
+    alone("a_stop_frees_the_port_while_a_child_started_beside_the_server_is_still_running", || {
+      let port = scratch_port();
+      let running = Arc::new(AtomicBool::new(false));
+      let closed = listen(port, &running, drop).expect("listen");
+      assert!(accepting(port), "the server is up");
 
-    let mut child = long_lived_child();
-    std::thread::sleep(Duration::from_millis(300));
-    let stopping = std::time::Instant::now();
-    stop_listening(&running, port, Some(closed));
-    let waited = stopping.elapsed();
+      let mut child = long_lived_child();
+      let stopping = std::time::Instant::now();
+      stop_listening(&running, port, Some(closed));
+      let waited = stopping.elapsed();
 
-    // The rule, from both sides: once a stop has returned nothing accepts on the port and a new bind gets it.
-    let still_accepting = accepting(port);
-    let rebound = TcpListener::bind(("127.0.0.1", port)).is_ok();
-    let who = if still_accepting || !rebound { who_answers(port) } else { String::new() };
-    let _ = child.kill();
-    let _ = child.wait();
-    assert!(
-      !still_accepting,
-      "the port still accepts connections after the stop (it waited {waited:?} for the socket to close; 2 s means it never did): {who}"
-    );
-    assert!(rebound, "a new bind on the port failed after the stop (waited {waited:?}): {who}");
+      // The rule, from both sides: once a stop has returned nothing accepts on the port and a new bind gets it.
+      let still_accepting = accepting(port);
+      let rebound = TcpListener::bind(("127.0.0.1", port)).is_ok();
+      let who = if still_accepting || !rebound { who_answers(port) } else { String::new() };
+      let _ = child.kill();
+      let _ = child.wait();
+      assert!(
+        !still_accepting,
+        "the port still accepts connections after the stop (it waited {waited:?} for the socket to close; 2 s means it never did): {who}"
+      );
+      assert!(rebound, "a new bind on the port failed after the stop (waited {waited:?}): {who}");
+    });
   }
 
   #[test]
   fn a_connection_that_was_open_when_a_child_started_is_not_kept_open_by_it() {
-    let port = scratch_port();
-    let running = Arc::new(AtomicBool::new(false));
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let closed = listen(port, &running, move |mut stream| {
-      let _ = accepted_tx.send(());
-      // Held open until the child exists, then answered and closed: the shape of a request that is in flight when a sidecar starts.
-      let _ = go_rx.recv();
-      let _ = stream.write_all(b"done");
-    })
-    .expect("listen");
-    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the server accepted the connection");
+    alone("a_connection_that_was_open_when_a_child_started_is_not_kept_open_by_it", || {
+      let port = scratch_port();
+      let running = Arc::new(AtomicBool::new(false));
+      let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
+      let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+      let closed = listen(port, &running, move |mut stream| {
+        let _ = accepted_tx.send(());
+        // Held open until the child exists, then answered and closed: the shape of a request that is in flight when a sidecar starts.
+        let _ = go_rx.recv();
+        let _ = stream.write_all(b"done");
+      })
+      .expect("listen");
+      let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+      accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the server accepted the connection");
 
-    let mut child = long_lived_child();
-    std::thread::sleep(Duration::from_millis(300));
-    go_tx.send(()).unwrap();
+      let mut child = long_lived_child();
+      go_tx.send(()).unwrap();
 
-    // The client reads to the end. If the child inherited the connection, the end does not come while the child lives.
-    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let mut seen = Vec::new();
-    let ended = client.read_to_end(&mut seen);
-    let _ = child.kill();
-    let _ = child.wait();
-    stop_listening(&running, port, Some(closed));
-    assert!(ended.is_ok(), "the connection was not closed: the child process kept it open ({ended:?})");
-    assert_eq!(seen, b"done");
+      // The client reads to the end. If the child inherited the connection, the end does not come while the child lives.
+      client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+      let mut seen = Vec::new();
+      let ended = client.read_to_end(&mut seen);
+      let _ = child.kill();
+      let _ = child.wait();
+      stop_listening(&running, port, Some(closed));
+      assert!(ended.is_ok(), "the connection was not closed: the child process kept it open ({ended:?})");
+      assert_eq!(seen, b"done");
+    });
   }
 
   #[test]
   fn switching_off_and_on_again_never_finds_the_port_taken() {
-    let port = scratch_port();
-    let running = Arc::new(AtomicBool::new(false));
-    let mut child = None;
-    for round in 0..15 {
-      let closed = listen(port, &running, drop).unwrap_or_else(|e| panic!("round {round}: the port was taken: {e}"));
-      if round == 3 {
-        // A sidecar starts partway through and lives on across every later round.
-        child = Some(long_lived_child());
+    alone("switching_off_and_on_again_never_finds_the_port_taken", || {
+      let port = scratch_port();
+      let running = Arc::new(AtomicBool::new(false));
+      let mut child = None;
+      for round in 0..15 {
+        let closed = listen(port, &running, drop).unwrap_or_else(|e| panic!("round {round}: the port was taken: {e}"));
+        if round == 3 {
+          // A sidecar starts partway through and lives on across every later round.
+          child = Some(long_lived_child());
+        }
+        stop_listening(&running, port, Some(closed));
       }
-      stop_listening(&running, port, Some(closed));
-    }
-    if let Some(mut child) = child {
-      let _ = child.kill();
-      let _ = child.wait();
-    }
+      if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+      }
+    });
   }
 
   #[test]
@@ -1155,18 +1195,20 @@ Active Connections
   #[test]
   fn the_server_is_up_for_the_first_connection_the_moment_it_starts() {
     // The flag the accept loop reads is already set when its first connection arrives, so that connection is served, not skipped.
-    for _ in 0..20 {
-      let port = scratch_port();
-      let running = Arc::new(AtomicBool::new(false));
-      let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
-      let closed = listen(port, &running, move |_| {
-        let _ = seen_tx.send(());
-      })
-      .expect("listen");
-      let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-      assert!(seen_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the first connection was not served");
-      stop_listening(&running, port, Some(closed));
-    }
+    alone("the_server_is_up_for_the_first_connection_the_moment_it_starts", || {
+      for _ in 0..20 {
+        let port = scratch_port();
+        let running = Arc::new(AtomicBool::new(false));
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
+        let closed = listen(port, &running, move |_| {
+          let _ = seen_tx.send(());
+        })
+        .expect("listen");
+        let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        assert!(seen_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the first connection was not served");
+        stop_listening(&running, port, Some(closed));
+      }
+    });
   }
 
   // The reader of one HTTP request (`read_request`) is the first code a connection reaches, before the Origin check and before

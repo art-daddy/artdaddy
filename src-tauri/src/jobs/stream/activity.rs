@@ -245,6 +245,18 @@ mod tests {
     Some((cpu.parse().ok()?, read.parse().ok()?))
   }
 
+  /// Waits until `done` says yes, looking every 5 ms for at most `limit`; whether it did. A sampler on a busy PC looks
+  /// later than it was told to, never less often per look, so a test counts the looks it needs instead of the time it
+  /// takes to get them (5 looks in half a second at a 30 ms interval failed on a busy macOS runner).
+  fn until(limit: Duration, done: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + limit;
+    while !done() {
+      if Instant::now() >= end { return false; }
+      std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+  }
+
   fn xorshift(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
@@ -336,8 +348,9 @@ mod tests {
         || { let n = counted.fetch_add(1, Ordering::SeqCst); Some(Used { cpu_ms: n, read_bytes: n }) },
         |text| kept.lock().unwrap().push(text)))
     };
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(lines.lock().unwrap().clone(), vec!["artdaddy_cpu=0,0\n".to_owned()], "the first mark is not left waiting for the interval");
+    // The interval is a minute: a first mark that waited for it does not come within half of one.
+    assert!(until(Duration::from_secs(30), || !lines.lock().unwrap().is_empty()), "the first mark is left waiting for the interval");
+    assert_eq!(lines.lock().unwrap().clone(), vec!["artdaddy_cpu=0,0\n".to_owned()], "one mark, and the second look waits for the interval");
     let settled = Instant::now();
     control.settle().unwrap();
     sampler.join().unwrap();
@@ -353,18 +366,31 @@ mod tests {
     let kept = lines.clone();
     let reads = Arc::new(AtomicU64::new(0));
     let counted = reads.clone();
+    let looked = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let when = looked.clone();
+    let interval = Duration::from_millis(30);
     let sampler = {
       let control = control.clone();
-      std::thread::spawn(move || run(&control, Duration::from_millis(30),
-        || { let n = counted.fetch_add(1, Ordering::SeqCst); (n % 2 == 0).then_some(Used { cpu_ms: n * 10, read_bytes: n }) },
+      std::thread::spawn(move || run(&control, interval,
+        || {
+          when.lock().unwrap().push(Instant::now());
+          let n = counted.fetch_add(1, Ordering::SeqCst);
+          (n % 2 == 0).then_some(Used { cpu_ms: n * 10, read_bytes: n })
+        },
         |text| kept.lock().unwrap().push(text)))
     };
-    std::thread::sleep(Duration::from_millis(500));
+    // Six looks take 150 ms at this interval. Ten seconds is far beyond any busy PC, and far short of the 25 s they would
+    // take at the five-second interval the app uses, so a sampler that ignores the interval it is given still fails.
+    let enough = until(Duration::from_secs(10), || reads.load(Ordering::SeqCst) >= 6);
     control.settle().unwrap();
     sampler.join().unwrap();
     let lines = lines.lock().unwrap().clone();
     let reads = reads.load(Ordering::SeqCst);
-    assert!(reads >= 6, "the sampler looked {reads} times in half a second at a 30 ms interval");
+    assert!(enough, "the sampler looked only {reads} times in 10 s at a 30 ms interval");
+    let looked = looked.lock().unwrap().clone();
+    assert_eq!(looked.len() as u64, reads);
+    assert!(looked.windows(2).all(|pair| pair[1] - pair[0] >= interval),
+      "the sampler looked again before its interval had passed: {:?}", looked.windows(2).map(|pair| pair[1] - pair[0]).collect::<Vec<_>>());
     assert_eq!(lines.len() as u64, (reads + 1) / 2, "a failed look printed something, or a good one did not: {lines:?}");
     let numbers = lines.iter().map(|line| parse(line).unwrap_or_else(|| panic!("not a mark: {line:?}"))).collect::<Vec<_>>();
     assert!(numbers.windows(2).all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1), "{numbers:?}");
