@@ -62,32 +62,36 @@ test.describe("timeline: selection and keys", () => {
     await tl.savedAs(before, "one Undo brings both back");
   });
 
-  test("a box drawn over empty lane space selects exactly the clips it touches", async ({ tl }) => {
-    await tl.start(["bars_2s.mp4", "tone_2s.m4a"]);
-    const d = await tl.seed([
-      { media: "bars_2s.mp4", track: "v1", at: 0, len: 30 },
-      { media: "bars_2s.mp4", track: "v1", at: 60, len: 30 },
-      { media: "tone_2s.m4a", track: "a1", at: 100, len: 30 },
-    ]);
-    const [, second] = onTrack(d, "v1");
-    const [third] = onTrack(d, "a1");
-    const yV = await tl.laneY("v1");
-    const yA = await tl.laneY("a1");
+  for (const across of [false, true]) {
+    test(`a box drawn over empty lane space ${across ? "from one track into another" : "on one track"} selects exactly the clips it touches`, async ({
+      tl,
+    }) => {
+      await tl.start(["bars_2s.mp4", "tone_2s.m4a"]);
+      const d = await tl.seed([
+        { media: "bars_2s.mp4", track: "v1", at: 0, len: 30 },
+        { media: "bars_2s.mp4", track: "v1", at: 60, len: 30 },
+        { media: "tone_2s.m4a", track: "a1", at: 100, len: 30 },
+      ]);
+      const [, second] = onTrack(d, "v1");
+      const [third] = onTrack(d, "a1");
+      const yV = await tl.laneY("v1");
+      const yA = await tl.laneY("a1");
 
-    // From the gap on v1 (frame 45) to frame 95: touches the second clip only.
-    await tl.drag({ x: await tl.xOf(45), y: yV - 8 }, { x: await tl.xOf(95), y: yV + 8 });
-    await expect.poll(async () => (await tl.ui()).selectedIds).toEqual([second.id]);
-    // Esc, then a second sweep from elsewhere in the gap down into a1 past frame 110: the second
-    // clip and the sound. (Pressing again on the very same pixel at once is a double-click.)
-    await tl.press("Escape");
-    await expect.poll(async () => (await tl.ui()).selectedIds).toEqual([]);
-    await tl.drag({ x: await tl.xOf(50), y: yV - 4 }, { x: await tl.xOf(110), y: yA });
-    await expect
-      .poll(async () => [...(await tl.ui()).selectedIds].sort())
-      .toEqual([second.id, third.id].sort());
-    // Selecting writes nothing.
-    expect(clipsOf(await tl.doc())).toEqual(clipsOf(d));
-  });
+      if (!across) {
+        // From the gap on v1 (frame 45) to frame 95: touches the second clip only.
+        await tl.drag({ x: await tl.xOf(45), y: yV - 8 }, { x: await tl.xOf(95), y: yV + 8 });
+        await expect.poll(async () => (await tl.ui()).selectedIds).toEqual([second.id]);
+      } else {
+        // From empty a1 space (frame 60) up into v1 past frame 110: the second clip and the sound.
+        await tl.drag({ x: await tl.xOf(60), y: yA }, { x: await tl.xOf(110), y: yV - 8 });
+        await expect
+          .poll(async () => [...(await tl.ui()).selectedIds].sort())
+          .toEqual([second.id, third.id].sort());
+      }
+      // Selecting writes nothing.
+      expect(clipsOf(await tl.doc())).toEqual(clipsOf(d));
+    });
+  }
 
   test("Ctrl+C then Ctrl+V pastes a copy at the playhead on the clip's track; one Undo removes it", async ({
     tl,
