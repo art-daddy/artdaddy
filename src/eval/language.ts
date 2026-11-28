@@ -14,6 +14,7 @@
 //  - Markers, for the languages written in Latin letters: frequent words and the letters that only
 //    some of them use. A reply is in such a language when it carries at least two of its markers,
 //    more than it carries English ones, and no fewer than it carries of any other language here.
+import { kindOf } from "../media/formats";
 
 export const LANGS = ["ru", "uk", "el", "tr", "pl", "id", "es", "pt", "de"] as const;
 export type Lang = (typeof LANGS)[number];
@@ -112,10 +113,7 @@ export function prose(text: string): string {
     .replace(/‘[^’]*’/g, " ")
     .replace(/(?<=^|[\s([{:—–-])'[^'\n]*?'(?=$|[\s.,!?;:)\]}—–-])/gu, " ")
     .replace(/\S*[_\\/]\S*/g, " ")
-    .replace(
-      /\S+\.(?:mp4|mov|m4v|mkv|webm|png|jpe?g|gif|webp|mp3|wav|m4a|aac|ogg|srt|vtt|json|txt)\b/giu,
-      " ",
-    );
+    .replace(/\S+\.[\p{L}\p{N}]+/gu, (name) => (kindOf(name) ? " " : name));
 }
 
 /** How many markers of each Latin-script language, and of English, a stretch of prose carries. */
