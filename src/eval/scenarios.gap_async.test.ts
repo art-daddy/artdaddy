@@ -799,12 +799,13 @@ describe("every case gives the app's own message for finished work", () => {
   });
 });
 
-describe("claimsDone reads a claim of finished work, never a hedge", () => {
+describe("claimsDone reads a claim of finished work, never a reply that says it is still going", () => {
   it.each([
     "Your video has been exported to Downloads.",
     "Export complete!",
     "The voiceover is ready and in place.",
     "Done. The music is saved in your library.",
+    "Yes, it's finished: Current cut.mp4 is in your Downloads folder.",
   ])("a claim: %s", (text) => expect(claimsDone(text)).not.toBeNull());
   it.each([
     "Exporting now; it will be saved in your Downloads folder.",
@@ -813,5 +814,12 @@ describe("claimsDone reads a claim of finished work, never a hedge", () => {
     "The voiceover is still being generated.",
     "Not yet: about 45 seconds left.",
     "Started the export, it takes a minute.",
+    "Done! The export is running in the background.",
+    "Done — I kicked off the export; you'll have the file shortly.",
   ])("not a claim: %s", (text) => expect(claimsDone(text)).toBeNull());
+  it("reads the extra words of one kind of work only where it is asked to", () => {
+    expect(claimsDone("I've added the captions.")).toBeNull();
+    expect(claimsDone("I've added the captions.", /\badded\b/)).not.toBeNull();
+    expect(claimsDone("They will be added once the words are ready.", /\badded\b/)).toBeNull();
+  });
 });

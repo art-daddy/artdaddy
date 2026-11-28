@@ -101,15 +101,18 @@ function startedBefore(t: Trace, tool: string, turn: number): void {
 }
 
 const DONE = /\b(ready|done|finished|complete|completed|exported|rendered|saved|landed)\b/i;
-const HEDGE =
-  /\b(not|no|yet|still|once|when|whenever|until|will|going to|soon|after|being|progress|queued|running|started|starting|underway|generating|rendering|exporting|processing|minute|minutes|moment|seconds|wait|waiting|let you know|tell you)\b|n't\b|'ll\b/i;
+/** Words that tell the person the work is still going, or is still to come. */
+const GOING =
+  /\b(not|yet|still|once|when|whenever|until|will|going to|soon|being|progress|queued|running|started|starting|kicked off|underway|on its way|generating|rendering|exporting|transcribing|processing|minute|minutes|moment|wait|waiting|let you know|tell you)\b|n't\b|'ll\b/i;
 
-/** The sentence of `text` that says work is finished, with nothing in it that says it is still to come; or null. A
- *  pointer to a false claim, not a judge of wording: a hedged or future sentence never counts. `also` adds words that
- *  claim the finished state of one kind of work ("added", for captions). */
+/** The sentence of `text` that says work is finished, in a reply that nowhere says the work is still going; or null. A
+ *  pointer to a false claim, not a judge of wording: a reply that opens "Done!" and then says the export is running has
+ *  told the person the truth. `also` adds words that claim the finished state of one kind of work ("added", for
+ *  captions). */
 export function claimsDone(text: string, also?: RegExp): string | null {
+  if (GOING.test(text)) return null;
   for (const s of text.split(/(?<=[.!?])\s+|\n+/))
-    if ((DONE.test(s) || also?.test(s)) && !HEDGE.test(s)) return s.trim();
+    if (DONE.test(s) || also?.test(s)) return s.trim();
   return null;
 }
 function noClaimInTurn(t: Trace, turn: number, what: string, also?: RegExp): void {
