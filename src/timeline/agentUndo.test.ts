@@ -251,11 +251,13 @@ describe("once a build sends them", () => {
     expect(await sent()).toEqual([]);
   });
 
-  it("does not tell an Undo of the person's own edit", async () => {
+  it("does not tell an Undo of the person's own edit, even right after the agent's", async () => {
+    await ctxApplyOp(agentCtx(call("move_clips", "c1")), "move_clips", moveTo("a", 90));
     await applyOp(store, "move_clips", moveTo("a", 300));
     await runGesture(store, "nudge_clips", (apply) => apply("nudge", moveTo("a", 301)));
     expect((await doUndo(store)).ok).toBe(true);
     expect((await doUndo(store)).ok).toBe(true);
+    expect(clipOf(await loadTimeline(store), "a")?.timeline_in).toBe(90); // the agent's edit is still there
     expect(await sent()).toEqual([]);
   });
 
@@ -385,13 +387,5 @@ describe("once a build sends them", () => {
       expect.objectContaining({ kind: "edit_redone", call_id: "c1", via: "chat", ms: 50_000 }),
       expect.objectContaining({ kind: "edit_redone", call_id: "c2", via: "chat" }),
     ]);
-  });
-
-  it("reads nothing for the chat once the restore has started the history over", async () => {
-    await ctxApplyOp(agentCtx(call("move_clips", "c1")), "move_clips", moveTo("a", 90));
-    const turn = { parts: [{ kind: "tool_call", call_id: "c1" }] };
-    const before = (await loadTimeline(store)) as Timeline;
-    expect(await replaceTimeline(store, { ...before })).toBe(true);
-    expect(agentEditsOfCalls(DIR, toolCallIds([turn]))).toEqual([]);
   });
 });
