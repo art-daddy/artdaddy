@@ -45,6 +45,8 @@ const PRODUCERS: Record<string, { calls: string[]; why: string }> = {
  *  that are named exclusions of the wake. Each says why. */
 const NAMED_EXCLUSIONS: Record<string, string> = {
   "tools/loudness.ts": "loudness measurement, not words: nothing is brought back for it",
+  "eval/jobs.ts":
+    "the evals' stand-in for get_transcript and add_captions, not the app: a case gives the app's own message for the words as its next turn (eval/jobWake.ts)",
 };
 
 describe("every producer of 'the words are not ready' is wired to the wake, or says why not", () => {

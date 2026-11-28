@@ -14,7 +14,6 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
-import { composeModelText } from "../agent/compose";
 import { readStateBlock } from "../agent/stateBlock";
 import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
@@ -29,13 +28,17 @@ import type { ClientToolContext } from "../tools/context";
 import { ClientToolRegistry } from "../tools/registry";
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import { gradeRun } from "./oracle";
+import { stageFaults } from "./faults";
+import { useFootage } from "./footage";
 import { registerJourneyStubs } from "./journey";
+import { registerJobStubs, type JobBoard } from "./jobs";
 import {
   emptyStudioState,
   registerStudioStubs,
   studioRefIsAudio,
   type StudioState,
 } from "./studio";
+import { registerLookStubs } from "./look";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
@@ -43,6 +46,7 @@ import { type Budget, costFromUsage } from "./pricing";
 import { analyzeTrace } from "./signals";
 import type { CampaignSetup } from "./setup";
 import { RecoveryRuntime, recoveryContext, recoveryProjectDir } from "./recovery";
+import { applyOutsideEdit, composeTurn, gradingBaseline, turnContextOf } from "./turns";
 import {
   HARNESS_UNAVAILABLE as HARNESS_MARK,
   type RoundClock,
@@ -249,8 +253,11 @@ export async function driveScenario(
   let finalText = "";
   const turnTexts: string[] = [];
   let recovery: RecoveryRuntime | null = null;
+  let board: JobBoard | null = null;
   let providerError = "";
   let roundLimitReached = false;
+  // The person's Stop (Scenario.stopAfter): set once the turn's calls reach the stop point.
+  let stopPressed = false;
   const usage: Trace["usage"] = {
     inputTokens: 0,
     outputTokens: 0,
@@ -365,9 +372,17 @@ export async function driveScenario(
     // widens that to the WHOLE non-timeline catalog (see studio.ts) — same rule:
     // no network, no paid inference, no ffmpeg.
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
-    else if (scenario.surface === "studio")
+    else if (scenario.surface === "studio") {
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
-    else if (scenario.surface === "recovery") {
+      // A case with its own footage: the library, looks, speech and probe answer from it.
+      if (scenario.footage) useFootage(registry, ctx, scenario.footage);
+      // Generations and exports that run past the turn, landing when a later user turn begins (jobs.ts).
+      if (scenario.jobs)
+        board = registerJobStubs(registry, studio, scenario.jobs, {
+          store,
+          timeline: () => loadTimeline(store),
+        });
+    } else if (scenario.surface === "recovery") {
       recovery = new RecoveryRuntime(scenario.recovery, ctx);
       await recovery.initialize();
       const surfaceResponse = await authedFetch(`${opts.server}/contract/tools`);
@@ -382,6 +397,18 @@ export async function driveScenario(
           "model catalog and executable recovery handlers differ; no paid inference permitted",
         );
     }
+    // The "look" surface: the timeline tools plus the app's free looks and the person's library
+    // (look.ts). The Copilot lane's host registers it the same way.
+    if (scenario.surface === "look")
+      registerLookStubs(
+        registry,
+        scenario,
+        studio,
+        { id: String(projectId), name: EVAL_PROJECT_NAME },
+        () => loadTimeline(store),
+      );
+    // A failure the case stages on purpose (faults.ts), after every stand-in is in place.
+    stageFaults(registry, scenario.faults);
 
     let snapshot: Record<string, unknown> | null = null;
     const send =
@@ -492,6 +519,12 @@ export async function driveScenario(
           startMs,
           ms,
         });
+        if (
+          scenario.stopAfter &&
+          turn === scenario.stopAfter.turn &&
+          toolCalls.filter((c) => c.turn === turn).length >= scenario.stopAfter.calls
+        )
+          stopPressed = true;
         return r;
       },
       emit: (event, data) => {
@@ -504,7 +537,7 @@ export async function driveScenario(
         if (event === "error") providerError = String(data.error ?? "unknown provider error");
       },
       mode: () => mode as "autopilot",
-      stopped: () => opts.budget.exceeded(),
+      stopped: () => opts.budget.exceeded() || stopPressed,
       onUsage: () => {},
       session: () => ({}),
     };
@@ -512,20 +545,19 @@ export async function driveScenario(
     const runner = new ClientTurnRunner(deps);
     // The app reads the project for the model before its first round (store/chat.ts, agent/stateBlock.ts). The
     // flag lets an eval measure that: the same scenarios, with and without it.
-    let firstMessage = scenario.prompt;
-    let stateBlock = false;
-    if (process.env.ARTDADDY_EVAL_PRELOAD === "1" && !recovery) {
-      const block = await readStateBlock({
+    const preload = process.env.ARTDADDY_EVAL_PRELOAD === "1" && !recovery;
+    const readBlock = () =>
+      readStateBlock({
         has: (n: string) => registry.has(n),
         run: async (n, a, o) =>
           registry.run(n, a, o.trace?.context ?? agentEventContext(), o.trace),
       });
-      if (block) {
-        firstMessage = composeModelText(scenario.prompt, [], [], { stateBlock: block });
-        stateBlock = true;
-      }
-    }
-    await runner.start(firstMessage);
+    const firstBlock = preload ? await readBlock() : null;
+    const stateBlock = !!firstBlock;
+    // Each message as the app composes it: the words, plus what came with them (eval/turns.ts).
+    await runner.start(
+      composeTurn(scenario, 0, scenario.prompt, { stateBlock: firstBlock ?? undefined }),
+    );
     turnTexts.push(finalText);
     await recovery?.recordClaim(finalText);
     if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
@@ -542,7 +574,23 @@ export async function driveScenario(
       if (opts.budget.exceeded() || roundLimitReached) break;
       recovery?.releaseQueuedFailure();
       turn += 1;
-      await runner.start(followUp);
+      // After a Stop the app sends the next message with an answer for every call left
+      // unanswered (store/chat.ts carriedDebt); otherwise nothing is owed and this is empty.
+      stopPressed = false;
+      // Work due by this turn lands before any of its calls run, as the app's job lands before its message arrives.
+      await board?.atTurn(turn);
+      // The person changed the timeline by hand before this message: made as the editor makes it,
+      // and the message then says so, or carries a fresh read of the project instead (store/chat.ts).
+      const edit = turnContextOf(scenario, turn)?.editedBefore;
+      if (edit) await applyOutsideEdit(store, edit);
+      const block = edit && preload ? await readBlock() : null;
+      await runner.start(
+        composeTurn(scenario, turn, followUp, {
+          timelineChanged: !!edit,
+          stateBlock: block ?? undefined,
+        }),
+        runner.takeUnsentResults(),
+      );
       turnTexts.push(finalText);
       await recovery?.recordClaim(finalText);
       if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
@@ -575,7 +623,7 @@ export async function driveScenario(
     // budget defaults to 0 and is raised only by a scenario that provokes an error
     // on purpose — see evalTier0. The diff runs from the seed AS LOADED, so nothing the
     // load itself normalises reads as the model's change.
-    const grade = gradeRun(scenario, seeded, final, trace);
+    const grade = gradeRun(scenario, gradingBaseline(scenario, seeded), final, trace);
     trace.diff = grade.diff;
     trace.checks = grade.checks;
     const signals = analyzeTrace(scenario, trace, grade.tier0.violations);

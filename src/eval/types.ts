@@ -3,6 +3,8 @@
 // REAL agent loop + REAL model, then scores it (oracle) and mines friction signals
 // from the full trace. See src/eval/README-less note in docs/ARCHITECTURE.md §14.
 import type { Timeline } from "../timeline/model";
+import type { Mention } from "../timeline/mentions";
+import type { Footage } from "./footage";
 import type { ReferenceStep } from "./reference";
 
 /** Marker error for a tool the timeline-only harness didn't execute (the model
@@ -105,11 +107,57 @@ export interface EditScope {
   deleteMedia?: boolean;
 }
 
+/** A change the person makes by hand in the editor before sending a message: the timeline then
+ *  differs from the one the agent last saw (the app tells it so, agent/compose.ts). */
+export interface OutsideEdit {
+  /** What the person did, in plain words, for a reader of the run. */
+  what: string;
+  /** The edit, made on the live timeline the way the editor commits one (no chat origin). */
+  apply: (timeline: Timeline) => void;
+}
+
+/** What came with one user message besides its words. */
+export interface TurnContext {
+  /** 0 for the prompt, 1.. for each follow-up. */
+  turn: number;
+  /** Files attached to this message in the composer, by their `media_ref` in the case's `footage`.
+   *  The app imports a file before the message goes out, so each one is in the library. A footage
+   *  file with a disk `path` came in LINKED (the desktop attach button, or a drop on the composer:
+   *  the message names it by that full path); one without came in COPIED (a paste: the message
+   *  names it library/<id><ext>). eval/turns.ts builds the message as the app does. */
+  attach?: readonly string[];
+  /** Editor refs the person @mentioned in this message, as the composer builds them
+   *  (timeline/mentions.ts). */
+  mentions?: readonly Mention[];
+  /** A change the person made in the editor after the previous answer and before this message. */
+  editedBefore?: OutsideEdit;
+}
+
 /** The words a case's stand-in says are spoken in one source: [text, start, end) in SOURCE
  *  seconds, the unit of a media_ref. */
 export interface CaseTranscript {
   media_ref: string;
   words: readonly (readonly [string, number, number])[];
+}
+
+/** Background work in a case (src/eval/jobs.ts): when the generations and exports it starts land. */
+export interface JobPlan {
+  /** The first user turn at which a job may land: 0 is the request, 1 the first follow-up (the default). A job lands at
+   *  the first turn at or after this one that comes after the turn that started it. */
+  landsAtTurn?: number;
+  /** Jobs that fail instead of landing: for a generation tool, the reason the app reports; for `export`, the failure
+   *  code (api/exportReason.ts). */
+  fail?: {
+    generate_image?: string;
+    generate_video?: string;
+    generate_voiceover?: string;
+    generate_music?: string;
+    export?: string;
+  };
+  /** Speech whose words are made in the background: the first call that needs them (get_transcript, add_captions)
+   *  is told they are not ready and starts the job, and they land like any other job. Those two tools then answer
+   *  from these words. */
+  words?: CaseTranscript;
 }
 
 export interface ClipRef {
@@ -281,6 +329,27 @@ export interface ScenarioResult {
  *  the first run where it passes says "fixed", so the mark can be removed. */
 export type RunStatus = "pass" | "fail" | "known_failure" | "fixed" | "skipped" | "harness_error";
 
+/** A failure a case stages: the first `times` calls of `tool` in a run do not run, and answer
+ *  `reply(args)` instead, an `{ ok: false, error }` worded exactly as the app words that failure
+ *  (the case cites where). Counted per run from its first call of the tool, whatever the turn, so a
+ *  host that cannot see turns can honour it too: every lane stages it with stageFaults (faults.ts)
+ *  on the registry it builds for the run. */
+export interface ToolFault {
+  tool: string;
+  times: number;
+  reply: (args: Record<string, unknown>) => Record<string, unknown>;
+}
+
+/** Stop pressed in user turn `turn` (0 = the first message) once `calls` tool calls of that turn
+ *  have run: the turn ends before anything else runs, and the next message carries an answer for
+ *  every call the model asked for that never ran (agent/loop.ts takeUnsentResults, sent by
+ *  store/chat.ts with the next message). Only the in-app harness can stop a turn; a case that uses
+ *  this is in-app only. */
+export interface StopPoint {
+  turn: number;
+  calls: number;
+}
+
 /** A single eval scenario. */
 interface ScenarioBase {
   /** Stable id (also the report key). */
@@ -304,7 +373,11 @@ interface ScenarioBase {
    *  The grader runs on the FINAL timeline after all turns. */
   followUps?: string[];
   /** Which tool surface the harness registers. "timeline" (default) is the
-   *  zero-spend timeline-only surface. "journey" additionally registers
+   *  zero-spend timeline-only surface. "look" adds what the app offers beside its
+   *  edit tools that neither bills nor reaches the network: the looks
+   *  (inspect_media, inspect_timeline, inspect_color), the person's library
+   *  (library_op's reads, get_project_state) and import_media (look.ts), for a
+   *  request a careful editor would not do blind. "journey" additionally registers
    *  deterministic stand-ins for import / transcript / export so a multi-step
    *  WORKFLOW can be driven with no network, ffmpeg, or paid calls. "studio"
    *  widens that to the WHOLE non-timeline catalog (research, vision, generation,
@@ -323,20 +396,41 @@ interface ScenarioBase {
    *  it only for a scenario that provokes an error ON PURPOSE (e.g. testing recovery
    *  from a deliberate refusal), which otherwise could never pass. */
   maxToolErrors?: number;
+  /** Failures the case puts in front of the agent on purpose (see ToolFault), so a follow-up can
+   *  ask it to try again. Count each one in `maxToolErrors`. */
+  faults?: readonly ToolFault[];
+  /** The person presses Stop part-way through a turn (see StopPoint); their next message carries
+   *  the answers owed for the calls that never ran, as the app sends them. */
+  stopAfter?: StopPoint;
   /** Paid tools (checks.ts EVAL_PAID_TOOLS) the request asks for or plainly needs. A call to any
    *  other paid tool fails the run: the user did not ask to be billed for it. */
   paidTools?: readonly string[];
   /** Tools this case must not call at all (a cheaper path exists, or the user said not to). */
   mustNotCall?: readonly string[];
+  /** Files the person keeps in the project's library besides those the seed places, by the
+   *  filename that is also the media_ref (a file the request names, such as "intro.mp4"). Read by
+   *  the "look" surface, whose library lists the seed's files and these. */
+  library?: readonly string[];
   /** What the request may change. Declared, anything else changed fails the run. */
   scope?: EditScope;
   /** What is spoken in a source the case places, for the craft checks on cuts and captions. */
   transcript?: CaseTranscript;
+  /** The case's own library of clips with known content (footage.ts), on the "studio" surface: the
+   *  library, look, speech and caption stand-ins answer from it, and the probe knows its files. */
+  footage?: Footage;
+  /** Generations and exports run past the turn that starts them, as in the app, and land when a later user turn begins
+   *  (src/eval/jobs.ts). Studio cases only. Without it the studio stand-ins land everything at once. */
+  jobs?: JobPlan;
   /** A known failure with no fix yet: the backlog item that tracks it, as "owner/repo#N" (for
    *  example "art-daddy/backlog#93"). While the case fails, a report lists it as a known failure,
    *  not a regression; the first run where it passes reports it as fixed, and then this field
    *  is removed. How real users' failed turns enter the set before their fix lands. */
   knownFailure?: string;
+  /** What came with each user message besides its words: attached files, @mentions, and a change
+   *  the person made in the editor before sending it. The harness builds each message the way the
+   *  app does (eval/turns.ts), so a runner that sends a case's messages itself must use the same
+   *  functions. Absent, every message is its words alone. */
+  turnContext?: readonly TurnContext[];
   /** The case's correct run: the calls a careful editor would make, one step per model round,
    *  across every turn including `followUps` (a text step is the reply that ends a turn).
    *  scenarios.reference.test.ts replays it through the real harness with no model and requires
@@ -353,6 +447,6 @@ interface ScenarioBase {
 
 export type Scenario = ScenarioBase &
   (
-    | { surface?: "timeline" | "journey" | "studio"; recovery?: never }
+    | { surface?: "timeline" | "look" | "journey" | "studio"; recovery?: never }
     | { surface: "recovery"; recovery: RecoveryCase }
   );
