@@ -450,7 +450,6 @@ const RUSSIAN: Scenario[] = [
       "заканчиваться вместе с видео, а в конце сделай плавное затемнение.",
     expectTools: ["ripple_delete", "set_clip_properties"],
     maxRounds: 14,
-    // Which shots and how they are cut is taste; the length, the music and the fade were asked for.
     reference: [
       {
         calls: [
@@ -476,6 +475,7 @@ const RUSSIAN: Scenario[] = [
           "концу видео, а в конце плавное затемнение.",
       },
     ],
+    // Which shots and how they are cut is taste; the length, the music and the fade were asked for.
     expect: (tl) => {
       const end = pictureEnd(tl);
       near(end, 300, 6, "the video's length in frames (10 s)");
