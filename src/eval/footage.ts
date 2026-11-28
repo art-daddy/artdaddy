@@ -20,7 +20,7 @@
 import { CAPTION_DEFAULT_POSITION } from "../tools/captions";
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
-import { mediaLookTimes } from "../tools/inspect";
+import { mediaLookTimes, planTimelineLook, visibleClips } from "../tools/inspect";
 import { GRID_NOTE } from "../tools/inspectOverlay";
 import type { ClientToolRegistry } from "../tools/registry";
 import { isUnsafeAgentRef } from "../tools/store";
@@ -35,7 +35,7 @@ import {
   resolveTextTrack,
 } from "../timeline/helpers";
 import type { Clip, Timeline } from "../timeline/model";
-import { lineWidthIn, planCanvas, textBox } from "../timeline/renderPlan";
+import { lineWidthIn, planCanvas, resolveRenderPlan, textBox } from "../timeline/renderPlan";
 
 /** What the pictures show over [from, to) SOURCE seconds, in words. */
 export interface FootageShot {
@@ -559,10 +559,19 @@ export function useFootage(
     const span = windowOf(c, clip, fps, a);
     const at = unitOf(clip, fps);
     const timing = clip ? "project_frames" : "source_seconds";
-    const say = (t: number): string => {
-      const u = at(t);
-      const when = u && "frame" in u ? `frame ${u.frame}` : `${round3(t)} s`;
-      return `at ${when}, ${footageShotAt(c, t)}`;
+    /** What the pictures show at `times`: each shot once, with the times that show it. */
+    const say = (times: readonly number[]): string => {
+      const groups: { shows: string; at: string[] }[] = [];
+      for (const t of times) {
+        const u = at(t);
+        if (!u) continue;
+        const when = "frame" in u ? `frame ${u.frame}` : `${round3(t)} s`;
+        const shows = footageShotAt(c, t);
+        const last = groups[groups.length - 1];
+        if (last && last.shows === shows) last.at.push(when);
+        else groups.push({ shows, at: [when] });
+      }
+      return groups.map((g) => `at ${g.at.join(", ")}, ${g.shows}`).join("; ");
     };
     const base: Result = {
       ok: true,
@@ -588,7 +597,7 @@ export function useFootage(
           ? { tile_frames: units.map((u) => ("frame" in u ? u.frame : null)) }
           : { tile_times: units.map((u) => ("t" in u ? u.t : null)) },
         frames_attached: 0,
-        note: `(eval) the storyboard was not attached in this harness; what its tiles show: ${tiles.map(say).join("; ")}`,
+        note: `(eval) the storyboard was not attached in this harness; what its tiles show: ${say(tiles)}`,
       };
     }
     const times = mediaLookTimes(span[0], span[1], a.max_frames);
@@ -599,7 +608,63 @@ export function useFootage(
       sharpness: 182.4,
       noise_sigma: 1.1,
       frames_attached: 0,
-      note: `(eval) frames were not attached in this harness; what the pictures show: ${times.map(say).join("; ")}`,
+      note: `(eval) frames were not attached in this harness; what the pictures show: ${say(times)}`,
+    };
+  });
+
+  // inspect_timeline as the studio stand-in answers it (the real frame plan, no pixels), and in words
+  // what each frame shows: the top picture's shot at that moment of its source, and any text over it.
+  registry.register("inspect_timeline", async (args) => {
+    const a = (args ?? {}) as Args;
+    const raw = await timeline();
+    const planned = planTimelineLook(raw, a);
+    if (!planned.ok) return planned.result;
+    const look = resolveRenderPlan(planned.seconds);
+    const fps = planned.fps;
+    const shows = (f: number, ids: string[]): string => {
+      const parts: string[] = [];
+      for (const id of ids) {
+        const clip = findClip(raw, id)?.[1];
+        if (!clip) continue;
+        if (clip.kind === "text") {
+          const words =
+            typeof clip.content === "string"
+              ? clip.content
+              : Array.isArray(clip.content)
+                ? clip.content.map((r) => r.text).join(" ")
+                : String(clip.text ?? "");
+          parts.push(`the text "${words}"`);
+          continue;
+        }
+        const c = footageClip(footage, clip.media_ref);
+        if (!c || parts.some((p) => !p.startsWith("the text"))) continue;
+        const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
+        const t =
+          ((Number(clip.source_in) || 0) + (f - (Number(clip.timeline_in) || 0)) * speed) / fps;
+        parts.push(footageShotAt(c, t));
+      }
+      return parts.length ? parts.join(", with ") : "black: nothing is on screen";
+    };
+    const frames = planned.nums.map((f) => {
+      const ids = visibleClips(look, f, fps);
+      return {
+        frame: f,
+        time_s: round3(f / fps),
+        ok: true,
+        visible_clips: ids,
+        shows: shows(f, ids),
+      };
+    });
+    return {
+      ok: true,
+      canvas: raw.canvas,
+      duration_frames: planned.total,
+      frame_numbers: planned.nums,
+      ...(planned.outOfRange.length ? { out_of_range: planned.outOfRange } : {}),
+      coordinate_grid: GRID_NOTE,
+      frames_attached: 0,
+      frames,
+      note: `(eval) frames were not attached in this harness; what the frames show: ${frames.map((x) => `at frame ${x.frame}, ${x.shows}`).join("; ")}`,
     };
   });
 
