@@ -27,6 +27,7 @@ import {
 import type { Scenario, Trace } from "../types";
 import { timelineLookFrames } from "../../tools/inspect";
 import { aclip, allClips, atrack, clipsOf, timeline, vclip, vtrack } from "./helpers";
+import { call, calls, READ_TIMELINE, repliesTo, say } from "./steps";
 
 const FPS = 30;
 
@@ -119,6 +120,11 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (Number(other?.z ?? 0) <= Number(base?.z ?? 0))
         throw new Error("the new track is not above the existing footage");
     },
+    reference: [
+      READ_TIMELINE,
+      call("add_track", { kind: "video", z: 1 }),
+      say("Added an empty video track above the shot, ready for your logo."),
+    ],
   },
   {
     id: "redo_after_undo",
@@ -137,6 +143,15 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (Math.abs(span - 4 * FPS) > 6)
         throw new Error(`redo did not restore the 4s trim (span ${span}f)`);
     },
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], duration: 120 }),
+      say("Cut it down to 4 seconds."),
+      call("undo"),
+      say("Undone: it is back to its full 10 seconds."),
+      call("redo"),
+      say("Put it back: the clip is 4 seconds again."),
+    ],
   },
 
   // ── inspection: look before you edit ──────────────────────────────────────
@@ -153,17 +168,30 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expect: (final) => {
       const c = clipsOf(final, "v1")[0];
       const color = (c?.color ?? {}) as Record<string, unknown>;
-      const effects = (c?.effects ?? []) as Record<string, unknown>[];
-      const hasGrade = Object.keys(color).length > 0 || effects.length > 0;
-      if (!hasGrade) throw new Error("measured the shot but never graded it");
-      // The stub reports warm_cool -0.13 and saturation 0.11 — a fix must push
-      // temperature warm or saturation up, not just author an inert block.
-      const temp = Number(color.temperature ?? color.temp ?? 0);
-      const sat = Number(color.saturation ?? 0);
-      if (temp <= 0 && sat <= 0 && effects.length === 0)
-        throw new Error(`grade does not warm or saturate (temp ${temp}, sat ${sat})`);
+      if (Object.keys(color).length === 0) throw new Error("measured the shot but never graded it");
+      // The stub reports a cold (warm_cool -0.13), flat (saturation 0.11) shot. apply_color's
+      // temperature is in kelvin with 6500 K neutral (higher is warmer), and its saturation a
+      // multiplier with 1 neutral. So the fix sets the temperature above 6500 K, and drains no
+      // colour. Compared with 0, any grade passed, a colder one included.
+      const temp = Number(color.temperature ?? 6500);
+      const sat = Number(color.saturation ?? 1);
+      const vib = Number(color.vibrance ?? 0);
+      const values = `temperature ${temp} K, saturation ${sat}, vibrance ${vib}`;
+      if (!(temp > 6500))
+        throw new Error(`the grade does not warm the cold shot (${values}; 6500 K is neutral)`);
+      if (sat < 1 || vib < 0)
+        throw new Error(`the grade drains colour from the flat shot (${values})`);
     },
     expectTrace: (t) => mustCall(t, "inspect_color"),
+    reference: [
+      call("inspect_color", { clip_id: "a" }),
+      // The scopes: a cool cast (warm_cool -0.13) and almost no colour (saturation 0.11).
+      call("apply_color", { clip_ids: ["a"], temperature: 7400, saturation: 1.3, contrast: 1.1 }),
+      say(
+        "Measured it: the shot has a cool blue cast and very little colour. I warmed the white " +
+          "balance to 7400 K, lifted saturation by 30% and added a little contrast.",
+      ),
+    ],
   },
   {
     id: "inspect_timeline_check",
@@ -194,6 +222,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!seen.some((f) => Math.abs(f - 60) <= 2))
         throw new Error(`inspected the wrong frame: ${JSON.stringify(call.args)} looks at ${seen}`);
     },
+    reference: [
+      call("inspect_timeline", { start_frame: 60 }),
+      say(
+        "At the 2-second mark (frame 60) the logo is on screen, layered on top of the shot. The " +
+          "picture itself did not come through to me here, so I cannot see what the logo sits " +
+          "over; I have not changed anything.",
+      ),
+    ],
   },
   {
     id: "inspect_media_before_place",
@@ -224,6 +260,16 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     },
     // "Have a look": a cut without one (say, the first two seconds) only fits the footage by luck.
     expectTrace: (t) => mustLook(t),
+    reference: [
+      call("inspect_media", { clip_id: "a" }),
+      // The look: the pad sits still until 3 s, when the vehicle rises. Keep a beat before it.
+      call("ripple_delete", { track_id: "v1", ranges: [{ start: 0, end: 75 }] }),
+      say(
+        "It's a rocket launch: a still wide shot of the pad, then the vehicle rises at 3 s and " +
+          "clears the tower. I cut the first 2.5 seconds of the motionless pad, so it now opens " +
+          "half a second before liftoff.",
+      ),
+    ],
   },
 
   // ── media in: find it, fetch it, place it ─────────────────────────────────
@@ -243,6 +289,27 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (Number(hit.timeline_in) < 300 - 2)
         throw new Error(`placed at ${hit.timeline_in}f, not after the existing shot (300f)`);
     },
+    reference: [
+      READ_TIMELINE,
+      call("download_video", { url: STUDIO_URL, output_name: "launch" }),
+      {
+        calls: (req) => [
+          [
+            "add_clips",
+            {
+              entries: [
+                {
+                  media_ref: repliesTo(req, "download_video")[0]?.media_ref,
+                  track_id: "v1",
+                  timeline_in: 300,
+                },
+              ],
+            },
+          ],
+        ],
+      },
+      say("Downloaded the video and placed it right after your shot, at 10 seconds."),
+    ],
   },
   {
     id: "search_then_fetch",
@@ -279,7 +346,21 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     mustNotCall: ["download_video"],
     maxRounds: 6,
     expect: untouched(oneClip),
-    expectTrace: (t) => mustCall(t, "video_get_metadata"),
+    expectTrace: (t) => {
+      mustCall(t, "video_get_metadata");
+      // The answer is the one the read gave: 754 s (12:34), in the stand-in's three chapters.
+      if (!/12:34|754|(12|twelve)\s*min/i.test(t.finalText))
+        throw new Error("the answer does not give the length the read reported (12:34)");
+      if (!/countdown|liftoff|booster/i.test(t.finalText))
+        throw new Error("the answer does not name the chapters the read reported");
+    },
+    reference: [
+      call("video_get_metadata", { url: STUDIO_URL }),
+      say(
+        "It runs 12 minutes 34 seconds. Chapters: Countdown (0:00 to 2:00), Liftoff (2:00 to " +
+          "5:00) and Booster return (5:00 to the end). I have not brought it in.",
+      ),
+    ],
   },
   {
     id: "probe_before_trusting",
@@ -301,6 +382,10 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!/1080|1920|full ?hd/i.test(t.finalText))
         throw new Error(`the answer does not give the size the read reported (1920x1080)`);
     },
+    reference: [
+      call("inspect_media", { clip_id: "a" }),
+      say("It is not 4K: the source is 1920x1080 (Full HD), and it is used at that size."),
+    ],
   },
   // ── vision: look at it, then act on what you saw ──────────────────────────
   {
@@ -334,6 +419,18 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     },
     // Any look will do; a cut made without one only holds the moment by luck.
     expectTrace: (t) => mustLook(t),
+    reference: [
+      call("inspect_media", { clip_id: "a" }),
+      // The look: the vehicle rises at 3 s and clears the tower by 5 s.
+      call("ripple_delete", {
+        track_id: "v1",
+        ranges: [
+          { start: 0, end: 90 },
+          { start: 150, end: 300 },
+        ],
+      }),
+      say("Cut the shot down to the two seconds where the rocket rises and clears the tower."),
+    ],
   },
   {
     id: "video_ask_question",
@@ -364,6 +461,13 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       )
         throw new Error("the answer says there is music; the look heard none");
     },
+    reference: [
+      call("video_ask", {
+        clip_id: "a",
+        prompt: "Is there music under this shot, or only the sound of the launch itself?",
+      }),
+      say("There is no music: the only sound is the roar of the engines. I changed nothing."),
+    ],
   },
   {
     id: "compare_two_images",
@@ -427,6 +531,20 @@ export const STUDIO_SCENARIOS: Scenario[] = [
         if (Math.abs(Number(box[k]) - v) > 2)
           throw new Error(`crop ${k}=${String(box[k])}, the box the user gave has ${k}=${v}`);
     },
+    reference: [
+      // x 120 to 360 and y 80 to 240 is a 240 x 160 box at (120, 80).
+      call("crop_image", { media_ref: "logo.png", bbox: { x: 120, y: 80, w: 240, h: 160 } }),
+      // Swapping the clip's source keeps its place and length (set_clip_properties media_ref).
+      {
+        calls: (req) => [
+          [
+            "set_clip_properties",
+            { clip_ids: ["logo"], media_ref: repliesTo(req, "crop_image")[0]?.media_ref },
+          ],
+        ],
+      },
+      say("Cropped the logo to the wordmark box and swapped the crop in where the full logo was."),
+    ],
   },
   {
     id: "research_then_caption",
@@ -451,6 +569,16 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       // means the model read the page and then made something up.
       if (!/09:?40/.test(body)) throw new Error(`caption does not carry the fact: "${body}"`);
     },
+    reference: [
+      call("web_search", { query: "launch window opens", site: "example.com" }),
+      call("add_text_clips", {
+        entries: [{ timeline_in: 0, timeline_out: 60, content: "Launch window opens 09:40 UTC" }],
+      }),
+      say(
+        "The page says the launch window opens at 09:40 UTC; that is on screen as a caption " +
+          "for the first two seconds.",
+      ),
+    ],
   },
   {
     id: "web_search_answer",
@@ -466,7 +594,16 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     paidTools: ["web_search"],
     maxRounds: 8,
     expect: untouched(oneClip),
-    expectTrace: (t) => mustCall(t, "web_search"),
+    expectTrace: (t) => {
+      mustCall(t, "web_search");
+      // The answer is the time the search found (STUDIO_PAGE_TEXT), not one made up.
+      if (!/\b0?9[:.h]?40\b/i.test(t.finalText))
+        throw new Error("the answer does not give the time the search found (09:40 UTC)");
+    },
+    reference: [
+      call("web_search", { query: "launch window opens", site: "example.com" }),
+      say("According to example.com, the launch window opens at 09:40 UTC. I left the edit alone."),
+    ],
   },
   {
     id: "screenshot_page_and_place",
@@ -484,6 +621,24 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (Math.abs(span - 2 * FPS) > 8)
         throw new Error(`screenshot shows for ${span}f, asked for ${2 * FPS}f`);
     },
+    reference: [
+      call("get_page_image", { url: STUDIO_URL }),
+      {
+        calls: (req) => [
+          [
+            "insert_clips",
+            {
+              at: 0,
+              track_id: "v1",
+              entries: [
+                { media_ref: repliesTo(req, "get_page_image")[0]?.media_ref, duration: 2 * FPS },
+              ],
+            },
+          ],
+        ],
+      },
+      say("Took a picture of the page and opened the video with it for two seconds."),
+    ],
   },
 
   // ── generation: make what's missing, then USE it ──────────────────────────
@@ -510,6 +665,31 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       const span = Number(hit.timeline_out) - Number(hit.timeline_in);
       if (span <= 0) throw new Error("the title card has no duration");
     },
+    reference: [
+      say("Generating an image uses your credits. Shall I go ahead and make the title card?"),
+      call("generate_image", {
+        prompt: "A title card: a warm sunset over a rocket launch pad, room for a title",
+        aspect_ratio: "9:16",
+      }),
+      {
+        calls: (req) => {
+          const assets = (repliesTo(req, "generate_image")[0]?.assets ?? []) as {
+            media_ref: string;
+          }[];
+          return [
+            [
+              "insert_clips",
+              {
+                at: 0,
+                track_id: "v1",
+                entries: [{ media_ref: assets[0]?.media_ref, duration: 3 * FPS }],
+              },
+            ],
+          ];
+        },
+      },
+      say("Made the sunset title card and put it at the front, for three seconds before the shot."),
+    ],
   },
   {
     id: "generate_video_broll",
@@ -533,6 +713,30 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!others.some((c) => Number(c.timeline_in) >= Number(hit.timeline_out) - 2))
         throw new Error("nothing sits after the generated shot");
     },
+    reference: [
+      READ_TIMELINE,
+      say("Generating a video uses your credits. Shall I go ahead and make the clouds shot?"),
+      call("generate_video", {
+        prompt: "Clouds racing across the sky, fast time-lapse",
+        duration: 4,
+        aspect_ratio: "9:16",
+      }),
+      {
+        calls: (req) => [
+          [
+            "insert_clips",
+            {
+              at: 150,
+              track_id: "v1",
+              entries: [
+                { media_ref: repliesTo(req, "generate_video")[0]?.media_ref, duration: 4 * FPS },
+              ],
+            },
+          ],
+        ],
+      },
+      say("Made a 4-second shot of fast clouds and dropped it in between your two clips."),
+    ],
   },
   {
     id: "generate_voiceover_and_place",
@@ -567,6 +771,26 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       const kind = trackKindOf(final, String(hit.id));
       if (kind !== "audio") throw new Error(`music landed on a ${kind} track`);
     },
+    reference: [
+      READ_TIMELINE,
+      call("generate_music", { prompt: "calm, gentle ambient bed", instrumental: true }),
+      // Its length is not known until it is made, so it goes in at its own length.
+      {
+        calls: (req) => [
+          [
+            "add_clips",
+            {
+              entries: [
+                { media_ref: repliesTo(req, "generate_music")[0]?.media_ref, timeline_in: 0 },
+              ],
+            },
+          ],
+        ],
+      },
+      say(
+        "Made a calm instrumental bed and laid it under the video from the start, on its own audio track.",
+      ),
+    ],
   },
   {
     id: "list_models_before_generating",
@@ -581,7 +805,21 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expect: untouched(oneClip),
     // Asking about capability must not burn a generation call: no paid tool is allowed here, so
     // the oracle's paid-tool check fails any of them (it used to name generate_video alone).
-    expectTrace: (t) => mustCall(t, "list_models"),
+    expectTrace: (t) => {
+      mustCall(t, "list_models");
+      // The answer is the list's: Veo, whose clips run up to 8 seconds.
+      if (!/veo/i.test(t.finalText) || !/\b(8|eight)\b/i.test(t.finalText))
+        throw new Error(
+          "the answer does not give the model and the clip lengths list_models reported",
+        );
+    },
+    reference: [
+      call("list_models", { type: "video" }),
+      say(
+        "Video is made with Veo. Each clip can be 4, 6 or 8 seconds long, at 720p or 1080p, in " +
+          "16:9 or 9:16.",
+      ),
+    ],
   },
   // ── project lifecycle ────────────────────────────────────────────────────
   {
@@ -601,6 +839,10 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!/summer reel/i.test(JSON.stringify(hit.args)))
         throw new Error(`renamed to the wrong thing: ${JSON.stringify(hit.args)}`);
     },
+    reference: [
+      call("rename_project", { name: "Summer Reel" }),
+      say("The project is now called 'Summer Reel'."),
+    ],
   },
   {
     id: "project_new_for_side_idea",
@@ -618,6 +860,13 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (!/teaser/i.test(raw)) throw new Error(`wrong name: ${raw}`);
       if (!/\b24\b/.test(raw)) throw new Error(`fps 24 was not carried through: ${raw}`);
     },
+    reference: [
+      call("new_project", { name: "Teaser", aspect_ratio: "9:16", fps: 24 }),
+      say(
+        "Created a separate project called 'Teaser', vertical (9:16) at 24 fps. It is in your " +
+          "project list; this project stays open.",
+      ),
+    ],
   },
   {
     id: "project_duplicate_before_risk",
@@ -631,6 +880,10 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     maxRounds: 8,
     expect: untouched(oneClip),
     expectTrace: (t) => mustCall(t, "duplicate_project"),
+    reference: [
+      call("duplicate_project", { name: "backup" }),
+      say("Made a copy of this project called 'backup'; we are still working in the original."),
+    ],
   },
   {
     id: "project_list_and_open",
@@ -663,17 +916,20 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expect: untouched(oneClip),
     expectTrace: (t) => {
       const read = called(t, "get_project_state").length + called(t, "get_timeline").length;
-      if (read === 0) {
-        // The app can hand the model the project with its message. Then the model has read it without a call,
-        // and the answer itself must show it: the project's real canvas and frame rate, not a guess.
-        if (!t.stateBlock) throw new Error("answered without reading the project");
-        const { width, height, fps } = oneClip().canvas;
-        for (const value of [width, height, fps]) {
-          if (!t.finalText.includes(String(value)))
-            throw new Error(`answered without the project's real canvas and frame rate (${value})`);
-        }
+      // The app can hand the model the project with its message; then it has read it without a call.
+      if (read === 0 && !t.stateBlock) throw new Error("answered without reading the project");
+      // Either way the answer is the project's real canvas and frame rate, not a guess: a read
+      // followed by a wrong answer used to pass.
+      const { width, height, fps } = oneClip().canvas;
+      for (const value of [width, height, fps]) {
+        if (!t.finalText.includes(String(value)))
+          throw new Error(`answered without the project's real canvas and frame rate (${value})`);
       }
     },
+    reference: [
+      call("get_project_state"),
+      say("The canvas is 1080 by 1920 (vertical, 9:16) and the frame rate is 30 fps."),
+    ],
   },
   {
     id: "project_pack_for_handoff",
@@ -686,6 +942,13 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expectTools: ["pack_project"],
     maxRounds: 8,
     expectTrace: (t) => mustCall(t, "pack_project"),
+    reference: [
+      call("pack_project"),
+      say(
+        "Bundled the whole project, media included, into current-cut.artdaddy.zip in your " +
+          "Downloads folder. Send that file to your editor.",
+      ),
+    ],
   },
 
   // ── library ──────────────────────────────────────────────────────────────
@@ -722,6 +985,14 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (Number(hit.timeline_in) < 300 - 2)
         throw new Error(`placed at ${hit.timeline_in}f, not on the end`);
     },
+    reference: [
+      READ_TIMELINE,
+      call("library_op", { action: "list" }),
+      call("add_clips", {
+        entries: [{ media_ref: "media_broll_ocean", track_id: "v1", timeline_in: 300 }],
+      }),
+      say("Found ocean.mp4 in your b-roll folder and put it on the end, after your shot."),
+    ],
   },
 
   // ── escape hatch: the tool it should NOT reach for ───────────────────────
@@ -747,5 +1018,13 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       const vol = Number((m as Record<string, unknown>)?.volume ?? 1);
       if (vol < 0.2 || vol > 0.45) throw new Error(`music volume ${vol}, expected ≈0.33`);
     },
+    reference: [
+      READ_TIMELINE,
+      calls(
+        ["set_clip_properties", { clip_ids: ["a"], speed: 2 }],
+        ["set_clip_properties", { clip_ids: ["m"], volume: 0.33 }],
+      ),
+      say("The video plays at double speed, and the music is down to about a third."),
+    ],
   },
 ];

@@ -205,7 +205,7 @@ describe("harm fails a run through the harness", () => {
     const { result } = await drive(byId("list_models_before_generating"), [
       { calls: [["list_models", {}]] },
       { calls: [["generate_video", { prompt: "a rocket", model: "veo" }]] },
-      { text: "Here is a sample." },
+      { text: "Veo makes clips of 4, 6 or 8 seconds; here is a sample." },
     ]);
     expect(result.tier1.passed).toBe(true);
     expect(result.passed).toBe(false);
@@ -414,6 +414,32 @@ describe("the look cases are graded on the outcome, not the route", () => {
       expect(
         (await grade(id, [askAbout("Is there music?", { visual_only: true })], right)).why.join(),
       ).toMatch(/without a look that hears the shot/);
+    });
+  });
+
+  // apply_color's temperature is in kelvin, 6500 K neutral: the check that compared it with 0
+  // passed a grade that made the cold shot colder.
+  describe("inspect_color_then_warm: warmer than neutral, in kelvin", () => {
+    const id = "inspect_color_then_warm";
+    const measure: Step = { calls: [["inspect_color", { clip_id: "a" }]] };
+    const graded = (color: Record<string, unknown>): Step => ({
+      calls: [["apply_color", { clip_ids: ["a"], ...color }]],
+    });
+
+    it("passes the measured shot warmed above 6500 K", async () => {
+      expect(await grade(id, [measure, graded({ temperature: 7400, saturation: 1.2 })])).toEqual({
+        passed: true,
+        why: [],
+      });
+    });
+
+    it("fails a run that cools the shot, and one that adds colour but leaves it cold", async () => {
+      const cooled = await grade(id, [measure, graded({ temperature: 5000, saturation: 1.3 })]);
+      expect(cooled.passed).toBe(false);
+      expect(cooled.why.join()).toMatch(/does not warm the cold shot/);
+      const saturatedOnly = await grade(id, [measure, graded({ saturation: 1.3 })]);
+      expect(saturatedOnly.passed).toBe(false);
+      expect(saturatedOnly.why.join()).toMatch(/does not warm the cold shot/);
     });
   });
 });

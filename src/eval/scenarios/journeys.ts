@@ -18,6 +18,7 @@ import {
 } from "../journey";
 import type { Scenario, ToolCall, Trace } from "../types";
 import { timeline, vclip, vtrack } from "./helpers";
+import { call, calls, repliesTo, say } from "./steps";
 
 const FPS = 30;
 const NARRATION_END = 300; // the seeded clip runs 0..300; the last word starts at 205
@@ -137,6 +138,60 @@ export const JOURNEYS: Scenario[] = [
           `outro.mp4 plays first (frame ${b}, intro.mp4 at ${a}); asked for intro then outro`,
         );
     },
+    reference: [
+      // The frame rate (from the read) turns the imports' lengths into positions.
+      calls(
+        ["get_timeline", {}],
+        ["import_media", { source: { path: "C:/media/intro.mp4" }, name: "intro" }],
+        ["import_media", { source: { path: "C:/media/outro.mp4" }, name: "outro" }],
+      ),
+      {
+        calls: (req) => {
+          const fps = Number(
+            (repliesTo(req, "get_timeline")[0]?.timeline as { canvas?: { fps?: number } })?.canvas
+              ?.fps ?? FPS,
+          );
+          const [intro, outro] = repliesTo(req, "import_media");
+          const second = Math.round(Number(intro.duration_s) * fps);
+          return [
+            [
+              "add_clips",
+              {
+                entries: [
+                  { media_ref: intro.media_ref, timeline_in: 0 },
+                  { media_ref: outro.media_ref, timeline_in: second },
+                ],
+              },
+            ],
+          ];
+        },
+      },
+      // The crossfade goes on the clip that comes in second, whose id add_clips minted.
+      {
+        calls: (req) => {
+          const created = repliesTo(req, "add_clips").flatMap(
+            (r) => (r.created ?? []) as { clip_id: string; kind?: string }[],
+          );
+          const incoming = created.filter((c) => c.kind !== "audio")[1];
+          return [
+            [
+              "set_transition",
+              {
+                clip_id: incoming?.clip_id,
+                transition_in: { kind: "crossfade", duration: 15 },
+              },
+            ],
+          ];
+        },
+      },
+      call("export", {}),
+      say(
+        "Imported both files, put intro.mp4 then outro.mp4 back to back with a half-second " +
+          "crossfade, and started the export. It goes to your Downloads folder under the " +
+          "project's name: the export can only take a file name together with a full folder " +
+          "path, so tell me the folder if it must be saved exactly as final.mp4.",
+      ),
+    ],
   },
 
   {
@@ -211,5 +266,21 @@ export const JOURNEYS: Scenario[] = [
         throw new Error(`${adds.length} add_text_clips calls — should batch into one array`);
       }
     },
+    reference: [
+      call("get_transcript", {}),
+      // One caption per phrase, on the words' own frames; then the clip ends just after "new".
+      call("add_text_clips", {
+        entries: [
+          { timeline_in: 30, timeline_out: 90, content: "Welcome to the show" },
+          { timeline_in: 95, timeline_out: 142, content: "today we are" },
+          { timeline_in: 145, timeline_out: 222, content: "building something new" },
+        ],
+      }),
+      call("set_clip_properties", { clip_ids: ["narration"], duration: 225 }),
+      say(
+        "Captioned the narration phrase by phrase, timed to the words, and trimmed the silence " +
+          "after the last word: the clip now ends at 7.5 s instead of 10 s.",
+      ),
+    ],
   },
 ];

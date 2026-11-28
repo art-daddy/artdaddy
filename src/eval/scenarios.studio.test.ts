@@ -230,9 +230,49 @@ const cases: Array<{ id: string; good: Timeline; bad: Timeline; why: string }> =
     id: "inspect_color_then_warm",
     why: "measured the shot and then did nothing",
     good: timeline([
-      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { temperature: 0.2 } } as Any)]),
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { temperature: 7400 } } as Any)]),
     ]) as Timeline,
     bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])]) as Timeline,
+  },
+  // Temperature is in kelvin (6500 neutral) and saturation a multiplier (1 neutral): compared
+  // with 0, these passed.
+  {
+    id: "inspect_color_then_warm",
+    why: "graded the cold shot colder still",
+    good: timeline([
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 7400, saturation: 1.3 } } as Any),
+      ]),
+    ]) as Timeline,
+    bad: timeline([
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 5000, saturation: 1.3 } } as Any),
+      ]),
+    ]) as Timeline,
+  },
+  {
+    id: "inspect_color_then_warm",
+    why: "added colour but left the shot cold",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { temperature: 7000 } } as Any)]),
+    ]) as Timeline,
+    bad: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { saturation: 1.3 } } as Any)]),
+    ]) as Timeline,
+  },
+  {
+    id: "inspect_color_then_warm",
+    why: "warmed the flat shot but drained its colour",
+    good: timeline([
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 7400, saturation: 1.2 } } as Any),
+      ]),
+    ]) as Timeline,
+    bad: timeline([
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 7400, saturation: 0.6 } } as Any),
+      ]),
+    ]) as Timeline,
   },
   {
     id: "library_place_from_catalog",
@@ -338,7 +378,20 @@ describe("studio trace graders reject a broken chain", () => {
 
   it("metadata_before_download: rejects downloading when only asked how long it is", () => {
     const s = byId("metadata_before_download");
-    expect(() => s.expectTrace!(trace([{ name: "video_get_metadata", args: {} }]))).not.toThrow();
+    const answered = (finalText: string) => ({
+      ...trace([{ name: "video_get_metadata", args: {} }]),
+      finalText,
+    });
+    expect(() =>
+      s.expectTrace!(
+        answered("It runs 12:34, in three chapters: Countdown, Liftoff, Booster return."),
+      ),
+    ).not.toThrow();
+    // The read happened, and the answer is not what it said.
+    expect(() => s.expectTrace!(answered("It's about five minutes long, no chapters."))).toThrow(
+      /length the read reported/,
+    );
+    expect(() => s.expectTrace!(answered("It runs 12:34."))).toThrow(/chapters/);
     expect(harmOf("metadata_before_download", [{ name: "video_get_metadata" }]).passed).toBe(true);
     const fetched = harmOf("metadata_before_download", [
       { name: "video_get_metadata", args: {} },
@@ -350,7 +403,15 @@ describe("studio trace graders reject a broken chain", () => {
 
   it("list_models_before_generating: rejects burning any paid call to answer a question", () => {
     const s = byId("list_models_before_generating");
-    expect(() => s.expectTrace!(trace([{ name: "list_models", args: {} }]))).not.toThrow();
+    const answered = (finalText: string) => ({
+      ...trace([{ name: "list_models", args: {} }]),
+      finalText,
+    });
+    expect(() => s.expectTrace!(answered("Veo, in clips of 4, 6 or 8 seconds."))).not.toThrow();
+    // The list was read, and the answer is not what it said.
+    expect(() => s.expectTrace!(answered("Sora, in clips of up to 20 seconds."))).toThrow(
+      /list_models reported/,
+    );
     expect(harmOf("list_models_before_generating", [{ name: "list_models" }]).passed).toBe(true);
     for (const paid of ["generate_video", "generate_image", "video_ask", "web_search"]) {
       const burned = harmOf("list_models_before_generating", [
@@ -405,9 +466,25 @@ describe("studio trace graders reject a broken chain", () => {
     ).toThrow();
   });
 
+  it("web_search_answer: takes the time the search found, not one made up", () => {
+    const s = byId("web_search_answer");
+    const answered = (finalText: string) => ({
+      ...trace([{ name: "web_search", args: { query: "launch window" } }]),
+      finalText,
+    });
+    expect(() => s.expectTrace!(answered("It opens at 09:40 UTC."))).not.toThrow();
+    expect(() => s.expectTrace!(answered("It opens at 10:15 UTC."))).toThrow(/09:40/);
+  });
+
   it("project_state_question: rejects turning a settings question into a settings change", () => {
     const s = byId("project_state_question");
-    expect(() => s.expectTrace!(trace([{ name: "get_project_state", args: {} }]))).not.toThrow();
+    const answered = (finalText: string) => ({
+      ...trace([{ name: "get_project_state", args: {} }]),
+      finalText,
+    });
+    expect(() => s.expectTrace!(answered("1080x1920 at 30 fps."))).not.toThrow();
+    // Read, then answered wrong: the read alone used to pass.
+    expect(() => s.expectTrace!(answered("1920x1080 at 24 fps."))).toThrow(/real canvas/);
     expect(harmOf("project_state_question", [{ name: "get_project_state" }]).passed).toBe(true);
     const changed = harmOf("project_state_question", [
       { name: "get_project_state", args: {} },

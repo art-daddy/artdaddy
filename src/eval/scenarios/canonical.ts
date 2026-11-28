@@ -17,6 +17,7 @@ import {
   vclip,
   vtrack,
 } from "./helpers";
+import { call, calls, READ_TIMELINE, say, timelineClipsIn } from "./steps";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- graders poke uncommon clip fields (transform/fade/duck/transition_in)
 type Any = any;
@@ -24,6 +25,27 @@ type Any = any;
 /** Resolve a scalar-or-keyframed value to a number (last keyframe if animated). */
 const numOf = (v: Any): number =>
   typeof v === "number" ? v : Array.isArray(v) && v.length ? Number(v[v.length - 1]?.v) : NaN;
+
+/** A clip's centre in 0..1 canvas coords: its position, or the last keyframe of an animated one
+ *  (no position is the middle of the frame). */
+const posOf = (p: Any): { x: number; y: number } => {
+  const at = Array.isArray(p) ? p[p.length - 1] : p;
+  return { x: Number(at?.x ?? 0.5), y: Number(at?.y ?? 0.5) };
+};
+
+/** A keyframed value at clip-relative frame `f`: linear between keyframes, held beyond them. */
+function valueAt(keys: Any[], f: number): number {
+  const pts = [...keys].sort((p, q) => Number(p.t) - Number(q.t));
+  if (pts.length === 0) return NaN;
+  if (f <= Number(pts[0].t)) return Number(pts[0].v);
+  for (let i = 1; i < pts.length; i++) {
+    const [a, b] = [pts[i - 1], pts[i]];
+    if (f > Number(b.t)) continue;
+    const k = (f - Number(a.t)) / (Number(b.t) - Number(a.t) || 1);
+    return Number(a.v) + k * (Number(b.v) - Number(a.v));
+  }
+  return Number(pts[pts.length - 1].v);
+}
 
 function textOf(c: { text?: unknown; content?: unknown }): string {
   if (typeof c.text === "string") return c.text;
@@ -33,6 +55,17 @@ function textOf(c: { text?: unknown; content?: unknown }): string {
       .map((x) => (x && typeof x === "object" ? String((x as { text?: unknown }).text ?? "") : ""))
       .join(" ");
   return "";
+}
+
+/** The captions carry every word the request gave them, in any clip and any case: a caption that
+ *  moves right with the wrong words is not the caption asked for. */
+function assertSays(texts: { text?: unknown; content?: unknown }[], phrase: string): void {
+  const said = texts.map(textOf).join(" ").toLowerCase();
+  const missing = phrase
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => !said.includes(w));
+  assert(missing.length === 0, `the captions do not say "${phrase}" (they say "${said.trim()}")`);
 }
 
 /** read_whole_timeline's project: two clips the answer has to name. */
@@ -62,6 +95,11 @@ export const CANONICAL: Scenario[] = [
     expect: (tl) => near(span(clipById(tl, "intro")), 60, 2, "intro span"),
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["intro"], duration: 60 }),
+      say("The intro clip is now 2 seconds long instead of 3."),
+    ],
   },
   {
     id: "split_at_1s",
@@ -78,6 +116,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["split_clips"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("split_clips", { splits: [{ clip_id: "a", at: 30 }] }),
+      say("Split it at the one-second mark: one piece runs 0 to 1 s, the other 1 to 2 s."),
+    ],
   },
   {
     id: "reorder_swap",
@@ -95,6 +138,16 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["move_clips"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("move_clips", {
+        moves: [
+          { clip_id: "b", to_timeline_in: 0 },
+          { clip_id: "a", to_timeline_in: 30 },
+        ],
+      }),
+      say("Swapped them: b.mp4 now plays first, then a.mp4."),
+    ],
   },
   {
     id: "fade_in_1s",
@@ -127,6 +180,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "apply_effects", "set_keyframes"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], fade: { in: 30 } }),
+      say("Added a one-second fade-in at the start of the clip."),
+    ],
   },
   {
     id: "opacity_50",
@@ -142,6 +200,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["logo"], opacity: 0.5 }),
+      say("The logo is now 50% transparent."),
+    ],
   },
   {
     id: "volume_30",
@@ -153,6 +216,11 @@ export const CANONICAL: Scenario[] = [
     expect: (tl) => near(Number(clipById(tl, "bed")?.volume), 0.3, 0.06, "volume"),
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["bed"], volume: 0.3 }),
+      say("The background music is at 30% volume now."),
+    ],
   },
   {
     id: "crossfade_half_sec",
@@ -169,6 +237,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_transition"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_transition", { clip_id: "b", transition_in: { kind: "crossfade", duration: 15 } }),
+      say("Added a half-second crossfade between the two clips."),
+    ],
   },
   {
     id: "add_clip_after",
@@ -187,6 +260,13 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_clips", "insert_clips"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("add_clips", {
+        entries: [{ media_ref: "outro.mp4", track_id: "v2", timeline_in: 60, duration: 60 }],
+      }),
+      say("Added 2 seconds of outro.mp4 right after the existing clip."),
+    ],
   },
   {
     id: "insert_between",
@@ -230,6 +310,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["remove_clips"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("remove_clips", { clip_ids: ["c"] }),
+      say("Deleted the last clip (c.mp4); the other two have not moved."),
+    ],
   },
   {
     id: "canvas_landscape",
@@ -245,6 +330,10 @@ export const CANONICAL: Scenario[] = [
     expectTools: ["set_project_settings"],
     maxRounds: 4,
     maxToolErrors: 0,
+    reference: [
+      call("set_project_settings", { size: { width: 1920, height: 1080 }, fps: null }),
+      say("The canvas is now 1920 by 1080, landscape."),
+    ],
   },
   {
     id: "fps_24",
@@ -264,6 +353,10 @@ export const CANONICAL: Scenario[] = [
     expectTools: ["set_project_settings"],
     maxRounds: 4,
     maxToolErrors: 0,
+    reference: [
+      call("set_project_settings", { fps: 24, size: null }),
+      say("The project now runs at 24 fps; the canvas size is unchanged."),
+    ],
   },
   {
     id: "canvas_square_no_size",
@@ -282,6 +375,10 @@ export const CANONICAL: Scenario[] = [
     expectTools: ["set_project_settings"],
     maxRounds: 4,
     maxToolErrors: 0,
+    reference: [
+      call("set_project_settings", { size: { aspect_ratio: "1:1" }, fps: null }),
+      say("The video is square now (1:1)."),
+    ],
   },
   {
     id: "read_whole_timeline",
@@ -317,6 +414,13 @@ export const CANONICAL: Scenario[] = [
           `the answer does not name clip ${id} (${file})`,
         );
     },
+    reference: [
+      READ_TIMELINE,
+      say(
+        "Two clips, both on track v2: a.mp4 from frame 0 to 60 (0 to 2 s), then b.mp4 from " +
+          "frame 60 to 120 (2 to 4 s).",
+      ),
+    ],
   },
   {
     id: "color_warm",
@@ -355,6 +459,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", { entries: [{ timeline_in: 0, timeline_out: 60, content: "Hello" }] }),
+      say("Added a 'Hello' title over the first two seconds."),
+    ],
   },
   {
     id: "move_to_start",
@@ -366,6 +475,11 @@ export const CANONICAL: Scenario[] = [
     expect: (tl) => near(Number(clipsOf(tl, "v2")[0]?.timeline_in), 0, 1, "clip start"),
     expectTools: ["move_clips"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("move_clips", { moves: [{ clip_id: "a", to_timeline_in: 0 }] }),
+      say("Moved the clip to the very beginning of the timeline."),
+    ],
   },
   {
     id: "mute_music",
@@ -387,6 +501,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "set_track"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_track", { track_id: "a3", mute: true }),
+      say("Muted the background music track."),
+    ],
   },
 
   // ── compound / multi-step (two edits in one prompt) ─────────────────────────
@@ -409,6 +528,16 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "set_transition", "set_keyframes"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      calls(
+        ["set_clip_properties", { clip_ids: ["a"], fade: { in: 30 } }],
+        ["set_transition", { clip_id: "b", transition_in: { kind: "crossfade", duration: 15 } }],
+      ),
+      say(
+        "The first clip fades in over one second, and a half-second crossfade leads into the second.",
+      ),
+    ],
   },
 
   // ── captions (styled / animated: the C1–C5 look engine) ──────────────────────
@@ -442,6 +571,21 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips", "set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", {
+        entries: [
+          {
+            timeline_in: 0,
+            timeline_out: 150,
+            content: "SALE",
+            style: { size: "xl", bold: true, color: "#FFD400" },
+            transform: { position: { x: 0.5, y: 0.85 } },
+          },
+        ],
+      }),
+      say("Added a big bold yellow SALE caption across the bottom for the whole clip."),
+    ],
   },
   {
     id: "caption_word_by_word",
@@ -455,6 +599,7 @@ export const CANONICAL: Scenario[] = [
         .flatMap((t) => t.clips ?? [])
         .filter((c) => (c as Any).kind === "text") as Any[];
       assert(texts.length >= 1, "expected a caption");
+      assertSays(texts, "like and subscribe");
       const build = String(((texts[0].animation ?? {}) as Any).build ?? "");
       // A word reveal = a karaoke-family build, OR content authored as per-word timed items.
       const perWord =
@@ -467,6 +612,20 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips"],
     maxRounds: 7,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", {
+        entries: [
+          {
+            timeline_in: 0,
+            timeline_out: 90,
+            content: "like and subscribe",
+            animation: { build: "word-by-word", entrance: "pop" },
+          },
+        ],
+      }),
+      say("Added a 'like and subscribe' caption that pops up one word at a time."),
+    ],
   },
   {
     id: "caption_emphasis_word",
@@ -479,7 +638,9 @@ export const CANONICAL: Scenario[] = [
       const texts = (tl.tracks ?? [])
         .flatMap((t) => t.clips ?? [])
         .filter((c) => (c as Any).kind === "text") as Any[];
-      const hit = texts.find((c) => /\$?9/.test(textOf(c))) ?? texts[0];
+      assertSays(texts, "Only $9 today");
+      // The emphasis is judged on the caption that carries the $9, never on another one.
+      const hit = texts.find((c) => /\$?9/.test(textOf(c)));
       assert(hit, "expected the caption");
       const anim = (hit.animation ?? {}) as Any;
       const emphAnim =
@@ -503,6 +664,20 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips"],
     maxRounds: 7,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", {
+        entries: [
+          {
+            timeline_in: 0,
+            timeline_out: 90,
+            content: [{ text: "Only " }, { text: "$9", emphasis: true }, { text: " today" }],
+            animation: { emphasis: { kind: "pop", color: "#FFD400", scale: 1.3 } },
+          },
+        ],
+      }),
+      say("Added 'Only $9 today' with the $9 popping out bigger and in yellow."),
+    ],
   },
   {
     id: "caption_kinetic_chunks",
@@ -516,6 +691,7 @@ export const CANONICAL: Scenario[] = [
         .flatMap((t) => t.clips ?? [])
         .filter((c) => (c as Any).kind === "text") as Any[];
       assert(texts.length >= 1, "expected a caption");
+      assertSays(texts, "stop scrolling right now");
       const build = String(((texts[0].animation ?? {}) as Any).build ?? "");
       // Kinetic = a chunk/word build, OR multi-part content, OR several separately-timed caption clips.
       const kinetic =
@@ -529,6 +705,20 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", {
+        entries: [
+          {
+            timeline_in: 0,
+            timeline_out: 90,
+            content: "stop scrolling right now",
+            animation: { build: "phrase-chunks" },
+          },
+        ],
+      }),
+      say("Added kinetic captions for 'stop scrolling right now' that flash up phrase by phrase."),
+    ],
   },
   {
     id: "caption_preset_punchy",
@@ -541,7 +731,9 @@ export const CANONICAL: Scenario[] = [
       const texts = (tl.tracks ?? [])
         .flatMap((t) => t.clips ?? [])
         .filter((c) => (c as Any).kind === "text") as Any[];
-      const hit = texts.find((c) => textOf(c).toUpperCase().includes("WAIT")) ?? texts[0];
+      assertSays(texts, "WAIT FOR IT");
+      // The look is judged on the caption that says it, never on another one.
+      const hit = texts.find((c) => textOf(c).toUpperCase().includes("WAIT"));
       assert(hit, "expected the caption");
       const st = (hit.style ?? {}) as Any;
       const punchy =
@@ -559,6 +751,21 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips", "set_clip_properties"],
     maxRounds: 7,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", {
+        entries: [
+          {
+            timeline_in: 0,
+            timeline_out: 90,
+            content: "WAIT FOR IT",
+            style: { preset: "punchy" },
+            animation: { preset: "pop-in" },
+          },
+        ],
+      }),
+      say("Added punchy, TikTok-style 'WAIT FOR IT' captions."),
+    ],
   },
 
   // ── keyframed motion (pan/zoom) ──────────────────────────────────────────────
@@ -578,6 +785,18 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_keyframes"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_keyframes", {
+        clip_id: "a",
+        property: "scale",
+        keyframes: [
+          { t: 0, v: 1 },
+          { t: 89, v: 1.15, ease: "ease-in-out" },
+        ],
+      }),
+      say("Added a slow zoom-in, from full size to 115%, across the whole clip."),
+    ],
   },
 
   // ── PiP / transform layout ───────────────────────────────────────────────────
@@ -597,9 +816,23 @@ export const CANONICAL: Scenario[] = [
         Number.isFinite(scaleNum) && scaleNum < 0.8,
         `expected the clip shrunk to a PiP (scale < 0.8, got ${scaleNum})`,
       );
+      // "In the top-right corner": a PiP shrunk in the middle, or in another corner, is not it.
+      const p = posOf(c?.transform?.position);
+      assert(
+        p.x > 0.5 && p.y < 0.5,
+        `expected the PiP in the top-right corner, its centre is at x ${p.x}, y ${p.y}`,
+      );
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", {
+        clip_ids: ["pip"],
+        transform: { scale: 0.35, position: { x: 0.78, y: 0.12 } },
+      }),
+      say("Shrank the clip to a small picture-in-picture in the top-right corner."),
+    ],
   },
 
   // ── transitions beyond crossfade ─────────────────────────────────────────────
@@ -629,6 +862,14 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_transition", "set_clip_properties"],
     maxRounds: 7,
+    reference: [
+      READ_TIMELINE,
+      call("set_transition", {
+        clip_id: "b",
+        transition_in: { kind: "dip-to-black", duration: 30 },
+      }),
+      say("Put a one-second fade to black between the two clips."),
+    ],
   },
 
   // ── audio (duck) ─────────────────────────────────────────────────────────────
@@ -645,14 +886,27 @@ export const CANONICAL: Scenario[] = [
     prompt: "Duck the background music down whenever the voiceover is talking.",
     expect: (tl) => {
       const bed = clipById(tl, "bed") as Any;
-      const ducked =
-        bed?.duck != null ||
-        (typeof bed?.volume === "number" && bed.volume < 1) ||
-        Array.isArray(bed?.volume);
-      assert(ducked, "expected the music ducked (a duck setting or a lowered/keyframed volume)");
+      // Ducking turns the music down only while the voice talks (the first 3 s of its 6): a
+      // sidechain duck, or volume keyframes lower under the voice than after it. A flat lower
+      // volume is quieter where nobody talks too, so it is not what was asked.
+      if (bed?.duck != null) return;
+      assert(
+        Array.isArray(bed?.volume),
+        "expected the music ducked under the voiceover (a duck setting or volume keyframes), not a flat volume",
+      );
+      const [under, after] = [valueAt(bed.volume, 45), valueAt(bed.volume, 135)];
+      assert(
+        under < after - 0.05,
+        `expected the music lower while the voiceover talks (volume ${under} under it, ${after} after it)`,
+      );
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 7,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["bed"], duck: { against: "a4" } }),
+      say("The music now ducks down whenever the voiceover on track a4 is talking."),
+    ],
   },
 
   // ── audio (split) ────────────────────────────────────────────────────────────
@@ -670,6 +924,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["split_clips"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("split_clips", { splits: [{ clip_id: "bed", at: 90 }] }),
+      say("Split the background music into two halves at the 3-second mark."),
+    ],
   },
 
   // ── adversarial / ambiguous ──────────────────────────────────────────────────
@@ -711,6 +970,13 @@ export const CANONICAL: Scenario[] = [
     expect: (tl) => near(span(clipById(tl, "intro")), 30, 3, "intro is 1s after the follow-up"),
     expectTools: ["set_clip_properties"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["intro"], duration: 60 }),
+      say("The intro clip is now 2 seconds long."),
+      call("set_clip_properties", { clip_ids: ["intro"], duration: 30 }),
+      say("Changed it: the intro is 1 second long now."),
+    ],
   },
   {
     id: "caption_retime_followup",
@@ -729,6 +995,27 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["add_text_clips", "set_clip_properties"],
     maxRounds: 9,
+    reference: [
+      READ_TIMELINE,
+      call("add_text_clips", { entries: [{ timeline_in: 0, timeline_out: 60, content: "Intro" }] }),
+      say("Added an 'Intro' title over the first 2 seconds."),
+      // The title's id was minted by add_text_clips; a fresh read finds it.
+      READ_TIMELINE,
+      {
+        calls: (req) => [
+          [
+            "set_clip_properties",
+            {
+              clip_ids: timelineClipsIn(req)
+                .filter((c) => c.kind === "text")
+                .map((c) => c.id),
+              duration: 120,
+            },
+          ],
+        ],
+      },
+      say("The title now runs 4 seconds."),
+    ],
   },
 
   // ── effects ──────────────────────────────────────────────────────────────────
@@ -746,6 +1033,11 @@ export const CANONICAL: Scenario[] = [
       ),
     expectTools: ["apply_effects"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", { clip_ids: ["a"], add: [{ type: "blur", params: { radius: 6 } }] }),
+      say("Added a soft blur to the clip."),
+    ],
   },
   {
     id: "effect_grain",
@@ -763,6 +1055,11 @@ export const CANONICAL: Scenario[] = [
       ),
     expectTools: ["apply_effects", "apply_color"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", { clip_ids: ["a"], add: [{ type: "grain", params: { grain: 30 } }] }),
+      say("Gave it a grainy film look."),
+    ],
   },
 
   // ── colour ───────────────────────────────────────────────────────────────────
@@ -779,6 +1076,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["apply_color"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("apply_color", { clip_ids: ["a"], saturation: 0 }),
+      say("The clip is black and white now."),
+    ],
   },
   {
     id: "boost_contrast",
@@ -805,14 +1107,19 @@ export const CANONICAL: Scenario[] = [
     prompt: "Crop the sides so the clip is square.",
     expect: (tl) => {
       const cr = (clipById(tl, "a") as Any)?.crop;
-      const cropped =
-        cr &&
-        ((Number(cr.left) || 0) + (Number(cr.right) || 0) > 0 ||
-          (Number(cr.top) || 0) + (Number(cr.bottom) || 0) > 0);
-      assert(cropped, "expected a crop to be applied");
+      // "The sides": a widescreen clip gets to square only by losing width. A crop of the top and
+      // bottom alone makes it wider still, and passed as "a crop" before.
+      const sides = (Number(cr?.left) || 0) + (Number(cr?.right) || 0);
+      assert(sides > 0, "expected the sides cropped (left and right), not only the top and bottom");
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      // a.mp4 is 1920x1080: 420 px off each side leaves a 1080x1080 square.
+      call("set_clip_properties", { clip_ids: ["a"], crop: { left: 0.21875, right: 0.21875 } }),
+      say("Cropped the sides so the clip is square."),
+    ],
   },
   {
     id: "flip_horizontal",
@@ -824,6 +1131,11 @@ export const CANONICAL: Scenario[] = [
     expect: (tl) => assert((clipById(tl, "a") as Any)?.flip?.h === true, "expected flip.h = true"),
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], flip: { h: true } }),
+      say("Mirrored the clip horizontally."),
+    ],
   },
   {
     id: "rotate_90",
@@ -838,6 +1150,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "set_keyframes"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], rotate: 90 }),
+      say("Rotated the clip 90 degrees clockwise."),
+    ],
   },
   {
     id: "add_glow",
@@ -864,6 +1181,14 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "apply_effects"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", {
+        clip_ids: ["a"],
+        add: [{ type: "glow", params: { intensity: 30 } }],
+      }),
+      say("Added a dreamy glow to the clip."),
+    ],
   },
   {
     id: "blend_screen",
@@ -876,6 +1201,11 @@ export const CANONICAL: Scenario[] = [
       assert((clipById(tl, "ov") as Any)?.blend === "screen", "expected blend = screen"),
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["ov"], blend: "screen" }),
+      say("The overlay now uses the screen blend mode."),
+    ],
   },
   {
     id: "move_to_topleft",
@@ -893,6 +1223,17 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", {
+        clip_ids: ["a"],
+        transform: { scale: 1, position: { x: 0.25, y: 0.25 } },
+      }),
+      say(
+        "Moved the clip to the top-left corner. It is as wide as the frame, so part of it now " +
+          "runs off the left edge; I can make it smaller so it sits inside the corner if you like.",
+      ),
+    ],
   },
 
   // ── keyframed audio fade ─────────────────────────────────────────────────────
@@ -911,6 +1252,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "set_keyframes"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["bed"], fade: { out: 60 } }),
+      say("The music now fades out over its last 2 seconds."),
+    ],
   },
 
   // ── trim variant ─────────────────────────────────────────────────────────────
@@ -930,6 +1276,11 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], source_in: 30, duration: 60 }),
+      say("Trimmed off the first second; the clip now starts 1 s into the footage and runs 2 s."),
+    ],
   },
   {
     id: "slip_content_later",
@@ -960,6 +1311,11 @@ export const CANONICAL: Scenario[] = [
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
     maxToolErrors: 0,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], source_in: 30 }),
+      say("The clip now shows footage from one second later; its place and length are unchanged."),
+    ],
   },
 
   {
@@ -981,6 +1337,11 @@ export const CANONICAL: Scenario[] = [
     // Emptying the clips OR removing the whole music track both clear the music.
     expectTools: ["remove_clips", "ripple_delete", "remove_tracks"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("remove_clips", { clip_ids: ["bed", "bed2"] }),
+      say("Removed both music clips; the video is untouched."),
+    ],
   },
 
   // ── split-screen layout ──────────────────────────────────────────────────────
@@ -1009,9 +1370,31 @@ export const CANONICAL: Scenario[] = [
         arranged("l") && arranged("r"),
         "expected both clips scaled/cropped into a side-by-side layout",
       );
+      // Side by side: one picture on each half of the frame. A crop is fitted back into the
+      // clip's own box (preview/scene.ts clipRects), so only a position moves a picture sideways;
+      // two pictures shrunk in the middle overlap, which is not a split screen.
+      const xs = ["l", "r"].map((id) => posOf((clipById(tl, id) as Any)?.transform?.position).x);
+      assert(
+        Math.min(...xs) < 0.5 && Math.max(...xs) > 0.5,
+        `expected one clip on each side of the frame, their centres are at x ${xs.join(" and ")}`,
+      );
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      calls(
+        [
+          "set_clip_properties",
+          { clip_ids: ["l"], transform: { scale: 0.5, position: { x: 0.25, y: 0.5 } } },
+        ],
+        [
+          "set_clip_properties",
+          { clip_ids: ["r"], transform: { scale: 0.5, position: { x: 0.75, y: 0.5 } } },
+        ],
+      ),
+      say("Put the two clips side by side: left.mp4 on the left half, right.mp4 on the right."),
+    ],
   },
 
   // ── more multi-turn (correction + undo) ──────────────────────────────────────
@@ -1032,6 +1415,13 @@ export const CANONICAL: Scenario[] = [
       ),
     expectTools: ["set_clip_properties"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], speed: 2 }),
+      say("The clip plays at 2x now."),
+      call("set_clip_properties", { clip_ids: ["a"], speed: 1.5 }),
+      say("Eased it back to 1.5x."),
+    ],
   },
   {
     id: "undo_followup",
@@ -1060,5 +1450,12 @@ export const CANONICAL: Scenario[] = [
     },
     expectTools: ["set_clip_properties", "undo"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], opacity: 0.5 }),
+      say("The clip is 50% transparent now."),
+      call("undo"),
+      say("Undone: the clip is fully opaque again."),
+    ],
   },
 ];
