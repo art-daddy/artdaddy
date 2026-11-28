@@ -31,6 +31,7 @@ import {
   wakeMessage,
 } from "../jobWake";
 import type { InferenceRequest } from "../harness";
+import type { ReferenceCalls, ReferenceStep } from "../reference";
 import type { CaseTranscript, Scenario, ToolCall, Trace } from "../types";
 import { aclip, allClips, atrack, timeline, vclip, vtrack } from "./helpers";
 
@@ -143,7 +144,7 @@ function spans(
     throw new Error(`${what} plays on to frame ${tout(clip)}, past the end of the video (${to})`);
 }
 
-/** The video tracks' stacking: `upper` draws over `lower`. */
+/** How high the clip's track is stacked: a clip on a higher video track draws over one on a lower. */
 function zOf(final: TL, clipId: string): number {
   return Number(trackOfClip(final, clipId)?.z ?? 0);
 }
@@ -1327,17 +1328,16 @@ const GEN_CASES: Scenario[] = [
 
 // ── the correct run of every case (ruling 22): one step per model round, every turn ending in a reply ─────────────
 
-type Calls = [string, Record<string, unknown>][];
-/** One model round of a correct run (the shape of src/eval/reference.ts ReferenceStep): a reply, which ends the turn,
- *  or tool calls, fixed or made from the request the model got (its `round_input.tool_results` are the previous
- *  round's replies), for an id an earlier tool minted. */
-export type Step = { text: string } | { calls: Calls | ((req: InferenceRequest) => Calls) };
+/** One model round of a correct run (src/eval/reference.ts): a reply, which ends the turn, or tool calls, fixed or made
+ *  from the request the model got (its `round_input.tool_results` are the previous round's replies), for an id an
+ *  earlier tool minted. */
+export type Step = ReferenceStep;
 
 export const say = (text: string): Step => ({ text });
 export const call = (name: string, args: Record<string, unknown> = {}): Step => ({
   calls: [[name, args]],
 });
-export const calls = (...c: Calls): Step => ({ calls: c });
+export const calls = (...c: ReferenceCalls): Step => ({ calls: c });
 export const place = (...entries: Record<string, unknown>[]): Step =>
   call("add_clips", { entries });
 
@@ -1723,4 +1723,9 @@ export const GAP_ASYNC_REFERENCES: Record<string, Step[]> = {
   ],
 };
 
-export const GAP_ASYNC_SCENARIOS: Scenario[] = [...ASYNC_CASES, ...GEN_CASES];
+/** Every case with its correct run (ruling 22): scenarios.reference.test.ts replays each through the real harness with
+ *  no model and requires it to pass. */
+export const GAP_ASYNC_SCENARIOS: Scenario[] = [...ASYNC_CASES, ...GEN_CASES].map((s) => ({
+  ...s,
+  reference: GAP_ASYNC_REFERENCES[s.id],
+}));

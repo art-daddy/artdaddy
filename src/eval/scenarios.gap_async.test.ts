@@ -1,23 +1,21 @@
-// The gap_async cases, driven offline through the REAL harness: the real agent loop, the real timeline tools, the job
-// stand-ins (jobs.ts) and the real oracle, with the model's rounds SCRIPTED. No network and no model: fetch is replaced by
-// a spy that throws, and every test checks it was never called.
+// The gap_async cases, driven offline through the REAL harness (src/eval/reference.ts driveScripted): the real agent
+// loop, the real timeline tools, the job stand-ins (jobs.ts) and the real oracle, with the model's rounds SCRIPTED. No
+// network and no model: fetch is replaced by a spy that throws, and every test checks it was never called.
 //
-// For every case:
-//   - its correct run (the known-right calls) passes, which proves the case can be passed and its checks read it right;
-//   - for every kind of request, a realistic wrong run fails, on the check that names its mistake.
-// And the app's own message for finished work is what every case gives (the drift guard on jobWake.ts).
+// Each case's correct run is its `reference`, which scenarios.reference.test.ts replays and requires to pass. Here:
+//   - for every kind of request, a realistic wrong run fails, on the check that names its mistake;
+//   - the job stand-ins answer as the app does (pending, refused, landed);
+//   - the app's own message for finished work is what every case gives (the drift guard on jobWake.ts).
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
 import { jobWakePrompt } from "../store/chat";
 import type { SettledJob } from "../store/jobNotes";
-import { DEFAULT_MODEL } from "../store/chatControls";
-import { driveScenario, type InferenceRequest } from "./harness";
 import { EXPORT_RUNNING, STUDIO_EXPORT_FILE, WAKES_BUILT } from "./jobWake";
 import { Budget } from "./pricing";
+import { driveScripted } from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
 import {
   call,
@@ -40,39 +38,6 @@ import {
 import type { Scenario } from "./types";
 
 const REFERENCE = GAP_ASYNC_REFERENCES;
-const USAGE: Usage = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
-
-/** A model that answers from a script, one step per round (as src/eval/reference.ts scripted). */
-function scripted(steps: Step[]) {
-  let i = 0;
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    const step = steps[i++] ?? { text: "" };
-    const base = { error: "", usage: USAGE, provider_snapshot: {} };
-    if ("text" in step)
-      return {
-        ...base,
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        finish_reason: "stop",
-      };
-    const list = typeof step.calls === "function" ? step.calls(req) : step.calls;
-    const pending: PendingCall[] = list.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      ...base,
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      finish_reason: "tool_calls",
-    };
-  };
-  return { send };
-}
-
 const WORK = path.resolve("reports", "eval", `gap-async-${process.pid}`);
 
 let fetchSpy: ReturnType<typeof vi.fn>;
@@ -95,13 +60,7 @@ const byId = (id: string): Scenario => {
 };
 
 async function drive(id: string, steps: Step[]) {
-  const { send } = scripted(steps);
-  return driveScenario(byId(id), DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(5),
-    send,
-    workDir: WORK,
-  });
+  return (await driveScripted(byId(id), steps, { workDir: WORK, budget: new Budget(5) })).result;
 }
 
 /** Every reason a run failed, in one list. */
@@ -112,19 +71,11 @@ const why = (r: Awaited<ReturnType<typeof drive>>): string[] => [
   ...(r.harm?.violations ?? []),
 ];
 
-describe("every gap_async case has a correct run", () => {
-  it("covers every case in the file, and only those", () => {
+describe("every gap_async case carries its correct run", () => {
+  it("one per case in the file, and none for a case that is not there", () => {
     expect(Object.keys(REFERENCE).sort()).toEqual(GAP_ASYNC_SCENARIOS.map((s) => s.id).sort());
+    for (const s of GAP_ASYNC_SCENARIOS) expect(s.reference, s.id).toBe(REFERENCE[s.id]);
   });
-
-  for (const s of GAP_ASYNC_SCENARIOS)
-    it(`${s.id}: the correct run passes`, async () => {
-      const result = await drive(s.id, REFERENCE[s.id]);
-      expect(why(result)).toEqual([]);
-      expect(result.passed).toBe(true);
-      // It ran every turn the case has.
-      expect(result.trace.turnTexts?.length).toBe(1 + (s.followUps?.length ?? 0));
-    });
 });
 
 // ── the realistic wrong runs: one or more per kind of request, each failing on the check that names its mistake ────
