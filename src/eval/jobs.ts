@@ -15,17 +15,22 @@
 //     way the app does after a restart (reconcilePendingMedia), and a failure marks it as the app does (failPendingClip).
 //   - A look at a ref that has not landed, a video started from a frame that has not landed, and an export of a timeline
 //     that holds one, answer with the app's own refusals (tools/refState.ts, timeline/render.ts).
+//   - Speech a case names (`words`) is transcribed in the background as the app does on the person's computer: until its
+//     job lands, get_transcript lists it `in_progress` and add_captions refuses with the app's own reply
+//     (tools/captionTranscript.ts); after, both answer from the case's words.
 //   - The clock is the conversation: a job lands at the first user turn at or after `landsAtTurn` that comes after the
 //     turn that started it. A runner says when a turn begins (JobBoard.atTurn) before any call of that turn runs.
 import { failPendingClip, reconcilePendingMedia, registerPendingClip } from "../tools/import";
+import { pendingCaptionsResult } from "../tools/captionTranscript";
 import { ClientToolRegistry } from "../tools/registry";
 import { unresolvedRefError } from "../tools/refState";
 import { joinPath, type ProjectStoreAccess } from "../tools/store";
 import { videoSeconds } from "../tools/genModels";
+import { clipSourceSpanSeconds, clipSpanToFrames } from "../timeline/helpers";
 import { exportDestination, unresolvedMediaBlockers } from "../timeline/render";
 import { plainFailure } from "../timeline/exportWords";
 import type { ExportReasonCode } from "../api/exportReason";
-import type { Timeline } from "../timeline/model";
+import type { Clip, Timeline } from "../timeline/model";
 import { registerStudioStubs, type StudioState } from "./studio";
 import { STUDIO_PROJECT_NAME } from "./jobWake";
 import type { JobPlan } from "./types";
@@ -45,7 +50,7 @@ type Kind = "image" | "video" | "audio";
 
 interface Job {
   id: string;
-  tool: GenTool | "export";
+  tool: GenTool | "export" | "words";
   startedTurn: number;
   state: "running" | "queued" | "done" | "failed" | "cancelled";
   /** A generation's refs, and what each will be once it lands. */
@@ -108,6 +113,10 @@ export function registerJobStubs(
   }
 
   async function land(job: Job): Promise<void> {
+    if (job.tool === "words") {
+      job.state = "done";
+      return;
+    }
     if (job.tool === "export") {
       job.state = plan.fail?.export ? "failed" : "done";
       if (plan.fail?.export) job.failure_code = plan.fail.export as ExportReasonCode;
@@ -272,6 +281,13 @@ export function registerJobStubs(
     return { ...out, clips: [...out.clips, ...generated] };
   });
 
+  // ── the project's canvas is the timeline's, whatever the seed (the studio one reports a fixed vertical canvas) ──
+  registry.register("get_project_state", async (args) => {
+    const out = (await studio.run("get_project_state", args ?? {})) as Record<string, unknown>;
+    const canvas = (await env.timeline()).canvas;
+    return canvas ? { ...out, canvas } : out;
+  });
+
   // ── export: refused while generated media is pending; runs past the turn; one at a time ────────────────────────
   const destStore = {
     projectDir: "C:/projects/eval-project",
@@ -408,6 +424,16 @@ export function registerJobStubs(
     return { ok: true, cancelled: false, state: job.state, note };
   });
 
+  // ── speech: its words are made in the background ─────────────────────────────────────────────────────────────
+  if (plan.words)
+    registerWordStubs(registry, studio, plan.words, fps, env.timeline, () => {
+      const job = jobs.find((j) => j.tool === "words");
+      if (job) return job.state === "done";
+      // Told they are not ready, the app wakes the agent when they land (store/speechWakeHost.ts).
+      jobs.push({ id: "words_1", tool: "words", startedTurn: turn, state: "running", refs: [] });
+      return false;
+    });
+
   return {
     async atTurn(next: number) {
       turn = Math.max(turn, next);
@@ -415,4 +441,128 @@ export function registerJobStubs(
         if (open(job) && turn >= landsAtTurn && turn > job.startedTurn) await land(job);
     },
   };
+}
+
+/** Register the speech stand-ins: get_transcript and add_captions answer from the case's words once they have landed,
+ *  and say they are not ready (starting the job) before. */
+function registerWordStubs(
+  registry: ClientToolRegistry,
+  studio: ClientToolRegistry,
+  speech: NonNullable<JobPlan["words"]>,
+  fps: number,
+  timeline: () => Promise<Timeline>,
+  ready: () => boolean,
+): void {
+  /** The clips that play the speech, in timeline order. */
+  const speaking = async (clipId?: string) => {
+    const out: { clip: Clip; track: string }[] = [];
+    for (const t of (await timeline()).tracks ?? [])
+      for (const c of t.clips ?? [])
+        if (String(c.media_ref ?? "") === speech.media_ref && (!clipId || c.id === clipId))
+          out.push({ clip: c, track: String(t.id) });
+    return out.sort((x, y) => Number(x.clip.timeline_in) - Number(y.clip.timeline_in));
+  };
+  /** The words a clip plays, as [text, start_frame, end_frame]: a word the clip does not play is not heard. */
+  const heard = (clip: Clip): [string, number, number][] => {
+    const [from, to] = clipSourceSpanSeconds(clip, fps);
+    const out: [string, number, number][] = [];
+    for (const [text, s, e] of speech.words) {
+      if (e <= from || s >= to) continue;
+      const span = clipSpanToFrames(clip, s, e, fps);
+      if (span) out.push([text, span[0], span[1]]);
+    }
+    return out;
+  };
+  const waiting = (hosts: { clip: Clip; track: string }[]) =>
+    hosts.map((h) => ({ clip_id: String(h.clip.id), track_id: h.track }));
+
+  registry.register("get_transcript", async (args) => {
+    const a = args ?? {};
+    const hosts = await speaking(str(a.clip_id) || undefined);
+    const empty = {
+      ok: true,
+      fps,
+      timing: "project_frames",
+      word_format: ["index", "text", "start_frame", "end_frame"],
+      clips: [] as unknown[],
+      word_count: 0,
+      truncated: false,
+      script_preview: "",
+      script_chars: 0,
+    };
+    if (!hosts.length) return empty;
+    if (!ready())
+      return {
+        ...empty,
+        in_progress: waiting(hosts),
+        note: `No words yet for ${hosts.length} clip(s) in in_progress: they are being transcribed in the background, only the parts the clips play. Call get_transcript again for them; their absence here is not silence.`,
+      };
+    const from = typeof a.start_frame === "number" ? a.start_frame : 0;
+    const to = typeof a.end_frame === "number" ? a.end_frame : Infinity;
+    let index = 0;
+    const clips = hosts
+      .map((h) => ({
+        clip_id: String(h.clip.id),
+        track_id: h.track,
+        words: heard(h.clip)
+          .filter(([, s]) => s >= from && s < to)
+          .map(([text, s, e]) => [index++, text, s, e]),
+      }))
+      .filter((c) => c.words.length);
+    const script = clips.flatMap((c) => c.words.map((w) => String(w[1]))).join(" ");
+    return {
+      ...empty,
+      clips,
+      word_count: index,
+      script_preview: script.slice(0, 600),
+      script_chars: script.length,
+    };
+  });
+
+  registry.register("add_captions", async (args) => {
+    const a = args ?? {};
+    const hosts = a.subtitle_media_ref ? [] : await speaking();
+    // Nothing of the case's speech to caption: the studio's answer (no audio to transcribe).
+    if (!hosts.length) return studio.run("add_captions", a);
+    if (!ready())
+      return pendingCaptionsResult(waiting(hosts), {
+        status: "in_progress",
+        stage: "transcribing",
+        waited_s: 15,
+        eta_s: 40,
+        note: "",
+      });
+    // Caption-sized phrases on word boundaries: a sentence end, a pause, or four words closes one.
+    const entries: Record<string, unknown>[] = [];
+    for (const h of hosts) {
+      let phrase: [string, number, number][] = [];
+      const close = () => {
+        if (!phrase.length) return;
+        entries.push({
+          timeline_in: phrase[0][1],
+          timeline_out: phrase[phrase.length - 1][2],
+          content: phrase.map((w) => w[0]).join(" "),
+        });
+        phrase = [];
+      };
+      const words = heard(h.clip);
+      words.forEach((w, i) => {
+        phrase.push(w);
+        const next = words[i + 1];
+        if (/[.!?]$/.test(w[0]) || phrase.length >= 4 || !next || next[1] - w[2] > fps / 2) close();
+      });
+      close();
+    }
+    if (!entries.length) return studio.run("add_captions", a);
+    const placed = (await registry.run("add_text_clips", { entries })) as Record<string, unknown>;
+    if (placed?.ok === false) return placed;
+    const created = Array.isArray(placed.created) ? placed.created : [];
+    return {
+      ok: true,
+      created,
+      count: created.length,
+      caption_group: "cap_1",
+      source_track: hosts[0].track,
+    };
+  });
 }

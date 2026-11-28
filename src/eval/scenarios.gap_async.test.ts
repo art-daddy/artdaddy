@@ -274,6 +274,20 @@ const REFERENCE: Record<string, Step[]> = {
     say(`It has finished: ${STUDIO_EXPORT_FILE}.`),
     say(`In your Downloads folder, as ${STUDIO_EXPORT_FILE}.`),
   ],
+  async_export_asked_while_image_generates: [
+    call("generate_image", { prompt: "a rocket on the pad at dawn, title card framing" }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(), timeline_in: 0, timeline_out: 90, track_id: "v2" }),
+    STARTED,
+    LET_IT_FINISH,
+    call("library_op", { action: "list" }),
+    say(
+      "The title image is still being generated, and an export would leave it out. I'll export as soon as it lands.",
+    ),
+    call("export"),
+    say("The image landed, so the export is running now."),
+    say(`The export has finished: ${STUDIO_EXPORT_FILE} in your Downloads folder.`),
+  ],
   async_changed_mind_while_generating: [
     call("generate_image", { prompt: "a red rocket on the pad at dawn" }),
     call("add_track", { id: "v2", kind: "video" }),
@@ -284,6 +298,21 @@ const REFERENCE: Record<string, Step[]> = {
     swap(IMG(1), IMG(2)),
     say("Making the blue one now; it replaces the red one over the first three seconds."),
     say("Both landed; the blue rocket is the one on screen."),
+  ],
+  async_captions_wait_for_the_words: [
+    call("add_captions"),
+    say(
+      "The speech is still being transcribed, about 40 seconds more. I'll add the captions as soon as the words are ready.",
+    ),
+    call("add_captions"),
+    say("The captions are on, following what's said."),
+  ],
+  async_cut_the_pause_once_words_land: [
+    call("get_transcript"),
+    say("The words are still being transcribed; I'll cut the pause once they're ready."),
+    call("get_transcript"),
+    call("ripple_delete", { track_id: "a1", ranges: [{ start: 72, end: 159 }] }),
+    say("The pause between the two sentences is cut; it runs straight on."),
   ],
 
   gen_replace_placeholder_card: [
@@ -435,6 +464,26 @@ const REFERENCE: Record<string, Step[]> = {
   gen_not_needed_reuse_the_still: [
     place({ media_ref: "sunset.png", timeline_in: 360, duration: 60 }),
     say("The sunset still now also closes the video, for two seconds."),
+  ],
+  gen_widescreen_shot_matches_canvas: [
+    call("get_project_state"),
+    call("generate_video", {
+      prompt: "storm clouds rolling in over a plain, time-lapse",
+      duration: 6,
+      aspect_ratio: "16:9",
+    }),
+    place({ media_ref: VID(), timeline_in: 300 }),
+    say("The storm shot is generating in 16:9 like your project, placed after your clip."),
+    LET_IT_FINISH,
+    say("It landed and is in place."),
+  ],
+  gen_intro_shot_crossfades_in: [
+    call("generate_video", { prompt: "a starry night sky, slow drift", duration: 4 }),
+    call("insert_clips", { at: 0, track_id: "v1", entries: [{ media_ref: VID(), duration: 120 }] }),
+    call("set_transition", { clip_id: "a", transition_in: { kind: "crossfade", duration: 15 } }),
+    say("The starry intro is generating and placed before your clip, with a crossfade into it."),
+    LET_IT_FINISH,
+    say("It landed and is in place."),
   ],
 };
 
@@ -687,6 +736,27 @@ describe("a realistic wrong run fails, on the check that names its mistake", () 
       /does not name the Downloads folder/,
     );
   });
+  it("takes the still-generating image out to export at once", async () => {
+    await failsWith(
+      "async_export_asked_while_image_generates",
+      [
+        ...REFERENCE.async_export_asked_while_image_generates.slice(0, 5),
+        removePlaced(IMG()),
+        call("export"),
+        say("I took the unfinished image out so the export could start now."),
+        say("Ok."),
+        say(`Saved as ${STUDIO_EXPORT_FILE}.`),
+      ],
+      /the title image \(media_gen_image_1\) is not on the timeline/,
+    );
+  });
+  it("tries the export again and again while the image is still generating", async () => {
+    await failsWith(
+      "async_export_asked_while_image_generates",
+      edit("async_export_asked_while_image_generates", 5, call("export"), call("export")),
+      /2 tool call\(s\) errored \(budget 1\)/,
+    );
+  });
   it("puts the red rocket back when both land", async () => {
     await failsWith(
       "async_changed_mind_while_generating",
@@ -696,6 +766,55 @@ describe("a realistic wrong run fails, on the check that names its mistake", () 
         say("Both are in."),
       ],
       /the red rocket is on the timeline after the change to blue/,
+    );
+  });
+  it("captions guessed words while the real ones are still being transcribed", async () => {
+    await failsWith(
+      "async_captions_wait_for_the_words",
+      [
+        call("add_text_clips", {
+          entries: [{ timeline_in: 0, timeline_out: 90, content: "Welcome to the launch" }],
+        }),
+        say("Captions are on."),
+        say("They're already there."),
+      ],
+      /the captions leave out words that were said/,
+    );
+  });
+  it("asks for the captions again and again in one turn", async () => {
+    await failsWith(
+      "async_captions_wait_for_the_words",
+      edit("async_captions_wait_for_the_words", 0, call("add_captions"), call("add_captions")),
+      /2 tool call\(s\) errored \(budget 1\)/,
+    );
+  });
+  it("says the captions are on while the words are still being made", async () => {
+    await failsWith(
+      "async_captions_wait_for_the_words",
+      edit("async_captions_wait_for_the_words", 1, say("I've added the captions.")),
+      /turn 0 says the captions is finished/,
+    );
+  });
+  it("cuts a guessed stretch of the recording before the words are known", async () => {
+    await failsWith(
+      "async_cut_the_pause_once_words_land",
+      [
+        call("ripple_delete", { track_id: "a1", ranges: [{ start: 90, end: 180 }] }),
+        say("Cut the pause in the middle."),
+        say("Already done."),
+      ],
+      /words were cut: The countdown/,
+    );
+  });
+  it("leaves most of the pause in", async () => {
+    await failsWith(
+      "async_cut_the_pause_once_words_land",
+      edit(
+        "async_cut_the_pause_once_words_land",
+        3,
+        call("ripple_delete", { track_id: "a1", ranges: [{ start: 72, end: 129 }] }),
+      ),
+      /pause is left between the sentences/,
     );
   });
 
@@ -741,6 +860,17 @@ describe("a realistic wrong run fails, on the check that names its mistake", () 
       edit("gen_music_quiet_under_talking", 4, say("Done.")),
       /as loud as the talking/,
     );
+  });
+  it("accepts the music ducked under the talking instead of turned down", async () => {
+    const result = await drive(
+      "gen_music_quiet_under_talking",
+      edit("gen_music_quiet_under_talking", 4, {
+        calls: (seen) => [
+          ["set_clip_properties", { clip_ids: [placedId(seen, MUSIC())], duck: { against: "v1" } }],
+        ],
+      }),
+    );
+    expect(why(result)).toEqual([]);
   });
   it("generates four stills when three were asked for", async () => {
     await failsWith(
@@ -871,6 +1001,32 @@ describe("a realistic wrong run fails, on the check that names its mistake", () 
       /generate_image/,
     );
   });
+  it("makes the shot vertical, the generator's default, in a widescreen project", async () => {
+    await failsWith(
+      "gen_widescreen_shot_matches_canvas",
+      edit(
+        "gen_widescreen_shot_matches_canvas",
+        1,
+        call("generate_video", { prompt: "storm clouds rolling in", duration: 6 }),
+      ),
+      /made 9:16 \(the default\), not 16:9/,
+    );
+  });
+  it("puts the intro on a track above, where nothing can crossfade into the clip", async () => {
+    await failsWith(
+      "gen_intro_shot_crossfades_in",
+      [
+        call("generate_video", { prompt: "a starry night sky", duration: 4 }),
+        call("add_track", { id: "v2", kind: "video" }),
+        place({ media_ref: VID(), timeline_in: 0, track_id: "v2" }),
+        call("set_clip_properties", { clip_ids: ["a"], fade: { in: 15 } }),
+        say("The intro is in, fading into your clip."),
+        LET_IT_FINISH,
+        say("It landed."),
+      ],
+      /not on the clip's track|clip plays 0-300|no crossfade/,
+    );
+  });
 });
 
 // ── the stand-ins behave as the app does ───────────────────────────────────────────────────────────────────────────
@@ -950,6 +1106,38 @@ describe("the job stand-ins answer as the app does", () => {
     });
     expect(list.exports[1]).toMatchObject({ state: "queued", queue_position: 1 });
     expect(list.note).toMatch(/Do not call this in a loop/);
+  });
+
+  it("the words are not ready until they land, then come in project frames through the clip", async () => {
+    const result = await drive("async_cut_the_pause_once_words_land", [
+      call("get_transcript"),
+      call("add_captions"),
+      say("Waiting for the words."),
+      call("get_transcript"),
+      say("Ok."),
+    ]);
+    const [before, after] = result.trace.toolCalls
+      .filter((c) => c.name === "get_transcript")
+      .map((c) => JSON.parse(c.result ?? "{}"));
+    expect(before).toMatchObject({
+      ok: true,
+      clips: [],
+      in_progress: [{ clip_id: "n", track_id: "a1" }],
+    });
+    expect(before.note).toMatch(/their absence here is not silence/);
+    // The app's own refusal for captions it cannot make yet (tools/captionTranscript.ts).
+    const captions = result.trace.toolCalls.find((c) => c.name === "add_captions");
+    expect(captions?.ok).toBe(false);
+    expect(captions?.error).toMatch(
+      /^Captions were NOT added: the speech in 1 audio clip\(s\) is still being transcribed/,
+    );
+    // "site." ends at 2.3 s and "The" starts at 5.4 s: frames 69 and 162 at 30 fps.
+    const words = after.clips[0].words as [number, string, number, number][];
+    expect(words.map((w) => w[1]).join(" ")).toBe(
+      "Welcome back to the launch site. The countdown starts in a few minutes.",
+    );
+    expect(words[5].slice(1)).toEqual(["site.", 60, 69]);
+    expect(words[6].slice(1)).toEqual(["The", 162, 167]);
   });
 });
 

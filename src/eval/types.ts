@@ -125,6 +125,10 @@ export interface JobPlan {
     generate_music?: string;
     export?: string;
   };
+  /** Speech whose words are made in the background: the first call that needs them (get_transcript, add_captions)
+   *  is told they are not ready and starts the job, and they land like any other job. Those two tools then answer
+   *  from these words. */
+  words?: CaseTranscript;
 }
 
 export interface ClipRef {

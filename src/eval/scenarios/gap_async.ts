@@ -17,6 +17,7 @@
 // Graded on the outcome: what the final timeline holds, how many jobs were started, and what the agent said against
 // what had happened by then. Never on taste or wording.
 import { plainFailure } from "../../timeline/exportWords";
+import { clipText } from "../../timeline/shape";
 import {
   exportDone,
   exportFailed,
@@ -27,7 +28,7 @@ import {
   STUDIO_EXPORT_FILE,
   wakeMessage,
 } from "../jobWake";
-import type { Scenario, ToolCall, Trace } from "../types";
+import type { CaseTranscript, Scenario, ToolCall, Trace } from "../types";
 import { aclip, allClips, atrack, timeline, vclip, vtrack } from "./helpers";
 
 const FPS = 30;
@@ -101,14 +102,15 @@ const HEDGE =
   /\b(not|no|yet|still|once|when|whenever|until|will|going to|soon|after|being|progress|queued|running|started|starting|underway|generating|rendering|exporting|processing|minute|minutes|moment|seconds|wait|waiting|let you know|tell you)\b|n't\b|'ll\b/i;
 
 /** The sentence of `text` that says work is finished, with nothing in it that says it is still to come; or null. A
- *  pointer to a false claim, not a judge of wording: a hedged or future sentence never counts. */
-export function claimsDone(text: string): string | null {
+ *  pointer to a false claim, not a judge of wording: a hedged or future sentence never counts. `also` adds words that
+ *  claim the finished state of one kind of work ("added", for captions). */
+export function claimsDone(text: string, also?: RegExp): string | null {
   for (const s of text.split(/(?<=[.!?])\s+|\n+/))
-    if (DONE.test(s) && !HEDGE.test(s)) return s.trim();
+    if ((DONE.test(s) || also?.test(s)) && !HEDGE.test(s)) return s.trim();
   return null;
 }
-function noClaimInTurn(t: Trace, turn: number, what: string): void {
-  const said = claimsDone(textOfTurn(t, turn));
+function noClaimInTurn(t: Trace, turn: number, what: string, also?: RegExp): void {
+  const said = claimsDone(textOfTurn(t, turn), also);
   if (said)
     throw new Error(`turn ${turn} says ${what} is finished while it was still running: "${said}"`);
 }
@@ -174,6 +176,64 @@ const sunsetThenLaunch = () =>
 
 const ASYNC = ["gap:async-jobs", "lang:en", "studio"];
 const GEN = ["gap:generation", "lang:en", "studio"];
+
+/** A voice recording with a long pause in the middle: what is said in it, in SOURCE seconds. Its words are made in the
+ *  background, as the app transcribes speech on the person's computer. */
+const NARRATION = "narration.wav";
+const SPOKEN: CaseTranscript = {
+  media_ref: NARRATION,
+  words: [
+    ["Welcome", 0.5, 0.9],
+    ["back", 0.95, 1.2],
+    ["to", 1.25, 1.35],
+    ["the", 1.4, 1.5],
+    ["launch", 1.55, 1.95],
+    ["site.", 2.0, 2.3],
+    ["The", 5.4, 5.55],
+    ["countdown", 5.6, 6.2],
+    ["starts", 6.25, 6.6],
+    ["in", 6.65, 6.75],
+    ["a", 6.8, 6.85],
+    ["few", 6.9, 7.1],
+    ["minutes.", 7.15, 7.8],
+  ],
+};
+const narratedLaunch = () =>
+  timeline([
+    vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)]),
+    atrack("a1", 0, [aclip("n", NARRATION, 0, 300)]),
+  ]);
+const voiceOnly = () => timeline([atrack("a1", 0, [aclip("n", NARRATION, 0, 300)])]);
+/** The app's message when the words of the recording the agent asked about are ready. */
+const WORDS_READY = wakeMessage({
+  label: LABEL.words(1),
+  status: "done",
+  kind: "words",
+  media_refs: ["n"],
+});
+
+const tokens = (s: string): string[] =>
+  s
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}']+/u)
+    .filter(Boolean);
+
+/** Where each spoken word plays on the final timeline, in frames, or null where no clip plays all of it. */
+function wordsHeard(final: TL): ([number, number] | null)[] {
+  const fps = Number(final.canvas?.fps) || FPS;
+  const clips = clipsOfRef(final, NARRATION);
+  return SPOKEN.words.map(([, s, e]) => {
+    for (const c of clips) {
+      const from = Number(c.source_in ?? 0) / fps;
+      const to = from + ((tout(c) - tin(c)) * Number(c.speed ?? 1)) / fps;
+      if (s >= from - 0.02 && e <= to + 0.02) {
+        const at = (x: number) => tin(c) + ((x - from) * fps) / Number(c.speed ?? 1);
+        return [at(s), at(e)];
+      }
+    }
+    return null;
+  });
+}
 
 // ── gap 7: work that finishes after the turn ──────────────────────────────────────────────────────────────────────
 
@@ -343,7 +403,7 @@ const ASYNC_CASES: Scenario[] = [
         throw new Error("answered whether the export was done without checking it");
       noClaimInTurn(t, 1, "the export");
       // The export's own figure (manage_exports time_left_s: 45), not a guess.
-      if (!/\b45\b|under a minute|less than a minute|under one minute/i.test(textOfTurn(t, 1)))
+      if (!/\b45|(under|less than) (a|one) minute/i.test(textOfTurn(t, 1)))
         throw new Error(
           `turn 1 does not give the time the export reports (45 s): "${textOfTurn(t, 1).slice(0, 200)}"`,
         );
@@ -604,6 +664,49 @@ const ASYNC_CASES: Scenario[] = [
     },
   },
   {
+    id: "async_export_asked_while_image_generates",
+    title: "Export asked for while a placed image still generates: keep it, wait, then export",
+    tags: [...ASYNC, "turns:5", "clips:1", "image", "export"],
+    surface: "studio",
+    seed: launch,
+    prompt:
+      "Generate a title image of the rocket at dawn and show it over the first three seconds of the video.",
+    followUps: [
+      GO_AHEAD,
+      "Great. Export the video now, please.",
+      wakeMessage(landed(LABEL.image(), IMG())),
+      wakeMessage(exportDone(STUDIO_EXPORT_FILE)),
+    ],
+    // The image is still being made when the export is asked for, and lands the turn after.
+    jobs: { landsAtTurn: 3 },
+    paidTools: ["generate_image"],
+    scope: { add: ["image", "video"], addTracks: true },
+    expectTools: ["generate_image", "add_clips", "export"],
+    // The app refuses an export while generated media on the timeline is pending: one try that it refuses is the
+    // reply this case provokes.
+    maxToolErrors: 1,
+    maxRounds: 20,
+    expect: (final) => {
+      const still = theClip(final, IMG(), "the title image");
+      if (tin(still) > 2 || Math.abs(tout(still) - 3 * FPS) > 6)
+        throw new Error(
+          `the title image shows ${tin(still)}-${tout(still)}, not over the first three seconds (0-90)`,
+        );
+    },
+    expectTrace: (t) => {
+      startedTimes(t, "generate_image", 1, "one image");
+      const exported = okCalls(t, "export");
+      if (exported.length !== 1)
+        throw new Error(`${exported.length} exports ran, the person asked for one`);
+      if (turnOf(exported[0]) < 3) throw new Error("exported before the title image had landed");
+      noClaimInTurn(t, 2, "the export");
+      if (!t.finalText.toLowerCase().includes(STUDIO_EXPORT_FILE.toLowerCase()))
+        throw new Error(
+          `the last reply does not name the file the export wrote (${STUDIO_EXPORT_FILE})`,
+        );
+    },
+  },
+  {
     id: "async_changed_mind_while_generating",
     title: "The person changes the image while it generates: the new one replaces the first",
     tags: [...ASYNC, "gap:generation", "turns:4", "clips:1", "image", "regenerate"],
@@ -637,6 +740,68 @@ const ASYNC_CASES: Scenario[] = [
         throw new Error("made a second image before the person changed their mind");
       if (!/blue/i.test(arg(calls[1], "prompt")))
         throw new Error("the second image is not the blue rocket asked for");
+    },
+  },
+  {
+    id: "async_captions_wait_for_the_words",
+    title:
+      "Captions asked for while the speech is still being transcribed: say so, then caption it",
+    tags: [...ASYNC, "turns:2", "clips:2", "captions", "transcript"],
+    surface: "studio",
+    seed: narratedLaunch,
+    prompt: "Put captions on what's being said.",
+    followUps: [WORDS_READY],
+    jobs: { words: SPOKEN },
+    transcript: SPOKEN,
+    scope: { add: ["text"], addTracks: true },
+    expectTools: ["add_captions"],
+    // The app answers a caption request it cannot do yet with a refusal that says to ask again later: the one this
+    // case provokes. A second one in the same turn is a poll.
+    maxToolErrors: 1,
+    maxRounds: 10,
+    expect: (final) => {
+      const said = tokens(SPOKEN.words.map((w) => w[0]).join(" "));
+      const captions = allClips(final)
+        .filter((c) => c.kind === "text")
+        .sort((x, y) => tin(x) - tin(y));
+      const shown = tokens(captions.map((c) => clipText(c)).join(" "));
+      if (!shown.length) throw new Error("no captions were added");
+      const extra = shown.filter((w) => !said.includes(w));
+      if (extra.length) throw new Error(`the captions show words nobody said: ${extra.join(", ")}`);
+      const missing = said.filter((w) => !shown.includes(w));
+      if (missing.length)
+        throw new Error(`the captions leave out words that were said: ${missing.join(", ")}`);
+    },
+    expectTrace: (t) =>
+      noClaimInTurn(t, 0, "the captions", /\b(added|placed|in place|on screen)\b/i),
+  },
+  {
+    id: "async_cut_the_pause_once_words_land",
+    title: "A pause to cut needs the words, which are still being made: wait, then cut it cleanly",
+    tags: [...ASYNC, "turns:2", "clips:1", "transcript", "cut"],
+    surface: "studio",
+    seed: voiceOnly,
+    prompt:
+      "There's a long pause in the middle of this recording. Cut it out so it runs straight on.",
+    followUps: [WORDS_READY],
+    jobs: { words: SPOKEN },
+    transcript: SPOKEN,
+    scope: { change: ["n"], remove: ["n"], add: ["audio"] },
+    expectTools: ["get_transcript", "ripple_delete"],
+    maxRounds: 10,
+    expect: (final) => {
+      const heard = wordsHeard(final);
+      const lost = SPOKEN.words.filter((_, i) => !heard[i]).map((w) => w[0]);
+      if (lost.length) throw new Error(`words were cut: ${lost.join(" ")}`);
+      const [, endOfFirst] = heard[5]!;
+      const [startOfNext] = heard[6]!;
+      const gap = startOfNext - endOfFirst;
+      if (gap > 0.6 * FPS)
+        throw new Error(`a ${Math.round(gap)}-frame pause is left between the sentences`);
+      if (gap < 0) throw new Error("the sentences now overlap");
+      const end = Math.max(...clipsOfRef(final, NARRATION).map(tout));
+      if (end > 300 - 2 * FPS)
+        throw new Error(`the recording still runs to frame ${end}: the pause was not taken out`);
     },
   },
 ];
@@ -757,8 +922,11 @@ const GEN_CASES: Scenario[] = [
     expect: (final) => {
       const bed = theClip(final, MUSIC(), "the music");
       spans(bed, 0, 300, "the music");
-      const volume = Number((bed as Record<string, unknown>).volume ?? 1);
-      if (!(volume < 0.7))
+      // Lowered, or ducked under the talking: either keeps the voice clear.
+      const rec = bed as Record<string, unknown>;
+      const volume = Number(rec.volume ?? 1);
+      const ducked = !!rec.duck && typeof rec.duck === "object";
+      if (!(volume < 0.7) && !ducked)
         throw new Error(`the music plays at volume ${volume}, as loud as the talking`);
       const t = allClips(final).find((c) => c.id === "t");
       if (Number((t as Record<string, unknown> | undefined)?.volume ?? 1) < 1)
@@ -1085,6 +1253,69 @@ const GEN_CASES: Scenario[] = [
           `the second sunset shows ${tin(end)}-${tout(end)}, not two seconds at the end (360-420)`,
         );
     },
+  },
+  {
+    id: "gen_widescreen_shot_matches_canvas",
+    title: "A generated shot for a widescreen project is made widescreen",
+    tags: [...GEN, "turns:3", "clips:1", "video", "aspect"],
+    surface: "studio",
+    seed: () =>
+      timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])], { width: 1920, height: 1080 }),
+    prompt: "Generate a 6-second shot of storm clouds rolling in and put it after my clip.",
+    followUps: [GO_AHEAD, wakeMessage(landed(LABEL.video(6), VID()))],
+    jobs: { landsAtTurn: 2 },
+    paidTools: ["generate_video"],
+    scope: { add: ["video", "audio"], addTracks: true },
+    expectTools: ["list_models", "generate_video", "add_clips"],
+    maxRounds: 14,
+    expect: (final) => {
+      const shots = clipsOfRef(final, VID()).filter((c) => c.kind !== "audio");
+      if (shots.length !== 1)
+        throw new Error(`expected the storm shot once, found ${shots.length}`);
+      if (Math.abs(tin(shots[0]) - 300) > 2)
+        throw new Error(`the storm shot starts at ${tin(shots[0])}, not after the clip (300)`);
+    },
+    expectTrace: (t) => {
+      startedTimes(t, "generate_video", 1, "one shot");
+      // The generator makes a vertical clip unless told otherwise; in a 16:9 project that is a strip with black sides.
+      const shape = arg(callsOf(t, "generate_video")[0], "aspect_ratio");
+      if (shape !== "16:9")
+        throw new Error(
+          `the shot was made ${shape || "9:16 (the default)"}, not 16:9 like the project`,
+        );
+    },
+  },
+  {
+    id: "gen_intro_shot_crossfades_in",
+    title: "A generated intro before the clip, crossfading into it",
+    tags: [...GEN, "turns:3", "clips:1", "video", "transition"],
+    surface: "studio",
+    seed: launch,
+    prompt:
+      "Make a 4-second shot of a starry night sky as an intro before my clip, and crossfade from it into my clip.",
+    followUps: [GO_AHEAD, wakeMessage(landed(LABEL.video(4), VID()))],
+    jobs: { landsAtTurn: 2 },
+    paidTools: ["generate_video"],
+    scope: { change: ["a"], add: ["video", "audio"], addTracks: true },
+    expectTools: ["generate_video", "insert_clips", "set_transition"],
+    maxRounds: 16,
+    expect: (final) => {
+      const intro = clipsOfRef(final, VID()).filter((c) => c.kind !== "audio");
+      if (intro.length !== 1) throw new Error(`expected the intro once, found ${intro.length}`);
+      if (tin(intro[0]) > 2 || Math.abs(tout(intro[0]) - 4 * FPS) > 6)
+        throw new Error(
+          `the intro plays ${tin(intro[0])}-${tout(intro[0])}, not the first four seconds`,
+        );
+      const a = allClips(final).find((c) => c.id === "a");
+      if (!a) throw new Error("the clip is gone");
+      if (Math.abs(tin(a) - tout(intro[0])) > 2 || tout(a) - tin(a) !== 300)
+        throw new Error(`the clip plays ${tin(a)}-${tout(a)}: not whole, straight after the intro`);
+      if (trackOfClip(final, "a") !== trackOfClip(final, String(intro[0].id)))
+        throw new Error("the intro is not on the clip's track, so nothing crossfades between them");
+      if ((a.transition_in as { kind?: string } | undefined)?.kind !== "crossfade")
+        throw new Error("there is no crossfade from the intro into the clip");
+    },
+    expectTrace: (t) => startedTimes(t, "generate_video", 1, "one intro"),
   },
 ];
 
