@@ -1,9 +1,8 @@
-// Requests not in English: what about 40% of the messages people type are, and where nearly a third
-// of those turns hit a problem. Each case is a kind of request people make (a single edit, text they
-// want on screen, a whole-video brief, a correction on a later turn, a message mixing two languages,
-// a request typed with slang or without its accents), written in one of the languages they use,
-// weighted roughly by how many write in it: Russian and Ukrainian most, then Turkish, Polish,
-// Indonesian, Spanish, Portuguese, German and Greek.
+// Requests written in a language other than English. Each case is a kind of request people make (a
+// single edit, text they want on screen, a whole-video brief, a correction on a later turn, a
+// message mixing two languages, a request typed with slang or without its accents), written in one
+// of the languages people write to the app in: Russian, Ukrainian, Turkish, Polish, Indonesian,
+// Spanish, Portuguese, German and Greek.
 //
 // What is graded, besides the edit itself, is what only a request in another language can get
 // wrong:
@@ -18,8 +17,10 @@
 import { textBox } from "../../timeline/renderPlan";
 import type { Clip, Timeline } from "../../timeline/model";
 import { clipText } from "../../timeline/shape";
+import type { InferenceRequest } from "../harness";
 import { JOURNEY_LAST_WORD_FRAME, JOURNEY_NARRATION_REF, JOURNEY_WORDS } from "../journey";
 import { shows, writtenIn, type Lang } from "../language";
+import type { ReferenceCalls, ReferenceStep } from "../reference";
 import { STUDIO_MUSIC_REF, STUDIO_VOICEOVER_REF } from "../studio";
 import type { Scenario, ToolCall, Trace } from "../types";
 import {
@@ -231,6 +232,37 @@ function tags(lang: Lang | `${Lang}+en`, turns: number, clips: number, ...kind: 
   ];
 }
 
+// ── correct runs: the steps a reference is written in ────────────────────────
+
+/** A round that puts text on screen. */
+const addText = (entries: Record<string, unknown>[]): ReferenceStep => ({
+  calls: [["add_text_clips", { entries }]],
+});
+
+/** A call that crossfades into `clip` over `frames`. */
+const crossfade = (clip: string, frames: number): ReferenceCalls[number] => [
+  "set_transition",
+  { clip_id: clip, transition_in: { kind: "crossfade", duration: frames } },
+];
+
+/** The clips the previous round's `tool` calls made, from the replies the model got. */
+export function createdBy(req: InferenceRequest, tool: string): string[] {
+  return (req.round_input.tool_results ?? [])
+    .filter((r) => r.name === tool)
+    .flatMap((r) => ((r.result as Any)?.created ?? []) as { clip_id: string }[])
+    .map((c) => c.clip_id);
+}
+
+/** The text clips the timeline the model read in the previous round holds. */
+export function textIdsRead(req: InferenceRequest): string[] {
+  return (req.round_input.tool_results ?? [])
+    .filter((r) => r.name === "get_timeline")
+    .flatMap((r) => ((r.result as Any)?.timeline?.tracks ?? []) as Any[])
+    .flatMap((t) => (t.clips ?? []) as Any[])
+    .filter((c) => c.kind === "text")
+    .map((c) => String(c.id));
+}
+
 // ── seeds ───────────────────────────────────────────────────────────────────
 
 const one = (frames: number) => () => timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, frames)])]);
@@ -315,6 +347,10 @@ const RUSSIAN: Scenario[] = [
     prompt: "Сделай этот клип покороче — до полутора секунд.",
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      { calls: [["set_clip_properties", { clip_ids: ["a"], duration: 45 }]] },
+      { text: "Готово: укоротил клип до полутора секунд (45 кадров)." },
+    ],
     expect: (tl) => {
       const kept = playing(tl, "a.mp4");
       assert(kept.length > 0, "the clip is gone");
@@ -332,6 +368,10 @@ const RUSSIAN: Scenario[] = [
     prompt: "Добавь в начало надпись «Наше лето», пусть висит первые три секунды.",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([{ timeline_in: 0, timeline_out: 90, content: "Наше лето" }]),
+      { text: "Добавил надпись «Наше лето» на первые три секунды." },
+    ],
     expect: (tl) => {
       const title = titleShowing(tl, "Наше лето", "ru");
       near(Number(title.timeline_in), 0, 2, "the title's start");
@@ -353,6 +393,17 @@ const RUSSIAN: Scenario[] = [
       words: JOURNEY_WORDS.map(([, text, s, e]) => [text, s / FPS, e / FPS] as const),
     },
     maxRounds: 10,
+    reference: [
+      { calls: [["get_transcript", {}]] },
+      addText([
+        { timeline_in: 30, timeline_out: 90, content: "Добро пожаловать на шоу" },
+        { timeline_in: 95, timeline_out: 141, content: "Сегодня мы" },
+        { timeline_in: 145, timeline_out: 225, content: "создаём кое-что новое" },
+      ]),
+      {
+        text: "Готово: добавил русские субтитры к речи — три фразы, со второй по восьмую секунду.",
+      },
+    ],
     expect: (tl) => {
       const subs = textClips(tl);
       assert(subs.length > 0, "no subtitles were added");
@@ -400,6 +451,31 @@ const RUSSIAN: Scenario[] = [
     expectTools: ["ripple_delete", "set_clip_properties"],
     maxRounds: 14,
     // Which shots and how they are cut is taste; the length, the music and the fade were asked for.
+    reference: [
+      {
+        calls: [
+          [
+            "ripple_delete",
+            {
+              track_id: "v1",
+              ranges: [60, 150, 240, 330, 420].map((start) => ({ start, end: start + 30 })),
+              ignore_sync_locked_tracks: ["a1"],
+            },
+          ],
+        ],
+      },
+      {
+        calls: [
+          ["set_clip_properties", { clip_ids: ["m"], duration: 300 }],
+          ["set_clip_properties", { clip_ids: ["c5"], fade: { out: 30 } }],
+        ],
+      },
+      {
+        text:
+          "Собрал ролик ровно на 10 секунд: по две секунды от каждого клипа. Музыка обрезана по " +
+          "концу видео, а в конце плавное затемнение.",
+      },
+    ],
     expect: (tl) => {
       const end = pictureEnd(tl);
       near(end, 300, 6, "the video's length in frames (10 s)");
@@ -428,6 +504,13 @@ const RUSSIAN: Scenario[] = [
     followUps: ["Ой, не тот. Верни первый как было, а укороти второй."],
     expectTools: ["set_clip_properties", "undo"],
     maxRounds: 10,
+    reference: [
+      { calls: [["set_clip_properties", { clip_ids: ["a"], duration: 90 }]] },
+      { text: "Укоротил первый клип на две секунды, теперь он длится три секунды." },
+      { calls: [["undo", {}]] },
+      { calls: [["set_clip_properties", { clip_ids: ["b"], duration: 90 }]] },
+      { text: "Вернул первый клип как было и укоротил второй на две секунды." },
+    ],
     expect: (tl) => {
       const a = clipById(tl, "a");
       assert(a, "the first clip is gone");
@@ -457,6 +540,25 @@ const RUSSIAN: Scenario[] = [
     // The library has a music bed: making new music is the paid path nobody asked for.
     mustNotCall: ["generate_music"],
     maxRounds: 10,
+    reference: [
+      { calls: [["library_op", { action: "list" }]] },
+      {
+        calls: [
+          [
+            "add_clips",
+            { entries: [{ media_ref: "media_bed", timeline_in: 0, timeline_out: 150 }] },
+          ],
+        ],
+      },
+      {
+        calls: (req) => [
+          ["set_clip_properties", { clip_ids: createdBy(req, "add_clips"), volume: 0.35 }],
+        ],
+      },
+      {
+        text: "Закинул музыку из библиотеки под весь ролик и сделал её потише, чтобы голос было слышно.",
+      },
+    ],
     expect: (tl) => {
       const bed = fromLibrary(tl, "media_bed", "bed.mp3");
       assert(bed.length > 0, "the library's music is not on the timeline");
@@ -489,6 +591,18 @@ const RUSSIAN: Scenario[] = [
     expectTools: ["generate_voiceover", "add_clips"],
     paidTools: ["generate_voiceover"],
     maxRounds: 10,
+    reference: [
+      {
+        calls: [["generate_voiceover", { text: "Добро пожаловать на наш канал", language: "ru" }]],
+      },
+      {
+        text: "Озвучка генерируется; как только она будет готова, поставлю её в самое начало видео.",
+      },
+      {
+        calls: [["add_clips", { entries: [{ media_ref: STUDIO_VOICEOVER_REF, timeline_in: 0 }] }]],
+      },
+      { text: "Озвучка «Добро пожаловать на наш канал» готова и стоит в самом начале видео." },
+    ],
     expect: (tl) => {
       const vo = playing(tl, STUDIO_VOICEOVER_REF);
       assert(vo.length > 0, "the voiceover never reached the timeline");
@@ -525,6 +639,16 @@ const RUSSIAN: Scenario[] = [
     prompt: "сделай fade in на первом клипе и crossfade на всех склейках, по полсекунды",
     expectTools: ["set_clip_properties", "set_transition"],
     maxRounds: 6,
+    reference: [
+      {
+        calls: [
+          ["set_clip_properties", { clip_ids: ["a"], fade: { in: 15 } }],
+          crossfade("b", 15),
+          crossfade("c", 15),
+        ],
+      },
+      { text: "Сделал fade in на первом клипе и crossfade по полсекунды на обеих склейках." },
+    ],
     expect: (tl) => {
       const a = clipById(tl, "a") as Any;
       assert(a, "the first clip is gone");
@@ -558,6 +682,23 @@ const UKRAINIAN: Scenario[] = [
     prompt: "Перестав останній кліп на самий початок, а решта хай іде за ним.",
     expectTools: ["move_clips"],
     maxRounds: 6,
+    reference: [
+      {
+        calls: [
+          [
+            "move_clips",
+            {
+              moves: [
+                { clip_id: "c", to_timeline_in: 0 },
+                { clip_id: "a", to_timeline_in: 60 },
+                { clip_id: "b", to_timeline_in: 120 },
+              ],
+            },
+          ],
+        ],
+      },
+      { text: "Переставив останній кліп на початок, решта йде за ним у тому ж порядку." },
+    ],
     expect: (tl) => {
       const order = clipsOf(tl, "v1").map((c) => c.media_ref);
       assert(
@@ -578,6 +719,17 @@ const UKRAINIAN: Scenario[] = [
     prompt: "Додай унизу кадру підпис «Київ, весна 2026» з 0:02 до 0:06.",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([
+        {
+          timeline_in: 60,
+          timeline_out: 180,
+          content: "Київ, весна 2026",
+          transform: { position: { x: 0.5, y: 0.85 } },
+        },
+      ]),
+      { text: "Додав унизу кадру підпис «Київ, весна 2026» з 0:02 до 0:06." },
+    ],
     expect: (tl) => {
       const cap = titleShowing(tl, "Київ, весна 2026", "uk");
       near(Number(cap.timeline_in), 60, 3, "the caption's start (0:02)");
@@ -599,6 +751,28 @@ const UKRAINIAN: Scenario[] = [
       "а в кінці на дві секунди логотип. Нічого не генеруй.",
     expectTools: ["library_op", "add_clips"],
     maxRounds: 10,
+    reference: [
+      { calls: [["library_op", { action: "list" }]] },
+      {
+        calls: [
+          [
+            "add_clips",
+            {
+              entries: [
+                { media_ref: "media_broll_city", timeline_in: 0, timeline_out: 150 },
+                { media_ref: "media_broll_ocean", timeline_in: 150, timeline_out: 300 },
+                { media_ref: "logo.png", timeline_in: 300, timeline_out: 360 },
+              ],
+            },
+          ],
+        ],
+      },
+      {
+        text:
+          "Змонтував відео з бібліотеки: спершу місто, потім океан, а в кінці логотип на дві " +
+          "секунди. Нічого не генерував.",
+      },
+    ],
     expect: (tl) => {
       const city = fromLibrary(tl, "media_broll_city", "city.mp4");
       const ocean = fromLibrary(tl, "media_broll_ocean", "ocean.mp4");
@@ -636,6 +810,29 @@ const UKRAINIAN: Scenario[] = [
     expectTools: ["generate_music", "add_clips"],
     paidTools: ["generate_music"],
     maxRounds: 14,
+    reference: [
+      {
+        text: "Генерація музики платна, тож уточню: згенерувати спокійну інструментальну музику під усе відео?",
+      },
+      {
+        calls: [
+          [
+            "generate_music",
+            { prompt: "calm ambient instrumental, soft piano", instrumental: true },
+          ],
+        ],
+      },
+      {
+        calls: [
+          [
+            "add_clips",
+            { entries: [{ media_ref: STUDIO_MUSIC_REF, timeline_in: 0, timeline_out: 150 }] },
+          ],
+        ],
+      },
+      { text: "Готово: згенерував спокійну музику без слів і поставив її під усе відео." },
+      { text: "Музика вже готова й стоїть під усім відео, більше нічого робити не треба." },
+    ],
     expect: (tl) => {
       const music = playing(tl, STUDIO_MUSIC_REF);
       assert(music.length > 0, "the music never reached the timeline");
@@ -662,6 +859,7 @@ const UKRAINIAN: Scenario[] = [
     seed: one(150),
     prompt: "Привіт! Ти розумієш українську?",
     maxRounds: 3,
+    reference: [{ text: "Привіт! Так, я розумію українську. Чим можу допомогти з відео?" }],
     expect: untouched(one(150)),
     expectTrace: (t) => repliesIn(t, "uk"),
   },
@@ -677,6 +875,12 @@ const TURKISH: Scenario[] = [
     prompt: "Videonun başına 'Kış tatili başlıyor' yazısını ekle, iki saniye ekranda kalsın.",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([{ timeline_in: 0, timeline_out: 60, content: "Kış tatili başlıyor" }]),
+      {
+        text: "Videonun başına 'Kış tatili başlıyor' yazısını ekledim, ilk iki saniye ekranda kalıyor.",
+      },
+    ],
     expect: (tl) => {
       const title = titleShowing(tl, "Kış tatili başlıyor", "tr");
       near(Number(title.timeline_in), 0, 2, "the title's start");
@@ -701,6 +905,18 @@ const TURKISH: Scenario[] = [
       "koy: 'Hafta sonu kaçamağı'.",
     expectTools: ["set_project_settings", "ripple_delete", "add_text_clips"],
     maxRounds: 12,
+    reference: [
+      { calls: [["set_project_settings", { size: { aspect_ratio: "9:16" } }]] },
+      { calls: [["ripple_delete", { track_id: "v1", start: 450, end: 720 }]] },
+      addText([
+        { timeline_in: 0, timeline_out: 90, content: "Hafta sonu kaçamağı", style: { size: "xl" } },
+      ]),
+      {
+        text:
+          "Videoyu Instagram için dikey formata çevirdim, 15 saniyeye kısalttım ve başa büyük bir " +
+          "başlık ekledim.",
+      },
+    ],
     expect: (tl) => {
       const { width, height, fps } = tl.canvas;
       assert(Number(height) > Number(width), `the canvas is ${width}x${height}, not vertical`);
@@ -725,6 +941,13 @@ const TURKISH: Scenario[] = [
     followUps: ["Hmm, böyle olmadı. Geri al, sadece ilk klibe uygula."],
     expectTools: ["apply_color", "undo"],
     maxRounds: 10,
+    reference: [
+      { calls: [["apply_color", { clip_ids: ["a", "b", "c"], saturation: 0 }]] },
+      { text: "Tamam, tüm kliplere siyah beyaz efekt uyguladım." },
+      { calls: [["undo", {}]] },
+      { calls: [["apply_color", { clip_ids: ["a"], saturation: 0 }]] },
+      { text: "Geri aldım; siyah beyaz artık sadece ilk klipte." },
+    ],
     expect: (tl) => {
       assert(isMonochrome(clipById(tl, "a")), "the first clip is not black and white");
       for (const id of ["b", "c"])
@@ -742,6 +965,10 @@ const TURKISH: Scenario[] = [
     prompt: "videoyu 10 saniyeye kisalt, sondan kes",
     expectTools: ["ripple_delete", "set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      { calls: [["ripple_delete", { track_id: "v1", start: 300, end: 480 }]] },
+      { text: "Videoyu sondan kestim, şimdi tam 10 saniye." },
+    ],
     expect: (tl) => {
       near(pictureEnd(tl), 300, 3, "the video's length in frames (10 s)");
       const a = clipById(tl, "a");
@@ -768,6 +995,10 @@ const POLISH: Scenario[] = [
     prompt: "Dodaj przenikanie między wszystkimi klipami, każde po pół sekundy.",
     expectTools: ["set_transition"],
     maxRounds: 6,
+    reference: [
+      { calls: [crossfade("b", 15), crossfade("c", 15), crossfade("d", 15)] },
+      { text: "Dodałem przenikanie po pół sekundy na wszystkich trzech cięciach między klipami." },
+    ],
     expect: (tl) => {
       for (const id of ["b", "c", "d"]) {
         const tr = (clipById(tl, id) as Any)?.transition_in;
@@ -788,6 +1019,10 @@ const POLISH: Scenario[] = [
     prompt: "dodaj na koncu napis 'dzieki za ogladanie' na ostatnie 2 sekundy",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([{ timeline_in: 240, timeline_out: 300, content: "Dzięki za oglądanie" }]),
+      { text: "Dodałem na końcu napis „Dzięki za oglądanie” na ostatnie 2 sekundy." },
+    ],
     expect: (tl) => {
       const text = titleShowing(tl, "dzieki za ogladanie", "pl", { accents: false });
       near(Number(text.timeline_in), 240, 3, "the text's start (2 s before the end)");
@@ -805,6 +1040,25 @@ const POLISH: Scenario[] = [
     followUps: ["Przesuń go trochę wyżej i zmień kolor na żółty."],
     expectTools: ["add_text_clips", "update_text"],
     maxRounds: 10,
+    reference: [
+      addText([{ timeline_in: 0, timeline_out: 90, content: "Nasza podróż" }]),
+      { text: "Dodałem tytuł 'Nasza podróż' na środku ekranu na pierwsze trzy sekundy." },
+      // A new turn: the title's id is in the timeline, read again here.
+      { calls: [["get_timeline", {}]] },
+      {
+        calls: (req) => [
+          [
+            "update_text",
+            {
+              clip_ids: textIdsRead(req),
+              transform: { position: { x: 0.5, y: 0.38 } },
+              style: { color: "#FFD400" },
+            },
+          ],
+        ],
+      },
+      { text: "Przesunąłem tytuł trochę wyżej i zmieniłem jego kolor na żółty." },
+    ],
     expect: (tl) => {
       const title = titleShowing(tl, "Nasza podróż", "pl");
       near(Number(title.timeline_in), 0, 2, "the title's start");
@@ -846,6 +1100,39 @@ const POLISH: Scenario[] = [
       "wszystkie klipy po kolei, a na sam koniec logo z biblioteki na trzy sekundy.",
     expectTools: ["move_clips", "add_text_clips", "add_clips"],
     maxRounds: 12,
+    reference: [
+      {
+        calls: [
+          [
+            "move_clips",
+            {
+              moves: [
+                { clip_id: "c", to_timeline_in: 240 },
+                { clip_id: "b", to_timeline_in: 150 },
+                { clip_id: "a", to_timeline_in: 60 },
+              ],
+            },
+          ],
+        ],
+      },
+      {
+        calls: [
+          [
+            "add_text_clips",
+            { entries: [{ timeline_in: 0, timeline_out: 60, content: "Wkrótce" }] },
+          ],
+          [
+            "add_clips",
+            { entries: [{ media_ref: "logo.png", timeline_in: 330, timeline_out: 420 }] },
+          ],
+        ],
+      },
+      {
+        text:
+          "Zrobiłem zwiastun: najpierw dwie sekundy czarnego ekranu z napisem 'Wkrótce', potem " +
+          "wszystkie klipy po kolei, a na końcu logo z biblioteki na trzy sekundy.",
+      },
+    ],
     expect: (tl) => {
       const card = titleShowing(tl, "Wkrótce", "pl");
       near(Number(card.timeline_in), 0, 2, "the text's start");
@@ -886,6 +1173,10 @@ const INDONESIAN: Scenario[] = [
     prompt: "musiknya kegedean, kecilin jadi setengahnya aja. suara videonya biarin",
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      { calls: [["set_clip_properties", { clip_ids: ["m"], volume: 0.5 }]] },
+      { text: "Oke, musiknya sudah saya kecilkan jadi setengah. Suara videonya tidak saya ubah." },
+    ],
     expect: (tl) => near(numOf(clipById(tl, "m")?.volume ?? 1), 0.5, 0.07, "the music's volume"),
     expectTrace: (t) => repliesIn(t, "id"),
   },
@@ -900,6 +1191,18 @@ const INDONESIAN: Scenario[] = [
       "detik ke-10. Masing-masing muncul 2 detik.",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([
+        { timeline_in: 0, timeline_out: 60, content: "Hari 1" },
+        { timeline_in: 150, timeline_out: 210, content: "Hari 2" },
+        { timeline_in: 300, timeline_out: 360, content: "Hari 3" },
+      ]),
+      {
+        text:
+          "Sudah saya tambahkan: 'Hari 1' di awal, 'Hari 2' mulai detik ke-5, dan 'Hari 3' mulai " +
+          "detik ke-10, masing-masing 2 detik.",
+      },
+    ],
     expect: (tl) => {
       [0, 150, 300].forEach((at, i) => {
         const want = new RegExp(`\\bhari ${i + 1}\\b`, "iu");
@@ -921,6 +1224,14 @@ const INDONESIAN: Scenario[] = [
     followUps: ["Oke, hapus yang paling pendek, terus rapatkan sisanya."],
     expectTools: ["get_timeline", "ripple_delete"],
     maxRounds: 8,
+    reference: [
+      { calls: [["get_timeline", {}]] },
+      {
+        text: "Sekarang ada 3 klip di timeline: yang pertama 5 detik, yang kedua 2 detik, dan yang ketiga 6 detik.",
+      },
+      { calls: [["ripple_delete", { track_id: "v1", start: 150, end: 210 }]] },
+      { text: "Oke, klip yang paling pendek sudah saya hapus dan sisanya sudah dirapatkan." },
+    ],
     expect: (tl) => {
       assert(!playing(tl, "b.mp4").length, "the shortest clip (b, 2 s) is still there");
       const a = clipById(tl, "a");
@@ -958,6 +1269,10 @@ const SPANISH: Scenario[] = [
     prompt: "Quita el segundo clip y que no quede ningún hueco.",
     expectTools: ["ripple_delete", "remove_clips"],
     maxRounds: 5,
+    reference: [
+      { calls: [["ripple_delete", { track_id: "v1", start: 60, end: 150 }]] },
+      { text: "Listo: quité el segundo clip y moví el tercero para que no quede ningún hueco." },
+    ],
     expect: (tl) => {
       assert(!playing(tl, "b.mp4").length, "the second clip is still there");
       const a = clipById(tl, "a");
@@ -979,6 +1294,10 @@ const SPANISH: Scenario[] = [
     prompt: "El título se ve muy pequeño. Ponlo más grande y en negrita.",
     expectTools: ["update_text"],
     maxRounds: 5,
+    reference: [
+      { calls: [["update_text", { clip_ids: ["title"], style: { size: "l", bold: true } }]] },
+      { text: "Listo: puse el título más grande y en negrita." },
+    ],
     expect: (tl) => {
       const title = clipById(tl, "title");
       assert(title, "the title was deleted");
@@ -1004,6 +1323,12 @@ const SPANISH: Scenario[] = [
     followUps: ["Perfecto. Ahora haz lo mismo con el final."],
     expectTools: ["ripple_delete", "set_clip_properties"],
     maxRounds: 8,
+    reference: [
+      { calls: [["ripple_delete", { track_id: "v1", start: 0, end: 90 }]] },
+      { text: "Listo, corté los primeros 3 segundos del video." },
+      { calls: [["ripple_delete", { track_id: "v1", start: 270, end: 360 }]] },
+      { text: "Hecho: también corté los últimos 3 segundos. Ahora el video dura 9 segundos." },
+    ],
     expect: (tl) => {
       const shots = playing(tl, "a.mp4");
       assert(shots.length > 0, "the video is gone");
@@ -1029,6 +1354,10 @@ const PORTUGUESE: Scenario[] = [
     prompt: "vc consegue deixar o último clipe em câmera lenta? metade da velocidade tá bom",
     expectTools: ["set_clip_properties"],
     maxRounds: 5,
+    reference: [
+      { calls: [["set_clip_properties", { clip_ids: ["c"], speed: 0.5 }]] },
+      { text: "Pronto! Deixei o último clipe em câmera lenta, com metade da velocidade." },
+    ],
     expect: (tl) => {
       near(Number((clipById(tl, "c") as Any)?.speed ?? 1), 0.5, 0.05, "the last clip's speed");
       for (const id of ["a", "b"])
@@ -1045,6 +1374,12 @@ const PORTUGUESE: Scenario[] = [
     prompt: "Coloca no começo o texto 'Coming soon', assim mesmo, em inglês, por uns 2 segundos.",
     expectTools: ["add_text_clips"],
     maxRounds: 5,
+    reference: [
+      addText([{ timeline_in: 0, timeline_out: 60, content: "Coming soon" }]),
+      {
+        text: "Pronto: coloquei o texto 'Coming soon', em inglês mesmo, nos primeiros 2 segundos.",
+      },
+    ],
     expect: (tl) => {
       const text = titleShowing(tl, "Coming soon", undefined);
       near(Number(text.timeline_in), 0, 2, "the text's start");
@@ -1065,6 +1400,10 @@ const GERMAN: Scenario[] = [
     prompt: "Mach zwischen den beiden Clips eine Überblendung von 1,5 Sekunden.",
     expectTools: ["set_transition"],
     maxRounds: 5,
+    reference: [
+      { calls: [crossfade("b", 45)] },
+      { text: "Erledigt: Zwischen den beiden Clips ist jetzt eine Überblendung von 1,5 Sekunden." },
+    ],
     expect: (tl) => {
       const tr = (clipById(tl, "b") as Any)?.transition_in;
       assert(tr, "no crossfade between the two clips");
@@ -1082,6 +1421,10 @@ const GERMAN: Scenario[] = [
     prompt: "Wie lang ist das Video gerade insgesamt?",
     expectTools: ["get_timeline"],
     maxRounds: 4,
+    reference: [
+      { calls: [["get_timeline", {}]] },
+      { text: "Das Video ist insgesamt 7,5 Sekunden lang (225 Frames bei 30 fps)." },
+    ],
     expect: untouched(row(90, 60, 75)),
     expectTrace: (t) => {
       // 225 frames at 30 fps: 7,5 s however it is written (seconds, frames, or seconds and frames).
@@ -1108,6 +1451,19 @@ const GREEK: Scenario[] = [
       "σβήνει σιγά σιγά στο τέλος.",
     expectTools: ["add_text_clips", "set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      addText([
+        {
+          timeline_in: 0,
+          timeline_out: 90,
+          content: "Καλοκαίρι στην Κρήτη",
+          animation: { exit: "fade", exit_ms: 1000 },
+        },
+      ]),
+      {
+        text: "Έβαλα τον τίτλο «Καλοκαίρι στην Κρήτη» στην αρχή για τρία δευτερόλεπτα, και σβήνει σιγά σιγά στο τέλος.",
+      },
+    ],
     expect: (tl) => {
       // Greek in capitals drops its accents, so they are not compared.
       const title = titleShowing(tl, "Καλοκαίρι στην Κρήτη", "el", { accents: false });
@@ -1126,6 +1482,10 @@ const GREEK: Scenario[] = [
     prompt: "Πόσα κλιπ έχει τώρα το βίντεο;",
     expectTools: ["get_timeline"],
     maxRounds: 4,
+    reference: [
+      { calls: [["get_timeline", {}]] },
+      { text: "Το βίντεο έχει τώρα 3 κλιπ, το ένα μετά το άλλο." },
+    ],
     expect: untouched(row(60, 60, 60)),
     expectTrace: (t) => {
       assert(

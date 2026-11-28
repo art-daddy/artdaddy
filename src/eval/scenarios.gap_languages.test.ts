@@ -1,8 +1,10 @@
-// The cases in other languages (scenarios/gap_languages.ts), proven offline: each one's correct run
-// passes through the real harness (real agent loop, real timeline tools and stand-ins, real oracle)
-// with the model's rounds scripted, and a realistic wrong run of each kind of request fails, so
-// every check is shown to reject a plausible wrong result and not only a run that does nothing.
-// No network and no model is reached: fetch is a spy that throws, checked after every test.
+// The cases in other languages (scenarios/gap_languages.ts), proven offline. Each case's correct run
+// (its `reference`) is replayed by scenarios.reference.test.ts with every other case's; here a
+// realistic wrong run of each case is driven through the same real harness (reference.ts
+// driveScripted: real agent loop, real timeline tools and stand-ins, real oracle, the model's rounds
+// scripted) and must fail for the reason named, so every check is shown to reject a plausible wrong
+// result and not only a run that does nothing. No network and no model is reached: fetch is a spy
+// that throws, checked after every test.
 //
 // The reply-language module (language.ts) is tested here too, in both directions: a reply in the
 // person's language passes, and an English reply, a reply in a neighbouring language, or an English
@@ -13,9 +15,6 @@ import path from "node:path";
 import fc from "fast-check";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO } from "../agent/types";
-import { DEFAULT_MODEL } from "../store/chatControls";
-import { driveScenario, type InferenceRequest } from "./harness";
 import {
   LANGS,
   markerScores,
@@ -26,54 +25,16 @@ import {
   writtenIn,
   type Lang,
 } from "./language";
-import { Budget } from "./pricing";
+import { driveScripted, type ReferenceCalls, type ReferenceStep } from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
-import { GAP_LANGUAGES, MUSIC_LANDED, VOICEOVER_LANDED } from "./scenarios/gap_languages";
+import {
+  GAP_LANGUAGES,
+  MUSIC_LANDED,
+  textIdsRead,
+  VOICEOVER_LANDED,
+} from "./scenarios/gap_languages";
 import { STUDIO_MUSIC_REF, STUDIO_VOICEOVER_REF } from "./studio";
 import type { Scenario } from "./types";
-
-type Calls = [string, Record<string, unknown>][];
-/** One scripted round: a reply, or tool calls (fixed, or made from every request the model got so
- *  far, for a call that needs an id an earlier tool minted). */
-type Step = { text: string } | { calls: Calls | ((seen: InferenceRequest[]) => Calls) };
-
-const USAGE = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
-
-/** A model that answers from a script, one step per round. */
-function scripted(steps: Step[]) {
-  let i = 0;
-  const seen: InferenceRequest[] = [];
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    seen.push(req);
-    const step = steps[i++] ?? { text: "" };
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage: USAGE,
-        provider_snapshot: {},
-      };
-    const calls = typeof step.calls === "function" ? step.calls(seen) : step.calls;
-    const pending: PendingCall[] = calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage: USAGE,
-      provider_snapshot: {},
-    };
-  };
-  return { send };
-}
 
 const WORK = path.resolve("reports", "eval", `gap-languages-${process.pid}`);
 const byId = (id: string): Scenario => {
@@ -81,6 +42,8 @@ const byId = (id: string): Scenario => {
   if (!s) throw new Error(`no case ${id}`);
   return s;
 };
+/** A case's correct run (its reference). */
+const refOf = (id: string): ReferenceStep[] => byId(id).reference ?? [];
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 beforeEach(() => {
@@ -95,14 +58,9 @@ afterEach(() => {
 });
 afterAll(() => fsp.rm(WORK, { recursive: true, force: true }));
 
-async function drive(scenario: Scenario, steps: Step[]) {
-  const { send } = scripted(steps);
-  const result = await driveScenario(scenario, DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(2),
-    send,
-    workDir: WORK,
-  });
+/** Drive a case with a scripted run through the real harness, and say everything the grade found. */
+async function drive(scenario: Scenario, steps: readonly ReferenceStep[]) {
+  const { result } = await driveScripted(scenario, steps, { workDir: WORK });
   const why = [
     ...(result.harnessError ? [`harness: ${result.harnessError}`] : []),
     ...result.tier0.violations,
@@ -112,343 +70,18 @@ async function drive(scenario: Scenario, steps: Step[]) {
   return { result, why };
 }
 
-/** The clips an earlier add_clips / add_text_clips call made, from the tool results the model saw. */
-function created(seen: InferenceRequest[], tool: string): string[] {
-  return seen
-    .flatMap((r) => r.round_input.tool_results ?? [])
-    .filter((r) => r.name === tool)
-    .flatMap((r) => (r.result?.created ?? []) as { clip_id: string }[])
-    .map((c) => c.clip_id);
-}
-
-const crossfade = (clip: string, duration: number): [string, Record<string, unknown>] => [
+const crossfade = (clip: string, frames: number): ReferenceCalls[number] => [
   "set_transition",
-  { clip_id: clip, transition_in: { kind: "crossfade", duration } },
+  { clip_id: clip, transition_in: { kind: "crossfade", duration: frames } },
 ];
 
-const text = (entries: Record<string, unknown>[]): Step => ({
+const addText = (entries: Record<string, unknown>[]): ReferenceStep => ({
   calls: [["add_text_clips", { entries }]],
 });
 
-// ── the correct run of every case ───────────────────────────────────────────
-
-const CORRECT: Record<string, Step[]> = {
-  lang_ru_trim_number_word: [
-    { calls: [["set_clip_properties", { clip_ids: ["a"], duration: 45 }]] },
-    { text: "Готово: укоротил клип до полутора секунд (45 кадров)." },
-  ],
-  lang_ru_title_in_russian: [
-    text([{ timeline_in: 0, timeline_out: 90, content: "Наше лето" }]),
-    { text: "Добавил надпись «Наше лето» на первые три секунды." },
-  ],
-  lang_ru_subtitles_translated: [
-    { calls: [["get_transcript", {}]] },
-    text([
-      { timeline_in: 30, timeline_out: 90, content: "Добро пожаловать на шоу" },
-      { timeline_in: 95, timeline_out: 141, content: "Сегодня мы" },
-      { timeline_in: 145, timeline_out: 225, content: "создаём кое-что новое" },
-    ]),
-    { text: "Готово: добавил русские субтитры к речи — три фразы, со второй по восьмую секунду." },
-  ],
-  lang_ru_reel_brief: [
-    {
-      calls: [
-        [
-          "ripple_delete",
-          {
-            track_id: "v1",
-            ranges: [60, 150, 240, 330, 420].map((start) => ({ start, end: start + 30 })),
-            ignore_sync_locked_tracks: ["a1"],
-          },
-        ],
-      ],
-    },
-    {
-      calls: [
-        ["set_clip_properties", { clip_ids: ["m"], duration: 300 }],
-        ["set_clip_properties", { clip_ids: ["c5"], fade: { out: 30 } }],
-      ],
-    },
-    {
-      text:
-        "Собрал ролик ровно на 10 секунд: по две секунды от каждого клипа. Музыка обрезана по " +
-        "концу видео, а в конце плавное затемнение.",
-    },
-  ],
-  lang_ru_followup_wrong_clip: [
-    { calls: [["set_clip_properties", { clip_ids: ["a"], duration: 90 }]] },
-    { text: "Укоротил первый клип на две секунды, теперь он длится три секунды." },
-    { calls: [["undo", {}]] },
-    { calls: [["set_clip_properties", { clip_ids: ["b"], duration: 90 }]] },
-    { text: "Вернул первый клип как было и укоротил второй на две секунды." },
-  ],
-  lang_ru_slang_library_music: [
-    { calls: [["library_op", { action: "list" }]] },
-    {
-      calls: [
-        ["add_clips", { entries: [{ media_ref: "media_bed", timeline_in: 0, timeline_out: 150 }] }],
-      ],
-    },
-    {
-      calls: (seen) => [
-        ["set_clip_properties", { clip_ids: created(seen, "add_clips"), volume: 0.35 }],
-      ],
-    },
-    {
-      text: "Закинул музыку из библиотеки под весь ролик и сделал её потише, чтобы голос было слышно.",
-    },
-  ],
-  lang_ru_voiceover_words: [
-    {
-      calls: [["generate_voiceover", { text: "Добро пожаловать на наш канал", language: "ru" }]],
-    },
-    {
-      text: "Озвучка генерируется; как только она будет готова, поставлю её в самое начало видео.",
-    },
-    { calls: [["add_clips", { entries: [{ media_ref: STUDIO_VOICEOVER_REF, timeline_in: 0 }] }]] },
-    { text: "Озвучка «Добро пожаловать на наш канал» готова и стоит в самом начале видео." },
-  ],
-  lang_ru_en_mixed_jargon: [
-    {
-      calls: [
-        ["set_clip_properties", { clip_ids: ["a"], fade: { in: 15 } }],
-        crossfade("b", 15),
-        crossfade("c", 15),
-      ],
-    },
-    { text: "Сделал fade in на первом клипе и crossfade по полсекунды на обеих склейках." },
-  ],
-  lang_uk_last_clip_first: [
-    {
-      calls: [
-        [
-          "move_clips",
-          {
-            moves: [
-              { clip_id: "c", to_timeline_in: 0 },
-              { clip_id: "a", to_timeline_in: 60 },
-              { clip_id: "b", to_timeline_in: 120 },
-            ],
-          },
-        ],
-      ],
-    },
-    { text: "Переставив останній кліп на початок, решта йде за ним у тому ж порядку." },
-  ],
-  lang_uk_lower_third: [
-    text([
-      {
-        timeline_in: 60,
-        timeline_out: 180,
-        content: "Київ, весна 2026",
-        transform: { position: { x: 0.5, y: 0.85 } },
-      },
-    ]),
-    { text: "Додав унизу кадру підпис «Київ, весна 2026» з 0:02 до 0:06." },
-  ],
-  lang_uk_library_edit: [
-    { calls: [["library_op", { action: "list" }]] },
-    {
-      calls: [
-        [
-          "add_clips",
-          {
-            entries: [
-              { media_ref: "media_broll_city", timeline_in: 0, timeline_out: 150 },
-              { media_ref: "media_broll_ocean", timeline_in: 150, timeline_out: 300 },
-              { media_ref: "logo.png", timeline_in: 300, timeline_out: 360 },
-            ],
-          },
-        ],
-      ],
-    },
-    {
-      text:
-        "Змонтував відео з бібліотеки: спершу місто, потім океан, а в кінці логотип на дві " +
-        "секунди. Нічого не генерував.",
-    },
-  ],
-  lang_uk_music_confirm: [
-    {
-      text: "Генерація музики платна, тож уточню: згенерувати спокійну інструментальну музику під усе відео?",
-    },
-    {
-      calls: [
-        ["generate_music", { prompt: "calm ambient instrumental, soft piano", instrumental: true }],
-      ],
-    },
-    {
-      calls: [
-        [
-          "add_clips",
-          { entries: [{ media_ref: STUDIO_MUSIC_REF, timeline_in: 0, timeline_out: 150 }] },
-        ],
-      ],
-    },
-    { text: "Готово: згенерував спокійну музику без слів і поставив її під усе відео." },
-    { text: "Музика вже готова й стоїть під усім відео, більше нічого робити не треба." },
-  ],
-  lang_uk_greeting: [{ text: "Привіт! Так, я розумію українську. Чим можу допомогти з відео?" }],
-  lang_tr_title_letters: [
-    text([{ timeline_in: 0, timeline_out: 60, content: "Kış tatili başlıyor" }]),
-    {
-      text: "Videonun başına 'Kış tatili başlıyor' yazısını ekledim, ilk iki saniye ekranda kalıyor.",
-    },
-  ],
-  lang_tr_vertical_short: [
-    { calls: [["set_project_settings", { size: { aspect_ratio: "9:16" } }]] },
-    { calls: [["ripple_delete", { track_id: "v1", start: 450, end: 720 }]] },
-    text([
-      { timeline_in: 0, timeline_out: 90, content: "Hafta sonu kaçamağı", style: { size: "xl" } },
-    ]),
-    {
-      text:
-        "Videoyu Instagram için dikey formata çevirdim, 15 saniyeye kısalttım ve başa büyük bir " +
-        "başlık ekledim.",
-    },
-  ],
-  lang_tr_bw_undo_first_only: [
-    { calls: [["apply_color", { clip_ids: ["a", "b", "c"], saturation: 0 }]] },
-    { text: "Tamam, tüm kliplere siyah beyaz efekt uyguladım." },
-    { calls: [["undo", {}]] },
-    { calls: [["apply_color", { clip_ids: ["a"], saturation: 0 }]] },
-    { text: "Geri aldım; siyah beyaz artık sadece ilk klipte." },
-  ],
-  lang_tr_typed_without_letters: [
-    { calls: [["ripple_delete", { track_id: "v1", start: 300, end: 480 }]] },
-    { text: "Videoyu sondan kestim, şimdi tam 10 saniye." },
-  ],
-  lang_pl_crossfade_every_cut: [
-    { calls: [crossfade("b", 15), crossfade("c", 15), crossfade("d", 15)] },
-    { text: "Dodałem przenikanie po pół sekundy na wszystkich trzech cięciach między klipami." },
-  ],
-  lang_pl_end_text_no_accents: [
-    text([{ timeline_in: 240, timeline_out: 300, content: "Dzięki za oglądanie" }]),
-    { text: "Dodałem na końcu napis „Dzięki za oglądanie” na ostatnie 2 sekundy." },
-  ],
-  lang_pl_title_up_and_yellow: [
-    text([{ timeline_in: 0, timeline_out: 90, content: "Nasza podróż" }]),
-    { text: "Dodałem tytuł 'Nasza podróż' na środku ekranu na pierwsze trzy sekundy." },
-    {
-      calls: (seen) => [
-        [
-          "update_text",
-          {
-            clip_ids: created(seen, "add_text_clips"),
-            transform: { position: { x: 0.5, y: 0.38 } },
-            style: { color: "#FFD400" },
-          },
-        ],
-      ],
-    },
-    { text: "Przesunąłem tytuł trochę wyżej i zmieniłem jego kolor na żółty." },
-  ],
-  lang_pl_teaser_structure: [
-    {
-      calls: [
-        [
-          "move_clips",
-          {
-            moves: [
-              { clip_id: "c", to_timeline_in: 240 },
-              { clip_id: "b", to_timeline_in: 150 },
-              { clip_id: "a", to_timeline_in: 60 },
-            ],
-          },
-        ],
-      ],
-    },
-    {
-      calls: [
-        ["add_text_clips", { entries: [{ timeline_in: 0, timeline_out: 60, content: "Wkrótce" }] }],
-        [
-          "add_clips",
-          { entries: [{ media_ref: "logo.png", timeline_in: 330, timeline_out: 420 }] },
-        ],
-      ],
-    },
-    {
-      text:
-        "Zrobiłem zwiastun: najpierw dwie sekundy czarnego ekranu z napisem 'Wkrótce', potem " +
-        "wszystkie klipy po kolei, a na końcu logo z biblioteki na trzy sekundy.",
-    },
-  ],
-  lang_id_slang_music_half: [
-    { calls: [["set_clip_properties", { clip_ids: ["m"], volume: 0.5 }]] },
-    { text: "Oke, musiknya sudah saya kecilkan jadi setengah. Suara videonya tidak saya ubah." },
-  ],
-  lang_id_three_timed_texts: [
-    text([
-      { timeline_in: 0, timeline_out: 60, content: "Hari 1" },
-      { timeline_in: 150, timeline_out: 210, content: "Hari 2" },
-      { timeline_in: 300, timeline_out: 360, content: "Hari 3" },
-    ]),
-    {
-      text:
-        "Sudah saya tambahkan: 'Hari 1' di awal, 'Hari 2' mulai detik ke-5, dan 'Hari 3' mulai " +
-        "detik ke-10, masing-masing 2 detik.",
-    },
-  ],
-  lang_id_question_then_delete: [
-    { calls: [["get_timeline", {}]] },
-    {
-      text: "Sekarang ada 3 klip di timeline: yang pertama 5 detik, yang kedua 2 detik, dan yang ketiga 6 detik.",
-    },
-    { calls: [["ripple_delete", { track_id: "v1", start: 150, end: 210 }]] },
-    { text: "Oke, klip yang paling pendek sudah saya hapus dan sisanya sudah dirapatkan." },
-  ],
-  lang_es_second_clip_not_seconds: [
-    { calls: [["ripple_delete", { track_id: "v1", start: 60, end: 150 }]] },
-    { text: "Listo: quité el segundo clip y moví el tercero para que no quede ningún hueco." },
-  ],
-  lang_es_title_bigger_bold: [
-    { calls: [["update_text", { clip_ids: ["title"], style: { size: "l", bold: true } }]] },
-    { text: "Listo: puse el título más grande y en negrita." },
-  ],
-  lang_es_followup_same_at_end: [
-    { calls: [["ripple_delete", { track_id: "v1", start: 0, end: 90 }]] },
-    { text: "Listo, corté los primeros 3 segundos del video." },
-    { calls: [["ripple_delete", { track_id: "v1", start: 270, end: 360 }]] },
-    { text: "Hecho: también corté los últimos 3 segundos. Ahora el video dura 9 segundos." },
-  ],
-  lang_pt_slow_motion_slang: [
-    { calls: [["set_clip_properties", { clip_ids: ["c"], speed: 0.5 }]] },
-    { text: "Pronto! Deixei o último clipe em câmera lenta, com metade da velocidade." },
-  ],
-  lang_pt_keep_english_text: [
-    text([{ timeline_in: 0, timeline_out: 60, content: "Coming soon" }]),
-    { text: "Pronto: coloquei o texto 'Coming soon', em inglês mesmo, nos primeiros 2 segundos." },
-  ],
-  lang_de_crossfade_decimal_comma: [
-    { calls: [crossfade("b", 45)] },
-    { text: "Erledigt: Zwischen den beiden Clips ist jetzt eine Überblendung von 1,5 Sekunden." },
-  ],
-  lang_de_question_length: [
-    { calls: [["get_timeline", {}]] },
-    { text: "Das Video ist insgesamt 7,5 Sekunden lang (225 Frames bei 30 fps)." },
-  ],
-  lang_el_title_fade_out: [
-    text([
-      {
-        timeline_in: 0,
-        timeline_out: 90,
-        content: "Καλοκαίρι στην Κρήτη",
-        animation: { exit: "fade", exit_ms: 1000 },
-      },
-    ]),
-    {
-      text: "Έβαλα τον τίτλο «Καλοκαίρι στην Κρήτη» στην αρχή για τρία δευτερόλεπτα, και σβήνει σιγά σιγά στο τέλος.",
-    },
-  ],
-  lang_el_question_mark: [
-    { calls: [["get_timeline", {}]] },
-    { text: "Το βίντεο έχει τώρα 3 κλιπ, το ένα μετά το άλλο." },
-  ],
-};
-
 /** A step list with one step replaced: the correct run, done wrong in one way. */
-const but = (id: string, at: number, step: Step): Step[] =>
-  CORRECT[id].map((s, i) => (i === at ? step : s));
+const but = (id: string, at: number, step: ReferenceStep): ReferenceStep[] =>
+  refOf(id).map((s, i) => (i === at ? step : s));
 
 // ── realistic wrong runs: each must fail, for the reason named ──────────────
 
@@ -456,7 +89,7 @@ interface Wrong {
   id: string;
   /** What the run did wrong, as a person would put it. */
   did: string;
-  steps: Step[];
+  steps: ReferenceStep[];
   /** What the grade must say. */
   says: RegExp;
 }
@@ -584,7 +217,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_ru_title_in_russian",
       0,
-      text([{ timeline_in: 0, timeline_out: 90, content: "Our summer" }]),
+      addText([{ timeline_in: 0, timeline_out: 90, content: "Our summer" }]),
     ),
     says: /no text shows "Наше лето"/,
   },
@@ -594,7 +227,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_ru_title_in_russian",
       0,
-      text([{ timeline_in: 0, timeline_out: 90, content: "Nashe leto" }]),
+      addText([{ timeline_in: 0, timeline_out: 90, content: "Nashe leto" }]),
     ),
     says: /no text shows "Наше лето"/,
   },
@@ -604,7 +237,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_uk_lower_third",
       0,
-      text([{ timeline_in: 60, timeline_out: 180, content: "Київ, весна 2026" }]),
+      addText([{ timeline_in: 60, timeline_out: 180, content: "Київ, весна 2026" }]),
     ),
     says: /not at the bottom/,
   },
@@ -614,7 +247,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_uk_lower_third",
       0,
-      text([
+      addText([
         {
           timeline_in: 60,
           timeline_out: 180,
@@ -631,7 +264,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_tr_title_letters",
       0,
-      text([{ timeline_in: 0, timeline_out: 60, content: "Kis tatili basliyor" }]),
+      addText([{ timeline_in: 0, timeline_out: 60, content: "Kis tatili basliyor" }]),
     ),
     says: /no text shows "Kış tatili başlıyor"/,
   },
@@ -641,7 +274,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_pl_end_text_no_accents",
       0,
-      text([{ timeline_in: 240, timeline_out: 300, content: "Thanks for watching" }]),
+      addText([{ timeline_in: 240, timeline_out: 300, content: "Thanks for watching" }]),
     ),
     says: /no text shows "dzieki za ogladanie"/,
   },
@@ -651,7 +284,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_id_three_timed_texts",
       0,
-      text([
+      addText([
         { timeline_in: 0, timeline_out: 60, content: "Day 1" },
         { timeline_in: 150, timeline_out: 210, content: "Day 2" },
         { timeline_in: 300, timeline_out: 360, content: "Day 3" },
@@ -665,7 +298,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_id_three_timed_texts",
       0,
-      text([
+      addText([
         { timeline_in: 0, timeline_out: 60, content: "Hari 1" },
         { timeline_in: 5, timeline_out: 65, content: "Hari 2" },
         { timeline_in: 10, timeline_out: 70, content: "Hari 3" },
@@ -710,7 +343,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_el_title_fade_out",
       0,
-      text([
+      addText([
         {
           timeline_in: 0,
           timeline_out: 90,
@@ -727,7 +360,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_el_title_fade_out",
       0,
-      text([{ timeline_in: 0, timeline_out: 90, content: "Καλοκαίρι στην Κρήτη" }]),
+      addText([{ timeline_in: 0, timeline_out: 90, content: "Καλοκαίρι στην Κρήτη" }]),
     ),
     says: /does not fade out/,
   },
@@ -737,7 +370,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_ru_subtitles_translated",
       1,
-      text([
+      addText([
         { timeline_in: 30, timeline_out: 90, content: "Welcome to the show" },
         { timeline_in: 95, timeline_out: 141, content: "today we are" },
         { timeline_in: 145, timeline_out: 225, content: "building something new" },
@@ -751,7 +384,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_ru_subtitles_translated",
       1,
-      text([
+      addText([
         { timeline_in: 30, timeline_out: 90, content: "Добро пожаловать на наше шоу, друзья" },
       ]),
     ),
@@ -798,7 +431,7 @@ const WRONG: Wrong[] = [
     did: "generated a logo though told to generate nothing",
     steps: [
       { calls: [["generate_image", { prompt: "a logo" }]] },
-      ...CORRECT.lang_uk_library_edit.slice(1),
+      ...refOf("lang_uk_library_edit").slice(1),
     ],
     says: /harm\(paid_tool\): generate_image/,
   },
@@ -813,28 +446,30 @@ const WRONG: Wrong[] = [
   {
     id: "lang_tr_vertical_short",
     did: "made it vertical but left it at 24 s",
-    steps: [CORRECT.lang_tr_vertical_short[0], ...CORRECT.lang_tr_vertical_short.slice(2)],
+    steps: [refOf("lang_tr_vertical_short")[0], ...refOf("lang_tr_vertical_short").slice(2)],
     says: /over 15 s/,
   },
   {
     id: "lang_pl_teaser_structure",
     did: "laid the text over the first clip instead of a black card",
-    steps: CORRECT.lang_pl_teaser_structure.slice(1).map((s, i) =>
-      i === 0
-        ? {
-            calls: [
-              [
-                "add_text_clips",
-                { entries: [{ timeline_in: 0, timeline_out: 60, content: "Wkrótce" }] },
-              ],
-              [
-                "add_clips",
-                { entries: [{ media_ref: "logo.png", timeline_in: 270, timeline_out: 360 }] },
-              ],
-            ] as Calls,
-          }
-        : s,
-    ),
+    steps: refOf("lang_pl_teaser_structure")
+      .slice(1)
+      .map((s, i) =>
+        i === 0
+          ? {
+              calls: [
+                [
+                  "add_text_clips",
+                  { entries: [{ timeline_in: 0, timeline_out: 60, content: "Wkrótce" }] },
+                ],
+                [
+                  "add_clips",
+                  { entries: [{ media_ref: "logo.png", timeline_in: 270, timeline_out: 360 }] },
+                ],
+              ] as ReferenceCalls,
+            }
+          : s,
+      ),
     says: /the card is not black/,
   },
   // corrections on a later turn
@@ -842,10 +477,10 @@ const WRONG: Wrong[] = [
     id: "lang_ru_followup_wrong_clip",
     did: "shortened the second clip but left the first one short",
     steps: [
-      CORRECT.lang_ru_followup_wrong_clip[0],
-      CORRECT.lang_ru_followup_wrong_clip[1],
-      CORRECT.lang_ru_followup_wrong_clip[3],
-      CORRECT.lang_ru_followup_wrong_clip[4],
+      refOf("lang_ru_followup_wrong_clip")[0],
+      refOf("lang_ru_followup_wrong_clip")[1],
+      refOf("lang_ru_followup_wrong_clip")[3],
+      refOf("lang_ru_followup_wrong_clip")[4],
     ],
     says: /first clip's length, put back/,
   },
@@ -853,12 +488,12 @@ const WRONG: Wrong[] = [
     id: "lang_uk_music_confirm",
     did: "made the music on the first turn and again after the yes",
     steps: [
-      CORRECT.lang_uk_music_confirm[1],
-      CORRECT.lang_uk_music_confirm[2],
+      refOf("lang_uk_music_confirm")[1],
+      refOf("lang_uk_music_confirm")[2],
       { text: "Згенерував спокійну музику і поставив її під усе відео." },
-      CORRECT.lang_uk_music_confirm[1],
+      refOf("lang_uk_music_confirm")[1],
       { text: "Готово, музика вже під відео." },
-      CORRECT.lang_uk_music_confirm[5],
+      refOf("lang_uk_music_confirm")[4],
     ],
     says: /generated 2 times/,
   },
@@ -866,11 +501,11 @@ const WRONG: Wrong[] = [
     id: "lang_ru_voiceover_words",
     did: "placed the voiceover at once, and again when it landed",
     steps: [
-      CORRECT.lang_ru_voiceover_words[0],
-      CORRECT.lang_ru_voiceover_words[2],
+      refOf("lang_ru_voiceover_words")[0],
+      refOf("lang_ru_voiceover_words")[2],
       { text: "Озвучка поставлена в самое начало видео." },
-      CORRECT.lang_ru_voiceover_words[2],
-      CORRECT.lang_ru_voiceover_words[3],
+      refOf("lang_ru_voiceover_words")[2],
+      refOf("lang_ru_voiceover_words")[3],
     ],
     says: /on the timeline 2 times/,
   },
@@ -878,7 +513,7 @@ const WRONG: Wrong[] = [
     id: "lang_tr_bw_undo_first_only",
     did: "undid it but never applied it to the first clip",
     steps: [
-      ...CORRECT.lang_tr_bw_undo_first_only.slice(0, 3),
+      ...refOf("lang_tr_bw_undo_first_only").slice(0, 3),
       { text: "Geri aldım, artık hiçbir klip siyah beyaz değil." },
     ],
     says: /first clip is not black and white/,
@@ -887,10 +522,10 @@ const WRONG: Wrong[] = [
     id: "lang_pl_title_up_and_yellow",
     did: "deleted the title and made a yellow one higher up",
     steps: [
-      ...CORRECT.lang_pl_title_up_and_yellow.slice(0, 2),
+      ...refOf("lang_pl_title_up_and_yellow").slice(0, 3),
       {
-        calls: (seen) => [
-          ["remove_clips", { clip_ids: created(seen, "add_text_clips") }],
+        calls: (req) => [
+          ["remove_clips", { clip_ids: textIdsRead(req) }],
           [
             "add_text_clips",
             {
@@ -907,19 +542,19 @@ const WRONG: Wrong[] = [
           ],
         ],
       },
-      CORRECT.lang_pl_title_up_and_yellow[3],
+      refOf("lang_pl_title_up_and_yellow")[4],
     ],
     says: /deleted and made again/,
   },
   {
     id: "lang_pl_title_up_and_yellow",
     did: "moved the title down",
-    steps: but("lang_pl_title_up_and_yellow", 2, {
-      calls: (seen) => [
+    steps: but("lang_pl_title_up_and_yellow", 3, {
+      calls: (req) => [
         [
           "update_text",
           {
-            clip_ids: created(seen, "add_text_clips"),
+            clip_ids: textIdsRead(req),
             transform: { position: { x: 0.5, y: 0.7 } },
             style: { color: "#FFD400" },
           },
@@ -972,8 +607,8 @@ const WRONG: Wrong[] = [
     id: "lang_ru_slang_library_music",
     did: "put the music in at full volume",
     steps: [
-      ...CORRECT.lang_ru_slang_library_music.slice(0, 2),
-      CORRECT.lang_ru_slang_library_music[3],
+      ...refOf("lang_ru_slang_library_music").slice(0, 2),
+      refOf("lang_ru_slang_library_music")[3],
     ],
     says: /asked for it quieter/,
   },
@@ -991,7 +626,7 @@ const WRONG: Wrong[] = [
     steps: but(
       "lang_pt_keep_english_text",
       0,
-      text([{ timeline_in: 0, timeline_out: 60, content: "Em breve" }]),
+      addText([{ timeline_in: 0, timeline_out: 60, content: "Em breve" }]),
     ),
     says: /no text shows "Coming soon"/,
   },
@@ -1026,10 +661,14 @@ describe("the app's words for a generation that landed, sent as a follow-up", ()
 });
 
 describe("the cases in other languages", () => {
-  it("are all in the main lane, each with a correct run here", () => {
+  it("are all in the main lane, each with its correct run", () => {
+    // The shared reference test (scenarios.reference.test.ts) replays every reference.
     const main = new Set(ALL_SCENARIOS.map((s) => s.id));
-    for (const s of GAP_LANGUAGES) expect(main.has(s.id), s.id).toBe(true);
-    expect(Object.keys(CORRECT).sort()).toEqual(GAP_LANGUAGES.map((s) => s.id).sort());
+    for (const s of GAP_LANGUAGES) {
+      expect(main.has(s.id), s.id).toBe(true);
+      expect(s.reference?.length, s.id).toBeGreaterThan(0);
+      expect(s.inAppOnly, s.id).toBeUndefined();
+    }
   });
 
   it("declare their gap, language, turns and project size, read from the case itself", () => {
@@ -1047,21 +686,11 @@ describe("the cases in other languages", () => {
     }
   });
 
-  it("cover every language people write in, weighted towards the largest", () => {
+  it("cover every language here, each with more than one kind of request", () => {
     const count = (l: string) =>
       GAP_LANGUAGES.filter((s) => (s.tags ?? []).includes(`lang:${l}`)).length;
     for (const l of LANGS) expect(count(l), l).toBeGreaterThanOrEqual(2);
-    expect(count("ru") + count("uk")).toBeGreaterThan(count("tr") + count("pl"));
   });
-});
-
-describe("each case passes its correct run through the real harness", () => {
-  for (const s of GAP_LANGUAGES)
-    it(s.id, async () => {
-      const { result, why } = await drive(s, CORRECT[s.id]);
-      expect(why).toEqual([]);
-      expect(result.passed).toBe(true);
-    });
 });
 
 describe("each kind of request fails a realistic wrong run", () => {
