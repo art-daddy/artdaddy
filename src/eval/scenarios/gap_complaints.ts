@@ -25,7 +25,7 @@
 // scenarios.gap_complaints.test.ts, which also shows each check rejecting a plausible wrong run.
 import type { Clip, Timeline, Track } from "../../timeline/model";
 import { resolveSizePx } from "../../timeline/renderPlan";
-import { clipText } from "../../timeline/shape";
+import { clipText, compactClip } from "../../timeline/shape";
 import { audibleTracks, clipPlays, visibleTracks } from "../../timeline/visibility";
 import { isMutationEffect, toolEffect } from "../../contract/effects";
 import { describeDiff, timelineDiff } from "../checks";
@@ -98,7 +98,14 @@ function drawn(tl: Timeline, clipId: string): boolean {
   );
 }
 
-const words = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
+/** Text as a person reads it: case, spacing, quote marks around it and a closing stop aside. */
+const words = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/["'`\u2018\u2019\u201c\u201d]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.!]+$/, "");
 const textClips = (tl: Timeline): Clip[] => allClips(tl).filter((c) => c.kind === "text");
 
 /** The one title the request asked for: exactly one text clip, reading `wanted`. */
@@ -156,6 +163,27 @@ function fadesIn(c: Clip, frames: number): boolean {
     !!full &&
     Math.abs(Number(full.t) - frames) <= 3
   );
+}
+
+/** A seed clip is exactly as it was, whichever track holds it now: same place, length, source and
+ *  look (a move between tracks is a change of track, not of the clip). `except` names the fields
+ *  the request itself changes. */
+function clipAsSeeded(
+  final: Timeline,
+  seed: () => Timeline,
+  id: string,
+  what: string,
+  except: readonly string[] = [],
+): void {
+  const now = clipById(final, id);
+  assert(now, `${what} is gone`);
+  const was = clipById(seed(), id)!;
+  const shown = (c: Clip): string => {
+    const o = compactClip(c) as Record<string, unknown>;
+    for (const k of except) delete o[k];
+    return JSON.stringify(o);
+  };
+  assert(shown(was) === shown(now), `${what} was changed: ${shown(now)} (was ${shown(was)})`);
 }
 
 /** The final timeline holds what the seed held: canvas, tracks and clips. Top-level bookkeeping
@@ -230,8 +258,8 @@ const STILL_GOING = new RegExp(
     "\\bprocessing\\b",
     "being (?:rendered|exported|processed|made|written)",
     "yet to (?:finish|complete)",
-    "not (?:yet )?(?:finished|done|complete|completed|ready|there)",
-    "(?:has|is)(?:n['\u2019]?t| not) (?:yet )?(?:finished|completed|done|complete|ready|there)",
+    "not (?:yet )?(?:finished|done|complete|completed|ready)",
+    "(?:has|is)(?:n['\u2019]?t| not) (?:yet )?(?:finished|completed|done|complete|ready)",
   ].join("|"),
   "i",
 );
@@ -365,15 +393,15 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
     maxRounds: 14,
     expect: (final) => {
       const talk = clipById(final, "talk");
-      assert(talk, "the clip is gone");
-      near(Number(talk.timeline_in), 0, 1, "where the clip starts");
-      near(Number(talk.timeline_out), 240, 3, "where the clip ends (8 s)");
-      near(Number(talk.source_in ?? 0), 0, 1, "the clip's first frame");
       const voice = clipById(final, "talkAud");
-      assert(voice, "the clip's sound is gone");
-      near(Number(voice.timeline_out), Number(talk.timeline_out), 2, "where its sound ends");
+      assert(talk && voice, "the clip or its sound is gone");
+      near(Number(talk.timeline_out), 240, 3, "where the clip ends (8 s)");
       // The trim did not silence it, so the trim stays; the muted track is what has to change.
       assert(heard(final, "talkAud"), "the voice still makes no sound (its track is muted)");
+      const trimmed = ["timeline_out", "source_out"];
+      clipAsSeeded(final, mutedVoiceSeed, "talk", "the picture, apart from its end,", trimmed);
+      clipAsSeeded(final, mutedVoiceSeed, "talkAud", "the voice, apart from its end,", trimmed);
+      near(Number(voice.timeline_out), Number(talk.timeline_out), 2, "where its sound ends");
       const copies = allClips(final).filter((c) => c.kind === "audio");
       assert(copies.length === 1, `the voice is on the timeline ${copies.length} times`);
     },
@@ -402,11 +430,7 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
     maxRounds: 14,
     expect: (final) => {
       titleAtStart(final, "Launch day", 90);
-      const a = clipById(final, "a");
-      assert(a, "the footage is gone");
-      near(Number(a.timeline_in), 0, 0, "where the footage starts");
-      near(span(a), 300, 1, "the footage's length");
-      assert(peakOf(a.opacity) >= 0.99, `the footage is see-through (opacity ${a.opacity})`);
+      clipAsSeeded(final, hiddenFootageSeed, "a", "the footage");
       assert(drawn(final, "a"), "the footage is still not drawn (its track is hidden)");
     },
     reference: [
@@ -445,12 +469,7 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       assert(logo, "the logo is gone");
       const size = scaleOf(logo);
       assert(size > 0.205, `the logo is not bigger than before (scale ${size}, was 0.2)`);
-      const a = clipById(final, "a");
-      assert(a, "the footage is gone");
-      near(Number(a.timeline_in), 0, 0, "where the footage starts");
-      near(span(a), 300, 1, "the footage's length");
-      assert(peakOf(a.opacity) >= 0.99, `the footage is made see-through (opacity ${a.opacity})`);
-      assert(!a.transform, `the footage was resized or moved (${JSON.stringify(a.transform)})`);
+      clipAsSeeded(final, logoUnderFootageSeed, "a", "the footage");
       assert(drawn(final, "a"), "the footage no longer shows");
       assert(drawn(final, "logo"), "the logo is not drawn at all");
       const order = visibleTracks(final);
@@ -497,7 +516,11 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
         `the picture is still turned (rotate ${JSON.stringify(rotate)})`,
       );
       assert(!a.flip?.h && !a.flip?.v, "the picture is mirrored, not turned upright");
-      near(span(a), 300, 1, "the clip's length");
+      clipAsSeeded(final, sidewaysSeed, "a", "the clip, apart from its turn and fade,", [
+        "rotate",
+        "fade",
+        "opacity",
+      ]);
     },
     reference: [
       READ,
@@ -536,6 +559,14 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       near(Number(voice.timeline_in), 0, 2, "where the sound starts");
       near(Number(voice.timeline_out), 300, 2, "where the sound ends");
       assert(heard(final, "talkAud"), "the voice no longer plays");
+      clipAsSeeded(final, lateVoiceSeed, "talk", "the picture", ["link_group"]);
+      clipAsSeeded(final, lateVoiceSeed, "talkAud", "the sound, apart from its timing,", [
+        "timeline_in",
+        "timeline_out",
+        "source_in",
+        "source_out",
+        "link_group",
+      ]);
     },
     reference: [
       READ,
@@ -581,6 +612,21 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       assert(
         main.transition_in?.kind === "crossfade" && Number(main.transition_in.duration) > 0,
         `no crossfade into the main part (${JSON.stringify(main.transition_in ?? null)})`,
+      );
+      const moved = ["timeline_in", "timeline_out"];
+      clipAsSeeded(
+        final,
+        doubledIntroSeed,
+        "main",
+        "the main part, apart from its place and crossfade,",
+        [...moved, "transition_in"],
+      );
+      clipAsSeeded(
+        final,
+        doubledIntroSeed,
+        String(intros[0].id),
+        "the intro, apart from its place,",
+        moved,
       );
     },
     reference: [
@@ -656,6 +702,10 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       assert(c, "the third clip is gone");
       near(span(c), 120, 1, "the third clip's length");
       near(Number(c.timeline_in), 120, 1, "where the third clip starts");
+      clipAsSeeded(final, threeClipSeed, "c", "the third clip, apart from its place,", [
+        "timeline_in",
+        "timeline_out",
+      ]);
     },
     reference: [
       READ,
@@ -757,6 +807,11 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       near(Number(a.timeline_in), 0, 1, "where the clip starts");
       near(span(a), 120, 3, "the clip's length (four seconds)");
       near(Number(a.source_in ?? 0), 0, 1, "the clip's first frame (the footage's first)");
+      if (a.id === "a")
+        clipAsSeeded(final, twelveSecondSeed, "a", "the clip, apart from its end,", [
+          "timeline_out",
+          "source_out",
+        ]);
     },
     reference: [
       READ,
@@ -829,6 +884,9 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       assert(level > 0.02, `the music was silenced, not turned down (volume ${level})`);
       assert(heard(final, "music"), "the music no longer plays");
       assert(heard(final, "talkAud"), "the voice no longer plays");
+      clipAsSeeded(final, voiceAndMusicSeed, "music", "the music, apart from its level,", [
+        "volume",
+      ]);
     },
     reference: [
       READ,
@@ -864,6 +922,10 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
       assert(fadesOut(music, 60), "the music does not fade out over the last two seconds");
       near(peakOf(music.volume), 0.3, 0.01, "the music's level");
       assert(heard(final, "music"), "the music no longer plays (muted to bring the voice back)");
+      clipAsSeeded(final, voiceAndMusicSeed, "music", "the music, apart from its fade,", [
+        "fade",
+        "volume",
+      ]);
     },
     expectTrace: (t) =>
       assert(
@@ -896,9 +958,11 @@ export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
     expect: (final) => {
       const a = clipById(final, "a");
       assert(a, "the clip is gone");
-      near(Number(a.timeline_in), 0, 1, "where the clip starts");
       near(span(a), 150, 3, "the clip's length (five seconds)");
-      near(Number(a.source_in ?? 0), 0, 1, "the clip's first frame");
+      clipAsSeeded(final, tenSecondSeed, "a", "the clip, apart from its end,", [
+        "timeline_out",
+        "source_out",
+      ]);
       const t = theTitle(final, "Ocean");
       assert(
         Number(t.timeline_in) < 150 && Number(t.timeline_out) > 0,

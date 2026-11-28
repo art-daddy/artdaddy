@@ -202,6 +202,15 @@ describe("a right complaint is answered only by removing its real cause", () => 
       withAnswer(id, [say("Fixed the audio, it plays now.")]),
       /voice still makes no sound/,
     );
+    // Unmuting is the fix; turning the voice up on top of it changes what nobody asked to change.
+    await rejects(
+      withAnswer(id, [
+        call("set_track", { track_id: "a1", mute: false }),
+        call("set_clip_properties", { clip_ids: ["talkAud"], volume: 2 }),
+        say("Unmuted it and turned the voice up."),
+      ]),
+      /the voice, apart from its end, was changed/,
+    );
   });
 
   it("black picture: blaming the title, brightening the footage or placing it again fail", async () => {
@@ -219,7 +228,7 @@ describe("a right complaint is answered only by removing its real cause", () => 
         call("apply_color", { clip_ids: ["a"], exposure: 1 }),
         say("Brightened it."),
       ]),
-      /still not drawn/,
+      /the footage was changed/,
     );
     // A second copy of the footage on a new track shows a picture and leaves the hidden track.
     const placedAgain = await withAnswer(id, [
@@ -255,7 +264,7 @@ describe("a right complaint is answered only by removing its real cause", () => 
         call("set_clip_properties", { clip_ids: ["a"], opacity: 0.4 }),
         say("Done."),
       ]),
-      /footage is made see-through/,
+      /the footage was changed/,
     );
     await rejects(
       withAnswer(id, [call("set_track", { track_id: "v1", hidden: true }), say("Done.")]),
