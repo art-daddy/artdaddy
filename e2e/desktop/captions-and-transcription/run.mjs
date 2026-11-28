@@ -3,7 +3,10 @@
 // over MCP asks for captions and for the words. Judged on the transcript the app kept, the captions it SAVED
 // (internals/timeline.json) and the words it answered, with every wait timed.
 //
-//   node --experimental-websocket e2e/desktop/captions-and-transcription/firstRun.desktop.mjs
+//   node --experimental-websocket e2e/desktop/captions-and-transcription/run.mjs
+//
+// Not a `*.desktop.mjs` on purpose: it needs the speech model on the PC and a free MCP port, so it is run when
+// asked for, not by the nightly timing run or CI (scripts/qa/timingBudgets.mjs runs every timed `*.desktop.mjs`).
 //
 // One real-app run at a time on a shared PC: run it inside the PC's real-app slot or lock, never beside another
 // ArtDaddy (it refuses to start while one runs).

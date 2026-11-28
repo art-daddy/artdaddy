@@ -5,7 +5,6 @@
 // what it told the model, on what it asked the engine, and on the screen.
 import { expect, knownBug, test } from "../agent-and-models/lib/qa";
 import { callTools, say, type Round } from "../agent-and-models/lib/reply";
-import { startTimer } from "../../lib/timing";
 import {
   attachSpoken,
   captionText,
@@ -20,7 +19,8 @@ import {
 import { RECORDED_WORDS, SUBTITLES, SpeechStandIn, recordedWordTimes } from "./lib/speech";
 import { WHISPER_LANGUAGES } from "../../../src/tools/whisperLanguages";
 
-const inBrowser = (what: string): string => `captions: ${what} [${test.info().project.name}]`;
+// No wait here is timed: with the speech stand-in they are the app's own bookkeeping, not what a person
+// waits for. The waits that are (the looks, the chip, the model download) are in the other specs.
 
 /** Every caption begins within `slack` frames of the first word it shows, as the engine timed that
  *  word on the clip's own clock, mapped to the timeline through the clip's position and trim. */
@@ -65,13 +65,9 @@ test.describe("captions from the assistant", () => {
         return say("Captions are on.");
       },
     );
-    const wait = startTimer(
-      inBrowser("Send to captions on the timeline, 12 s clip, speech stand-in"),
-    );
     await qa.send("Add captions");
     await expect(qa.reply("Captions are on.")).toBeVisible({ timeout: 90_000 });
     await qa.idle();
-    wait.stop();
 
     // The engine was asked once, for the stretch the clip plays (the whole 12 s here), with no
     // language named: it detects it.
@@ -144,13 +140,9 @@ test.describe("captions from the assistant", () => {
         return say("English captions are on.");
       },
     );
-    const wait = startTimer(
-      inBrowser("Send to captions, clip already transcribed in the background"),
-    );
     await qa.send("Add English captions");
     await expect(qa.reply("English captions are on.")).toBeVisible({ timeout: 90_000 });
     await qa.idle();
-    wait.stop();
     expect(told.ok, JSON.stringify(told)).not.toBe(false);
     const again = speech.launches
       .slice(before)

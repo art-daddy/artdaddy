@@ -3,7 +3,7 @@
 The one wait no automated lane can time: a PC with no speech model downloads it (465 MiB, once) and
 then transcribes for the first time. The browser lane fakes the download's places
 (`e2e/ui/captions-and-transcription/modelDownload.spec.ts`: progress, Cancel, failure, Retry) and the
-real-app lane (`e2e/desktop/captions-and-transcription/firstRun.desktop.mjs`) needs the model already
+real-app lane (`e2e/desktop/captions-and-transcription/run.mjs`) needs the model already
 on the PC, because a dev build shares the app's data folder and must never change it. Run this script
 from the script, not from memory, and time each wait it names.
 

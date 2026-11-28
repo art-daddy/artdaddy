@@ -54,6 +54,9 @@ the app asks the speech engine, the times it computes, what it tells the model) 
 
 ## Waits
 
-Each wait a person feels is recorded with the shared helper (`e2e/lib/timing`), named
-`captions: <what the person waits for> [<browser>]`. With the speech stand-in the times are the app's
-own work around the engine, not the engine's.
+The waits a person feels are recorded with the shared helper (`e2e/lib/timing`), named
+`captions: <what the person waits for> [<browser>]`: the speech model's card after launch, the chip
+for a long transcription and Cancel there, in `modelDownload.spec.ts` and `transcription.spec.ts`
+(the nightly timing run on the lab PC runs every spec that records one). `captions.spec.ts` and
+`editing.spec.ts` record none: with the speech stand-in their waits are the app's own bookkeeping, not
+the engine's, and the real engine's waits are the real-app run's.
