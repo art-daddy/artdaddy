@@ -25,7 +25,7 @@ import {
 } from "../../timeline/mentions";
 import type { ReferenceCalls, ReferenceStep } from "../reference";
 import type { InferenceRequest } from "../harness";
-import type { Scenario, Trace } from "../types";
+import type { Scenario } from "../types";
 import {
   aclip,
   allClips,
@@ -254,8 +254,6 @@ function untouched(seed: () => Timeline) {
       throw new Error("the timeline changed; nothing should have been edited");
   };
 }
-const called = (t: Trace, name: string) => t.toolCalls.filter((c) => c.ok && c.name === name);
-
 /** The id of the first clip the previous round's add_clips / insert_clips created (a correct run
  *  that goes on to style a clip it placed has to read the id the tool minted). */
 function createdId(req: InferenceRequest, kind?: string): string {
@@ -1149,7 +1147,8 @@ const MENTIONS: Scenario[] = [
     scope: { remove: ["drone", "city"], change: ["drone", "city"] },
     maxRounds: 5,
     expectTrace: (t, final) => {
-      const gone = ["drone", "city"].filter((id) => !final || !clipById(final, id));
+      if (!final) throw new Error("this check reads the final timeline");
+      const gone = ["drone", "city"].filter((id) => !clipById(final, id));
       const said = t.finalText;
       if (gone.length === 2) throw new Error("deleted both the drone shot and the mentioned clip");
       if (gone.length === 0) {
