@@ -9,59 +9,12 @@ import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
-import { DEFAULT_MODEL } from "../store/chatControls";
 import type { Timeline } from "../timeline/model";
 import { ClientToolRegistry } from "../tools/registry";
 import { stageFaults } from "./faults";
-import { driveScenario, type InferenceRequest } from "./harness";
-import { Budget } from "./pricing";
+import { driveScripted, type ReferenceCalls, type ReferenceStep } from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
-import {
-  GAP_FOLLOWUPS,
-  timelineRead,
-  type FollowupCase,
-  type RefCalls,
-  type RefStep,
-} from "./scenarios/gap_followups";
-
-const USAGE: Usage = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
-
-/** A model that answers from a script, one step per round. */
-function scripted(steps: readonly RefStep[]) {
-  let i = 0;
-  const requests: InferenceRequest[] = [];
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    requests.push(req);
-    const step = steps[i++] ?? { text: "" };
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage: USAGE,
-        provider_snapshot: {},
-      };
-    const calls = typeof step.calls === "function" ? step.calls(req) : step.calls;
-    const pending: PendingCall[] = calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage: USAGE,
-      provider_snapshot: {},
-    };
-  };
-  return { send, requests };
-}
+import { GAP_FOLLOWUPS, timelineRead, type FollowupCase } from "./scenarios/gap_followups";
 
 const WORK = path.resolve("reports", "eval", `followups-${process.pid}`);
 
@@ -78,16 +31,8 @@ afterEach(() => {
 });
 afterAll(() => fsp.rm(WORK, { recursive: true, force: true }));
 
-async function drive(scenario: FollowupCase, steps: readonly RefStep[]) {
-  const { send, requests } = scripted(steps);
-  const result = await driveScenario(scenario, DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(2),
-    send,
-    workDir: WORK,
-  });
-  return { result, requests };
-}
+const drive = (scenario: FollowupCase, steps: readonly ReferenceStep[]) =>
+  driveScripted(scenario, steps, { workDir: WORK });
 
 const byId = (id: string): FollowupCase => {
   const hit = GAP_FOLLOWUPS.find((s) => s.id === id);
@@ -97,10 +42,12 @@ const byId = (id: string): FollowupCase => {
 const turnsOf = (s: FollowupCase): number => 1 + (s.followUps?.length ?? 0);
 /** Replies a run gives: one per turn, except a turn the person stopped. */
 const repliesOf = (s: FollowupCase): number => turnsOf(s) - (s.stopAfter ? 1 : 0);
-const say = (text: string): RefStep => ({ text });
-const call = (name: string, args: Record<string, unknown>): RefStep => ({ calls: [[name, args]] });
-const read: RefStep = { calls: [["get_timeline", {}]] };
-const onRead = (f: (tl: Timeline) => RefCalls): RefStep => ({
+const say = (text: string): ReferenceStep => ({ text });
+const call = (name: string, args: Record<string, unknown>): ReferenceStep => ({
+  calls: [[name, args]],
+});
+const read: ReferenceStep = { calls: [["get_timeline", {}]] };
+const onRead = (f: (tl: Timeline) => ReferenceCalls): ReferenceStep => ({
   calls: (req) => f(timelineRead(req)),
 });
 const idOf = (tl: Timeline, pick: (c: Record<string, unknown>) => boolean): string => {
@@ -241,7 +188,7 @@ describe("Stop part-way (Scenario.stopAfter) ends the turn and owes the calls it
 /** A wrong run, and the rule it must be failed on. */
 interface Wrong {
   why: string;
-  steps: RefStep[];
+  steps: ReferenceStep[];
   fails: RegExp;
 }
 
@@ -862,7 +809,7 @@ const WRONG: Record<string, Wrong[]> = {
                 { t: 89, v: 1.1 },
               ],
             },
-          ]) as RefCalls,
+          ]) as ReferenceCalls,
         },
         say("Done on the others."),
       ],
@@ -1013,7 +960,7 @@ const WRONG: Record<string, Wrong[]> = {
           calls: [8, 7, 6, 5, 4, 3, 2, 1].map((i) => [
             "ripple_delete",
             { clip_id: `s${i}`, start: (i - 1) * 90, end: (i - 1) * 90 + 15 },
-          ]) as RefCalls,
+          ]) as ReferenceCalls,
         },
         call("ripple_delete", {
           track_id: "v1",
@@ -1027,9 +974,9 @@ const WRONG: Record<string, Wrong[]> = {
 };
 
 /** The promo session's correct run up to turn `turn`, then `rest`. */
-function promoUntil(turn: number, rest: RefStep[]): RefStep[] {
+function promoUntil(turn: number, rest: ReferenceStep[]): ReferenceStep[] {
   const ref = byId("fu_long_promo_session").reference;
-  const out: RefStep[] = [];
+  const out: ReferenceStep[] = [];
   let turns = 0;
   for (const step of ref) {
     if (turns === turn) break;

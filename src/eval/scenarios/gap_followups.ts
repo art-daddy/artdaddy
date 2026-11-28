@@ -15,6 +15,7 @@ import { toolEffect } from "../../agent/toolEffect";
 import type { Clip, Timeline } from "../../timeline/model";
 import { clipText, compactClip } from "../../timeline/shape";
 import type { InferenceRequest } from "../harness";
+import type { ReferenceCalls, ReferenceStep } from "../reference";
 import type { Scenario, ToolCall, Trace } from "../types";
 import {
   aclip,
@@ -34,14 +35,8 @@ type Any = any;
 
 // ── the correct run ─────────────────────────────────────────────────────────
 
-/** The tool calls of one scripted round: [tool name, arguments]. */
-export type RefCalls = [string, Record<string, unknown>][];
-/** One model round of a correct run: a reply (ends the turn), or tool calls, fixed or made from
- *  the request the model got (for an id an earlier call in the same turn read or minted). */
-export type RefStep =
-  { text: string } | { calls: RefCalls | ((req: InferenceRequest) => RefCalls) };
-/** A case with its correct run. */
-export type FollowupCase = Scenario & { reference: RefStep[]; inAppOnly?: string };
+/** A case here always carries its correct run. */
+export type FollowupCase = Scenario & { reference: ReferenceStep[] };
 
 /** The project a get_timeline call in the previous round returned. */
 export function timelineRead(req: InferenceRequest): Timeline {
@@ -49,13 +44,15 @@ export function timelineRead(req: InferenceRequest): Timeline {
   if (!hit) throw new Error("the previous round read no timeline");
   return (hit.result as { timeline: Timeline }).timeline;
 }
-const read: RefStep = { calls: [["get_timeline", {}]] };
+const read: ReferenceStep = { calls: [["get_timeline", {}]] };
 /** A round that acts on the project the previous round read. */
-const onRead = (f: (tl: Timeline) => RefCalls): RefStep => ({
+const onRead = (f: (tl: Timeline) => ReferenceCalls): ReferenceStep => ({
   calls: (req) => f(timelineRead(req)),
 });
-const say = (text: string): RefStep => ({ text });
-const call = (name: string, args: Record<string, unknown>): RefStep => ({ calls: [[name, args]] });
+const say = (text: string): ReferenceStep => ({ text });
+const call = (name: string, args: Record<string, unknown>): ReferenceStep => ({
+  calls: [[name, args]],
+});
 
 // ── readers ─────────────────────────────────────────────────────────────────
 
@@ -577,7 +574,7 @@ const unavailableDownload = (): Record<string, unknown> => ({
 
 /** Cut the first half second off each take that still starts at its first frame, latest first
  *  so no cut moves the frames of a cut still to come. */
-const trimUntrimmedHeads = (tl: Timeline): RefCalls => {
+const trimUntrimmedHeads = (tl: Timeline): ReferenceCalls => {
   const ranges = allClips(tl)
     .filter((c) => /^take\d\.mp4$/.test(String(c.media_ref)) && !Number((c as Any).source_in ?? 0))
     .map((c) => ({ start: Number(c.timeline_in), end: Number(c.timeline_in) + 15 }));
@@ -1704,7 +1701,7 @@ export const GAP_FOLLOWUPS: FollowupCase[] = [
               { t: 89, v: 1.1 },
             ],
           },
-        ]) as RefCalls,
+        ]) as ReferenceCalls,
       },
       say("The other three clips get the same slow zoom."),
     ],
@@ -1983,7 +1980,7 @@ export const GAP_FOLLOWUPS: FollowupCase[] = [
         calls: [8, 7, 6, 5, 4, 3, 2, 1].map((i) => [
           "ripple_delete",
           { clip_id: `s${i}`, start: (i - 1) * 90, end: (i - 1) * 90 + 15 },
-        ]) as RefCalls,
+        ]) as ReferenceCalls,
       },
       read,
       onRead(trimUntrimmedHeads),
