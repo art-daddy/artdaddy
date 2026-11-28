@@ -12,10 +12,12 @@ import { _resetTimelineBus } from "../timeline/bus";
 import { findClip } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
 import { clearDurationCache, clearHasAudioCache, clearHasVideoCache } from "../timeline/placement";
+import { __setCanvasChangeConfirmationForTests } from "../lib/confirm";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import type { CommandRunner } from "../tools/command";
 import { type FsLike, ProjectStoreAccess } from "../tools/store";
 import { setProjectStoreFactory, setRunnerFactory, useEditor } from "./editor";
+import { useProjectNotice } from "./projectNotice";
 
 vi.mock("../tools/dataRoot", async (orig) => ({
   ...(await orig<typeof import("../tools/dataRoot")>()),
@@ -44,14 +46,24 @@ class MemFs implements FsLike {
   async mkdir() {}
 }
 
-/** ffprobe as the editor uses it: the length of each named file, and nothing for anything else. */
-function ffprobe(seconds: Record<string, number>): CommandRunner {
+/** ffprobe as the editor uses it: the length of each named file, a picture stream in every file and a
+ *  sound stream in none (so a dropped .mp4 is one video clip), an error for a damaged file, and
+ *  nothing for anything else. */
+function ffprobe(seconds: Record<string, number>, damaged: string[] = []): CommandRunner {
   return {
     run: async (program, args) => {
       const file = String(args[args.length - 1] ?? "");
+      if (damaged.some((n) => file.endsWith(n)))
+        return { code: 1, stdout: "", stderr: "Invalid data found when processing input" };
       const name = Object.keys(seconds).find((n) => file.endsWith(n));
       if (program === "ffprobe" && args.includes("format=duration") && name)
         return { code: 0, stdout: `${seconds[name]}\n`, stderr: "" };
+      if (program === "ffprobe" && args.includes("-select_streams"))
+        return {
+          code: 0,
+          stdout: args[args.indexOf("-select_streams") + 1] === "v" ? "1" : "",
+          stderr: "",
+        };
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -78,13 +90,17 @@ const tl = (fps: number, ...tracks: Any[]): Timeline =>
   ({ units: "frames", canvas: { width: 1920, height: 1080, fps }, tracks }) as Timeline;
 
 /** Open a project holding `timeline`, its media `seconds` long, in the real editor store. */
-async function open(timeline: Timeline, seconds: Record<string, number> = {}): Promise<string> {
+async function open(
+  timeline: Timeline,
+  seconds: Record<string, number> = {},
+  damaged: string[] = [],
+): Promise<string> {
   const fs = new MemFs();
   fs.files.set(`${P1}/internals/timeline.json`, JSON.stringify(timeline));
   registerTestDocument(P1);
   const store = new ProjectStoreAccess(P1, fs);
   setProjectStoreFactory(() => store);
-  setRunnerFactory(() => ffprobe(seconds));
+  setRunnerFactory(() => ffprobe(seconds, damaged));
   await useEditor.getState().load("p1");
   expect(useEditor.getState().error).toBeNull();
   return JSON.stringify(now());
@@ -415,5 +431,44 @@ describe("dragging one half of a linked pair", () => {
     await ed().moveClip("v", { toTimelineIn: 30 });
     expect(at("v")).toEqual([30, 90]);
     expect(at("s")).toEqual([30, 90]);
+  });
+});
+
+describe("dropping files onto a lane", () => {
+  // A drop of a picture that does not match the canvas would ask the person; these answer "keep".
+  beforeEach(() => {
+    __setCanvasChangeConfirmationForTests(async () => false);
+    useProjectNotice.getState().clear();
+  });
+  afterEach(() => __setCanvasChangeConfirmationForTests(null));
+  const lanes = () =>
+    tl(30, track("v1", "video", [vid("x", 0, 30)]), track("t1", "text", [], { z: 1 }));
+  const onLane = (id: string) =>
+    (now().tracks.find((t) => t.id === id)?.clips ?? []).map((c) => [
+      c.timeline_in,
+      c.timeline_out,
+    ]);
+
+  it("several files land one after another from the drop point, and one Ctrl+Z takes them all away", async () => {
+    const opened = await open(lanes(), { "a.mp4": 2, "b.mp4": 3 });
+    await ed().addClips(["a.mp4", "b.mp4"], "v1", 60);
+    expect(useProjectNotice.getState().message).toBeNull();
+    expect(onLane("v1")).toEqual([
+      [0, 30],
+      [60, 120],
+      [120, 210],
+    ]);
+    await ed().undo();
+    same(opened);
+  });
+
+  it.each([
+    [["broken.mp4"], "Couldn't add that file to the timeline: "],
+    [["a.mp4", "broken.mp4"], "Couldn't add those 2 files to the timeline: "],
+  ])("a drop that cannot be read says so, and adds nothing (%j)", async (files, said) => {
+    const opened = await open(lanes(), { "a.mp4": 2 }, ["broken.mp4"]);
+    await ed().addClips(files, "v1", 60);
+    expect(useProjectNotice.getState().message).toMatch(new RegExp(`^${said}\\S`));
+    same(opened);
   });
 });
