@@ -810,14 +810,103 @@ describe("writtenIn: a reply in the person's language", () => {
     expect(markerScores("İ ı").tr).toBe(2);
   });
 
+  it("knows each Latin-script language by its words alone, accents left out", () => {
+    expect(writtenIn("Listo, el clip ya esta", "es").ok).toBe(true);
+    expect(writtenIn("Pronto, o clipe ficou em camera lenta", "pt").ok).toBe(true);
+    expect(writtenIn("Ich habe den Titel gesetzt", "de").ok).toBe(true);
+    expect(writtenIn("Gotowe, tytul jest teraz wyzej", "pl").ok).toBe(true);
+    expect(writtenIn("Tamam, bu klibi kestim", "tr").ok).toBe(true);
+    expect(writtenIn("Oke, sudah saya pindahkan", "id").ok).toBe(true);
+  });
+
+  it("counts Indonesian's -nya on a word of five letters or more, and only at its end", () => {
+    expect(markerScores("klipnya").id).toBe(1);
+    expect(markerScores("bunya").id).toBe(1);
+    expect(markerScores("anya").id).toBe(0);
+    expect(markerScores("nyaman").id).toBe(0);
+    expect(writtenIn("Musiknya, videonya", "id").ok).toBe(true);
+  });
+
+  it("reads a word inside quote marks as the word, and keeps an apostrophe inside one", () => {
+    expect(markerScores("''the''").en).toBe(1);
+    expect(markerScores("''the").en).toBe(1);
+    expect(markerScores("the''").en).toBe(1);
+    // "i'm" is a word; "im" is not.
+    expect(markerScores("i'm").en).toBe(1);
+  });
+
+  it("holds its thresholds exactly", () => {
+    // Four letters of the script are enough, three are not.
+    expect(writtenIn("Да да", "ru").ok).toBe(true);
+    expect(writtenIn("Даа", "ru").ok).toBe(false);
+    // 60% of the letters in the script is enough, 50% is not.
+    expect(writtenIn("Готово abcd", "ru").ok).toBe(true);
+    expect(writtenIn("Готов abcde", "ru").ok).toBe(false);
+    expect(writtenIn("Gotowe teraz w абвгдежз", "pl").ok).toBe(true);
+    expect(writtenIn("Gotowe teraz w абвгдежзи", "pl").ok).toBe(false);
+    // Two markers are enough, one is not.
+    expect(writtenIn("Gotowe teraz", "pl").ok).toBe(true);
+    expect(writtenIn("Gotowe", "pl").ok).toBe(false);
+    // A tie with English fails; a tie with another language here passes both.
+    expect(writtenIn("the and que y", "es").ok).toBe(false);
+    expect(writtenIn("que para todos", "es").ok).toBe(true);
+    expect(writtenIn("que para todos", "pt").ok).toBe(true);
+  });
+
+  it("says why, in words a reader can check", () => {
+    const why = (text: string, lang: Lang): string => {
+      const v = writtenIn(text, lang);
+      return v.ok ? "" : v.why;
+    };
+    expect(why("Done.", "ru")).toBe("the reply has no Cyrillic prose");
+    expect(why("Done.", "el")).toBe("the reply has no Greek prose");
+    expect(why("Готов abcde", "ru")).toBe("only 50% of the reply's letters are Cyrillic");
+    expect(why("Αυτό abcdefghijkl", "el")).toBe("only 25% of the reply's letters are Greek");
+    expect(why("Вы готовы", "uk")).toMatch(/letters Ukrainian does not have .*: it is Russian/);
+    expect(why("Привет, как дела", "uk")).toMatch(/none of the letters only Ukrainian uses/);
+    expect(why("Привіт", "ru")).toMatch(/letters Russian does not have .*: it is not Russian/);
+    expect(why("Готово", "pl")).toBe("only 0% of the reply's letters are Latin");
+    expect(why("Gotowe", "pl")).toBe("the reply carries 1 marker(s) of Polish");
+    expect(why("ve", "tr")).toBe("the reply carries 1 marker(s) of Turkish");
+    expect(why("und", "de")).toBe("the reply carries 1 marker(s) of German");
+    expect(why("the and que y", "es")).toBe(
+      "the reply reads as English (2 English markers, 2 Spanish)",
+    );
+    expect(why("que para todos o clipe ficou", "es")).toBe(
+      "the reply reads as Portuguese (5 markers, 3 Spanish)",
+    );
+  });
+
   it("strips quotes, code, links and file names, but keeps apostrophes inside words", () => {
-    expect(prose("a «b» c").trim().split(/\s+/)).toEqual(["a", "c"]);
-    expect(
-      prose("see `x_y` and https://example.com/a and v.mp4 and C:/media/x").match(/\p{L}+/gu),
-    ).toEqual(["see", "and", "and", "and"]);
+    // Each taken out whole, the words on either side kept apart.
+    for (const form of [
+      "a «two words» b",
+      "a„two words“b",
+      "a„two words”b",
+      'a„two words"b',
+      "a“two words”b",
+      'a"two words"b',
+      "a‘two words’b",
+      "a«two words»b",
+      "a`two words`b",
+      "a ```\ntwo words\n``` b",
+      "'two words' a b",
+      "a b 'two words'",
+      "a (two_words) b",
+      "a C:/media/two b",
+      "a two\\words b",
+      "a http://example.com b",
+      "a https://example.com b",
+      "a www.example.com b",
+      "a clip.mp4 b",
+      "a photo.jpg b",
+      "a photo.JPEG b",
+    ])
+      expect(prose(form).match(/\p{L}+/gu), form).toEqual(["a", "b"]);
     expect(prose("п'ять секунд")).toContain("п'ять");
     expect(prose("Kapadokya'da")).toContain("Kapadokya'da");
     expect(prose("it's done")).toContain("it's");
+    expect(prose(undefined as unknown as string)).toBe("");
   });
 });
 
@@ -841,6 +930,15 @@ describe("shows: the words a person asked for, as they read them", () => {
     );
     expect(shows("Our summer", "Наше лето", "ru")).toBe(false);
     expect(shows("anything", "", "ru")).toBe(false);
+  });
+
+  it("keeps words apart, folds case the English way unless told Turkish, and takes no text", () => {
+    expect(shows("ab cd", "a bc")).toBe(false);
+    expect(shows("INTRO", "intro")).toBe(true);
+    expect(shows("INTRO", "ıntro", "tr")).toBe(true);
+    expect(readable(null as unknown as string)).toBe("");
+    expect(unaccented(undefined as unknown as string)).toBe("");
+    expect(unaccented("Łódź łza ışık")).toBe("Lodz lza isik");
   });
 });
 
