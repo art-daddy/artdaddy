@@ -5,6 +5,7 @@
 import type { Timeline } from "../timeline/model";
 import type { Mention } from "../timeline/mentions";
 import type { Footage } from "./footage";
+import type { ReferenceStep } from "./reference";
 
 /** Marker error for a tool the timeline-only harness didn't execute (the model
  *  reached beyond the timeline surface) — NOT a real tool failure or capability gap. */
@@ -372,6 +373,18 @@ interface ScenarioBase {
    *  app does (eval/turns.ts), so a runner that sends a case's messages itself must use the same
    *  functions. Absent, every message is its words alone. */
   turnContext?: readonly TurnContext[];
+  /** The case's correct run: the calls a careful editor would make, one step per model round,
+   *  across every turn including `followUps` (a text step is the reply that ends a turn).
+   *  scenarios.reference.test.ts replays it through the real harness with no model and requires
+   *  it to pass, which proves the task can be done and that the checks accept the right result
+   *  (ruling 22 of the agent-evals decision). A calls step may be computed from the request the
+   *  model got, for an id an earlier tool minted (reference.ts). */
+  reference?: ReferenceStep[];
+  /** Why the Copilot lane cannot produce this case's situation, in one plain sentence (for
+   *  example, it needs the app to stop a turn half-way). The lab's Copilot-lane runner skips a
+   *  case that has one. The client's own runners ignore it, and the case still needs its
+   *  reference. */
+  inAppOnly?: string;
 }
 
 export type Scenario = ScenarioBase &
