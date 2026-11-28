@@ -1,6 +1,19 @@
 // Tracks: adding them, the header toggles (hide, mute, solo, lock, sync lock), what a lock refuses,
 // deleting a track (and the question before its clips go), and restacking by dragging a header.
-import { onShippedEngineOnly, clipsOf, expect, onTrack, spans, test } from "./lib/timeline";
+import { plainText } from "../agent-and-models/fixtures/replies/plainText";
+import { callTools, type Round } from "../agent-and-models/lib/reply";
+import {
+  onShippedEngineOnly,
+  clipsOf,
+  expect,
+  knownBug,
+  onTrack,
+  spans,
+  test,
+} from "./lib/timeline";
+
+const LOCK_BUG =
+  "A locked track still lets the agent animate and grade its clips (QA catch-up, qa-timeline, 28 Nov)";
 
 test.describe("timeline: tracks", () => {
   onShippedEngineOnly();
@@ -89,6 +102,64 @@ test.describe("timeline: tracks", () => {
     await tl.dragClip(clip.id, 20);
     const moved = await tl.changed(unlocked);
     expect(spans(moved, "v1")).toEqual([[30, 70]]);
+  });
+
+  test("a locked track refuses the agent's edits too: a move, a fade and a grade", async ({
+    tl,
+  }) => {
+    knownBug(LOCK_BUG, /the fade on a locked track is refused/);
+    await tl.start(["bars_2s.mp4"]);
+    await tl.seed([{ media: "bars_2s.mp4", track: "v1", at: 0, len: 30 }]);
+    await (await tl.trackButton("v1", "lock")).click();
+    const locked = await tl.saved((d) => d.tracks?.[0]?.locked === true, "the lock is saved");
+    const [clip] = onTrack(locked, "v1");
+
+    const told: Array<{ name: string; ok: unknown }> = [];
+    const note = (r: Round) =>
+      told.push(...r.toolResults.map((x) => ({ name: x.name, ok: x.result.ok })));
+    tl.qa.server.script(
+      callTools(
+        [{ name: "move_clips", arguments: { moves: [{ clip_id: clip.id, timeline_in: 40 }] } }],
+        "Moving it.",
+      ),
+      (r: Round) => {
+        note(r);
+        return callTools(
+          [
+            {
+              name: "set_keyframes",
+              arguments: {
+                clip_id: clip.id,
+                property: "opacity",
+                keyframes: [
+                  { t: 0, v: 1 },
+                  { t: 20, v: 0 },
+                ],
+              },
+            },
+          ],
+          "Fading it out.",
+        );
+      },
+      (r: Round) => {
+        note(r);
+        return callTools(
+          [{ name: "apply_color", arguments: { clip_ids: [clip.id], brightness: 0.5 } }],
+          "Brightening it.",
+        );
+      },
+      (r: Round) => {
+        note(r);
+        return plainText("Done.");
+      },
+    );
+    await tl.qa.send("Move it later, fade it out and brighten it");
+    await tl.qa.idle(60_000);
+    expect(told.map((t) => t.name)).toEqual(["move_clips", "set_keyframes", "apply_color"]);
+    expect(told[0].ok, "the move on a locked track is refused").toBe(false);
+    expect(told[1].ok, "the fade on a locked track is refused").toBe(false);
+    expect(told[2].ok, "the grade on a locked track is refused").toBe(false);
+    await tl.savedAs(locked, "the locked clip is unchanged on disk");
   });
 
   test("an empty track is deleted at once; one Undo brings it back", async ({ tl }) => {
