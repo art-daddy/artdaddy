@@ -1011,15 +1011,17 @@ Active Connections
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)).is_ok()
   }
 
-  // The port tests below check a socket at one instant: once a stop has returned, nothing accepts on the port and a new bind
-  // gets it. That instant is the test's own only in a process of its own. A child process holds a copy of every socket of the
-  // process that starts it, from the moment it is created until it starts its program, which closes them (they are all
-  // close-on-exec), and the other tests of this binary start child processes all the time from their own threads. One that
-  // was being created just as a stop closed the listener kept the port accepting for that moment: on Linux CI (28 Nov) a
-  // connection made right after the stop got through, one made a moment later was refused, and nothing was listening. So each
-  // of these runs again in a process of its own, this test binary started for that one test, where the only child is the one
-  // the test starts. The app has the same moment when a sidecar is being started as the server stops; starting the server
-  // again retries a taken port for up to 10 s (src/mcp/service.ts), so there it costs one retry at most.
+  // The port tests below rely on a socket's state at one instant: once a stop has returned, nothing accepts on the port and a
+  // new bind gets it; a port `scratch_port` has just let go can be listened on. That instant is the test's own only in a
+  // process of its own. A child process holds a copy of every socket of the process that starts it, from the moment it is
+  // created until it starts its program, which closes them (they are all close-on-exec), and the other tests of this binary
+  // start child processes all the time from their own threads. One that was being created just as a stop closed the listener
+  // kept the port accepting for that moment: on Linux CI (28 Nov) a connection made right after the stop got through, one made
+  // a moment later was refused, and nothing was listening. With child processes started beside them on purpose, the same tests
+  // also found the port `scratch_port` had just checked still taken ("address in use"). So each runs again in a process of its
+  // own, this test binary started for that one test, where the only child is the one the test starts. The app has the same
+  // moment when a sidecar is being started as the server stops; starting the server again retries a taken port for up to 10 s
+  // (src/mcp/service.ts), so there it costs one retry at most.
   const ALONE: &str = "ARTDADDY_MCP_TEST_ALONE";
 
   fn alone(test: &str, body: impl FnOnce()) {
@@ -1126,32 +1128,34 @@ Active Connections
 
   #[test]
   fn a_connection_that_was_open_when_a_child_started_is_not_kept_open_by_it() {
-    let port = scratch_port();
-    let running = Arc::new(AtomicBool::new(false));
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let closed = listen(port, &running, move |mut stream| {
-      let _ = accepted_tx.send(());
-      // Held open until the child exists, then answered and closed: the shape of a request that is in flight when a sidecar starts.
-      let _ = go_rx.recv();
-      let _ = stream.write_all(b"done");
-    })
-    .expect("listen");
-    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the server accepted the connection");
+    alone("a_connection_that_was_open_when_a_child_started_is_not_kept_open_by_it", || {
+      let port = scratch_port();
+      let running = Arc::new(AtomicBool::new(false));
+      let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
+      let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+      let closed = listen(port, &running, move |mut stream| {
+        let _ = accepted_tx.send(());
+        // Held open until the child exists, then answered and closed: the shape of a request that is in flight when a sidecar starts.
+        let _ = go_rx.recv();
+        let _ = stream.write_all(b"done");
+      })
+      .expect("listen");
+      let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+      accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the server accepted the connection");
 
-    let mut child = long_lived_child();
-    go_tx.send(()).unwrap();
+      let mut child = long_lived_child();
+      go_tx.send(()).unwrap();
 
-    // The client reads to the end. If the child inherited the connection, the end does not come while the child lives.
-    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let mut seen = Vec::new();
-    let ended = client.read_to_end(&mut seen);
-    let _ = child.kill();
-    let _ = child.wait();
-    stop_listening(&running, port, Some(closed));
-    assert!(ended.is_ok(), "the connection was not closed: the child process kept it open ({ended:?})");
-    assert_eq!(seen, b"done");
+      // The client reads to the end. If the child inherited the connection, the end does not come while the child lives.
+      client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+      let mut seen = Vec::new();
+      let ended = client.read_to_end(&mut seen);
+      let _ = child.kill();
+      let _ = child.wait();
+      stop_listening(&running, port, Some(closed));
+      assert!(ended.is_ok(), "the connection was not closed: the child process kept it open ({ended:?})");
+      assert_eq!(seen, b"done");
+    });
   }
 
   #[test]
@@ -1191,18 +1195,20 @@ Active Connections
   #[test]
   fn the_server_is_up_for_the_first_connection_the_moment_it_starts() {
     // The flag the accept loop reads is already set when its first connection arrives, so that connection is served, not skipped.
-    for _ in 0..20 {
-      let port = scratch_port();
-      let running = Arc::new(AtomicBool::new(false));
-      let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
-      let closed = listen(port, &running, move |_| {
-        let _ = seen_tx.send(());
-      })
-      .expect("listen");
-      let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-      assert!(seen_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the first connection was not served");
-      stop_listening(&running, port, Some(closed));
-    }
+    alone("the_server_is_up_for_the_first_connection_the_moment_it_starts", || {
+      for _ in 0..20 {
+        let port = scratch_port();
+        let running = Arc::new(AtomicBool::new(false));
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
+        let closed = listen(port, &running, move |_| {
+          let _ = seen_tx.send(());
+        })
+        .expect("listen");
+        let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        assert!(seen_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the first connection was not served");
+        stop_listening(&running, port, Some(closed));
+      }
+    });
   }
 
   // The reader of one HTTP request (`read_request`) is the first code a connection reaches, before the Origin check and before
