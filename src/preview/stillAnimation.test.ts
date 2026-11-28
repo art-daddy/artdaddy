@@ -27,7 +27,7 @@ function png(index: number): number[] {
     ...[0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82],
   ];
 }
-const pack = (frames: number): Uint8Array =>
+const pack = (frames: number): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Array.from({ length: frames }, (_, i) => png(i)).flat());
 
 interface Bitmap {
@@ -52,7 +52,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-function serve(body: Uint8Array, status = 200): void {
+function serve(body: Uint8Array<ArrayBuffer>, status = 200): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => new Response(body, { status })),

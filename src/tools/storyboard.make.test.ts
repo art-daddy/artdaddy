@@ -70,9 +70,13 @@ function rig(opts: { failBatch?: boolean; failCompose?: boolean } = {}) {
       const run: Run = { args: [...args] };
       runs.push(run);
       if (args.includes("-filter_complex")) {
-        if (opts.failBatch) return { code: 1, stdout: "", stderr: "talk.mp4: Invalid data found" };
-        const seeks = args.flatMap((a, i) => (a === "-ss" ? [Number(args[i + 1])] : []));
         const gridFile = args[args.length - 1];
+        if (opts.failBatch) {
+          // As the real one does, it has written part of its output before it gives up.
+          await fs.writeBytes(gridFile, new Uint8Array(64));
+          return { code: 1, stdout: "", stderr: "talk.mp4: Invalid data found" };
+        }
+        const seeks = args.flatMap((a, i) => (a === "-ss" ? [Number(args[i + 1])] : []));
         const grids = new Uint8Array(seeks.length * 64);
         const lines = seeks.map((t, i) => {
           const keyframe = Math.floor(t / KEYFRAME_EVERY) * KEYFRAME_EVERY;

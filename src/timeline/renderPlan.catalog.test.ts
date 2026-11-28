@@ -151,13 +151,17 @@ describe("the named looks and motions the catalog offers change what is drawn", 
   });
 
   // A look the plan has no table entry for is ignored: the caption comes out plain, although the agent picked a look.
+  // Compared on what is drawn: the plan also carries the raw style it was given, which differs whatever happens.
   it("gives every style preset a look of its own, in a font the catalog offers", () => {
-    const plain = JSON.stringify(look({}));
+    const drawnAs = (style: Record<string, unknown>): string => {
+      const { rawStyle: _raw, ...drawn } = look(style);
+      return JSON.stringify(drawn);
+    };
+    const plain = drawnAs({});
     for (const { where, schema, parent } of looks)
       for (const preset of schema.enum as string[]) {
-        const styled = look({ preset });
-        expect(JSON.stringify(styled), `${where}: ${preset}`).not.toBe(plain);
-        expect(parent.font.enum, `${where}: ${preset}`).toContain(styled.font);
+        expect(drawnAs({ preset }), `${where}: ${preset}`).not.toBe(plain);
+        expect(parent.font.enum, `${where}: ${preset}`).toContain(look({ preset }).font);
       }
   });
 
