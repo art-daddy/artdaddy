@@ -1,11 +1,12 @@
-// The speech model (465 MiB, once per PC) as a person meets it at first launch: the download shows
-// how far it is and can be cancelled, a Cancel is remembered, a download that fails says so with a
-// Retry, and captions asked for meanwhile say the model is missing rather than that nobody speaks.
-// The model's two places (Hugging Face and ArtDaddy's own copy) are answered by the test: no byte
-// leaves this machine. A finished download needs the real 465 MiB file and is the real app's (see
-// e2e/byhand/captions-and-transcription/first-run.md).
+// The speech model (465 MiB, or the 252 MiB file where it is planned first, once per PC) as a person
+// meets it at first launch: the download shows how far it is and can be cancelled, a Cancel is
+// remembered, a download that fails says so with a Retry, and captions asked for meanwhile say the
+// model is missing rather than that nobody speaks. The model's two places (Hugging Face and
+// ArtDaddy's own copy) are answered by the test: no byte leaves this machine. A finished download
+// needs the real file and is the real app's (see e2e/byhand/captions-and-transcription/first-run.md).
 import type { Route } from "@playwright/test";
 
+import { MODEL_MANIFEST } from "../../../src/tools/modelManifest";
 import { expect, test, type AgentRig } from "../agent-and-models/lib/qa";
 import { callTools, say, type Round } from "../agent-and-models/lib/reply";
 import { startTimer } from "../../lib/timing";
@@ -15,6 +16,10 @@ import { SpeechStandIn } from "./lib/speech";
 const inBrowser = (what: string): string => `captions: ${what} [${test.info().project.name}]`;
 const DECLINE_KEY = "artdaddy.speech_model_declined.v1";
 const MODEL_HOSTS = ["https://huggingface.co/**", "https://models.artdaddy.app/**"];
+/** The file a new install fetches first (speechModel.ts, planModel): the smaller one on Linux, whose
+ *  engine has no graphics-chip build, the full-size one elsewhere. The card says its size in MB. */
+const FIRST_FILE = process.platform === "linux" ? MODEL_MANIFEST.small_q8_0 : MODEL_MANIFEST.small;
+const FIRST_MB = Math.round(FIRST_FILE.bytes / (1024 * 1024));
 
 /** A PC that never said no to the download: the QA shell marks it declined at every load (no agent
  *  test needs 465 MiB), so this takes that back on the first load of the test only. */
@@ -63,7 +68,7 @@ test.describe("the speech model download", () => {
       appeared.stop();
       expect(places.asked.length).toBeGreaterThan(0);
       await expect(pill).toContainText(
-        "Downloading the speech model (one time, about 465 MB) - 0%",
+        `Downloading the speech model (one time, about ${FIRST_MB} MB) - 0%`,
       );
       expect(await qa.page.evaluate((k) => localStorage.getItem(k), DECLINE_KEY)).toBeNull();
 

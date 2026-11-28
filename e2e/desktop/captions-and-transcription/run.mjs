@@ -281,7 +281,10 @@ async function main() {
     // A copy with this run's stamp in its metadata: its own identity, so no transcript an earlier run kept
     // answers for it, and this run times a real transcription.
     const copy = path.join(runDir, "spoken_scenes.mp4");
-    const ffmpeg = path.join(root, "src-tauri", "binaries", "ffmpeg-x86_64-pc-windows-msvc.exe");
+    const ffmpeg = ["artdaddy-ffmpeg", "ffmpeg"]
+      .map((n) => path.join(root, "src-tauri", "binaries", `${n}-x86_64-pc-windows-msvc.exe`))
+      .find((p) => existsSync(p));
+    if (!ffmpeg) throw new Error("the shipped ffmpeg is not staged in src-tauri/binaries");
     const stamped = spawnSync(ffmpeg, [
       "-y",
       "-v",

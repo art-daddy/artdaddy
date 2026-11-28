@@ -31,7 +31,13 @@ const triple =
     : process.platform === "darwin"
       ? `${process.arch === "arm64" ? "aarch64" : "x86_64"}-apple-darwin`
       : "x86_64-unknown-linux-gnu";
-const bin = (name) => path.join(root, "src-tauri", "binaries", `${name}-${triple}${ext}`);
+// The shipped sidecar: staged as `artdaddy-<name>-<triple>` (scripts/fetch-sidecars.mjs), and on some
+// checkouts also under its plain name.
+const bin = (name) =>
+  [`artdaddy-${name}`, name]
+    .map((n) => path.join(root, "src-tauri", "binaries", `${n}-${triple}${ext}`))
+    .find((p) => existsSync(p)) ??
+  path.join(root, "src-tauri", "binaries", `artdaddy-${name}-${triple}${ext}`);
 const ffmpeg = bin("ffmpeg");
 const whisper = bin("whisper-cli");
 const speech = path.join(root, "src/tools/__fixtures__/speech/spoken.ogg");
