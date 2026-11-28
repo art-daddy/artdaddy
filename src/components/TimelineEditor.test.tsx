@@ -25,6 +25,7 @@ vi.mock("../lib/dragSource", () => ({
 }));
 
 import TimelineEditor from "./TimelineEditor";
+import { useChat } from "../store/chat";
 
 const timeline = {
   canvas: { width: 1080, height: 1920, fps: 30 },
@@ -984,5 +985,94 @@ describe("fade knobs never sit on the trim handles", () => {
     ptr("pointerup", {});
     expect(h.state.trimClip).toHaveBeenCalled();
     expect(h.state.setClipProperties).not.toHaveBeenCalled();
+  });
+});
+
+// Pointing the agent at a moment: the ruler and the empty lanes offer "Add playhead to chat" and, once Shift+drag on the
+// ruler has marked a range, "Add selected range to chat". The message being written must then carry the frames the
+// person sees: a wrong frame here sends the agent's edit somewhere else.
+describe("telling the agent about a moment on the timeline", () => {
+  const ruler = () => screen.getByRole("slider", { name: "timeline scrubber" });
+  beforeEach(() => useChat.getState().clearMentions());
+
+  it("Shift+drag on the ruler marks the range under the pointer, without moving the playhead", () => {
+    render(<TimelineEditor />);
+    fireEvent.pointerDown(ruler(), { clientX: 40, shiftKey: true }); // 40 px @ zoom 40 => 1 s => frame 30
+    ptr("pointermove", { clientX: 100 }); // => frame 75
+    ptr("pointerup", {});
+    expect(h.state.setSelectedRange).toHaveBeenLastCalledWith({ startFrame: 30, endFrame: 75 });
+    expect(h.state.setPlayhead).not.toHaveBeenCalled();
+  });
+
+  it("Add playhead to chat puts the playhead's frame and timecode in the message, from the ruler or an empty lane", () => {
+    h.state.playhead = 1.5;
+    render(<TimelineEditor />);
+    const playhead = { kind: "playhead", frame: 45, fps: 30, timecode: "00:00:01:15" };
+    for (const where of [ruler(), ruler().nextElementSibling!]) {
+      useChat.getState().clearMentions();
+      fireEvent.contextMenu(where);
+      expect(screen.queryByRole("menuitem", { name: "Add selected range to chat" })).toBeNull();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Add playhead to chat" }));
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+      expect(useChat.getState().pendingMentions).toEqual([playhead]);
+    }
+  });
+
+  it("with a range marked, adds that range to the message, or clears it", () => {
+    h.state.selectedRange = { startFrame: 30, endFrame: 75 };
+    render(<TimelineEditor />);
+    fireEvent.contextMenu(ruler());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Add selected range to chat" }));
+    expect(useChat.getState().pendingMentions).toEqual([
+      expect.objectContaining({
+        kind: "range",
+        startFrame: 30,
+        endFrame: 75,
+        durationFrames: 45,
+        startTimecode: "00:00:01:00",
+        endTimecode: "00:00:02:15",
+      }),
+    ]);
+    fireEvent.contextMenu(ruler());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Clear range" }));
+    expect(h.state.setSelectedRange).toHaveBeenCalledWith(null);
+    expect(useChat.getState().pendingMentions).toHaveLength(1);
+  });
+});
+
+describe("the mouse wheel over the timeline", () => {
+  const scroller = () =>
+    screen.getByRole("slider", { name: "timeline scrubber" }).parentElement!.parentElement!;
+  /** A wheel turn with its modifier keys held. The test DOM drops modifiers given to a WheelEvent, so they are set on
+   *  the event itself, as a browser sets them. */
+  const wheel = (
+    el: Element,
+    deltaY: number,
+    held: { ctrlKey?: boolean; shiftKey?: boolean } = {},
+  ) => {
+    const event = new WheelEvent("wheel", { deltaY, bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(held)) Object.defineProperty(event, key, { value });
+    act(() => {
+      el.dispatchEvent(event);
+    });
+  };
+
+  it("zooms with Ctrl held, in on a wheel up and out on a wheel down", () => {
+    render(<TimelineEditor />);
+    wheel(scroller(), -100, { ctrlKey: true });
+    wheel(scroller(), 100, { ctrlKey: true });
+    const zooms = h.state.setZoom.mock.calls.map((c: number[]) => c[0]);
+    expect(zooms).toHaveLength(2);
+    expect(zooms[0]).toBeGreaterThan(40);
+    expect(zooms[1]).toBeLessThan(40);
+  });
+
+  it("pans without Ctrl: along time on a plain wheel, across tracks with Shift", () => {
+    render(<TimelineEditor />);
+    const el = scroller();
+    wheel(el, 120);
+    wheel(el, 30, { shiftKey: true });
+    expect(h.state.setZoom).not.toHaveBeenCalled();
+    expect([el.scrollLeft, el.scrollTop]).toEqual([120, 30]);
   });
 });
