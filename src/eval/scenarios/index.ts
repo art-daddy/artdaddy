@@ -3,6 +3,8 @@ import { WITHDRAWN_TOOLS } from "../../contract/withdrawn";
 import { CANONICAL } from "./canonical";
 import { EFFECT_SCENARIOS } from "./effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./exports";
+import { GAP_CONTEXT_SCENARIOS } from "./gap_context";
+import { GAP_WHOLEVIDEO } from "./gap_wholevideo";
 import { JOURNEYS } from "./journeys";
 import { REGRESSIONS } from "./regressions";
 import { STUDIO_SCENARIOS } from "./studio";
@@ -25,6 +27,8 @@ const scenarios: Scenario[] = [
   ...JOURNEYS,
   ...EXPORT_SCENARIOS,
   ...STUDIO_SCENARIOS,
+  ...GAP_CONTEXT_SCENARIOS,
+  ...GAP_WHOLEVIDEO,
 ];
 
 const withdrawn = new Set(WITHDRAWN_TOOLS);

@@ -3,6 +3,8 @@
 // REAL agent loop + REAL model, then scores it (oracle) and mines friction signals
 // from the full trace. See src/eval/README-less note in docs/ARCHITECTURE.md §14.
 import type { Timeline } from "../timeline/model";
+import type { Mention } from "../timeline/mentions";
+import type { Footage } from "./footage";
 import type { ReferenceStep } from "./reference";
 
 /** Marker error for a tool the timeline-only harness didn't execute (the model
@@ -103,6 +105,32 @@ export interface EditScope {
   canvas?: readonly string[];
   /** The request asks to delete library media. */
   deleteMedia?: boolean;
+}
+
+/** A change the person makes by hand in the editor before sending a message: the timeline then
+ *  differs from the one the agent last saw (the app tells it so, agent/compose.ts). */
+export interface OutsideEdit {
+  /** What the person did, in plain words, for a reader of the run. */
+  what: string;
+  /** The edit, made on the live timeline the way the editor commits one (no chat origin). */
+  apply: (timeline: Timeline) => void;
+}
+
+/** What came with one user message besides its words. */
+export interface TurnContext {
+  /** 0 for the prompt, 1.. for each follow-up. */
+  turn: number;
+  /** Files attached to this message in the composer, by their `media_ref` in the case's `footage`.
+   *  The app imports a file before the message goes out, so each one is in the library. A footage
+   *  file with a disk `path` came in LINKED (the desktop attach button, or a drop on the composer:
+   *  the message names it by that full path); one without came in COPIED (a paste: the message
+   *  names it library/<id><ext>). eval/turns.ts builds the message as the app does. */
+  attach?: readonly string[];
+  /** Editor refs the person @mentioned in this message, as the composer builds them
+   *  (timeline/mentions.ts). */
+  mentions?: readonly Mention[];
+  /** A change the person made in the editor after the previous answer and before this message. */
+  editedBefore?: OutsideEdit;
 }
 
 /** The words a case's stand-in says are spoken in one source: [text, start, end) in SOURCE
@@ -332,11 +360,19 @@ interface ScenarioBase {
   scope?: EditScope;
   /** What is spoken in a source the case places, for the craft checks on cuts and captions. */
   transcript?: CaseTranscript;
+  /** The case's own library of clips with known content (footage.ts), on the "studio" surface: the
+   *  library, look, speech and caption stand-ins answer from it, and the probe knows its files. */
+  footage?: Footage;
   /** A known failure with no fix yet: the backlog item that tracks it, as "owner/repo#N" (for
    *  example "art-daddy/backlog#93"). While the case fails, a report lists it as a known failure,
    *  not a regression; the first run where it passes reports it as fixed, and then this field
    *  is removed. How real users' failed turns enter the set before their fix lands. */
   knownFailure?: string;
+  /** What came with each user message besides its words: attached files, @mentions, and a change
+   *  the person made in the editor before sending it. The harness builds each message the way the
+   *  app does (eval/turns.ts), so a runner that sends a case's messages itself must use the same
+   *  functions. Absent, every message is its words alone. */
+  turnContext?: readonly TurnContext[];
   /** The case's correct run: the calls a careful editor would make, one step per model round,
    *  across every turn including `followUps` (a text step is the reply that ends a turn).
    *  scenarios.reference.test.ts replays it through the real harness with no model and requires
