@@ -35,7 +35,7 @@ test.describe("timeline: tracks", () => {
       [a, "audio"],
       [t, "text"],
     ]);
-    await expect(tl.page.getByText(/5 tracks Ã‚Â· 0 clips/)).toBeVisible();
+    await expect(tl.page.getByText(/5 tracks \u00b7 0 clips/)).toBeVisible();
     expect([await tl.label(v), await tl.label(a)]).toEqual(["v2", "a2"]);
 
     await tl.press("Mod+z");

@@ -77,8 +77,11 @@ test.describe("timeline: selection and keys", () => {
     // From the gap on v1 (frame 45) to frame 95: touches the second clip only.
     await tl.drag({ x: await tl.xOf(45), y: yV - 8 }, { x: await tl.xOf(95), y: yV + 8 });
     await expect.poll(async () => (await tl.ui()).selectedIds).toEqual([second.id]);
-    // From the same spot down into a1 past frame 110: the second clip and the sound.
-    await tl.drag({ x: await tl.xOf(45), y: yV - 8 }, { x: await tl.xOf(110), y: yA });
+    // Esc, then a second sweep from elsewhere in the gap down into a1 past frame 110: the second
+    // clip and the sound. (Pressing again on the very same pixel at once is a double-click.)
+    await tl.press("Escape");
+    await expect.poll(async () => (await tl.ui()).selectedIds).toEqual([]);
+    await tl.drag({ x: await tl.xOf(50), y: yV - 4 }, { x: await tl.xOf(110), y: yA });
     await expect
       .poll(async () => [...(await tl.ui()).selectedIds].sort())
       .toEqual([second.id, third.id].sort());

@@ -458,6 +458,10 @@ export const test = agentTest.extend<{ tl: TimelineRig }>({
   tl: async ({ qa }, use) => {
     // After the shell's own init script (registered first by the qa fixture), before the app loads.
     await qa.page.addInitScript(dialogAnswers);
+    // No test here needs the internet. Importing media with sound starts the speech model's
+    // download (465 MB), and on 28 Nov CI's runs fetched it although the shell routes https away
+    // (`https://**`): a RegExp route, tried before the shell's, refuses every https request.
+    await qa.page.route(/^https:\/\//, (route) => route.abort("internetdisconnected"));
     await use(new TimelineRig(qa));
   },
 });

@@ -32,7 +32,7 @@ test.describe("timeline: moving clips", () => {
     expect([moved.timeline_in, moved.timeline_out]).toEqual([70, 115]);
     // A move changes where the clip sits on the timeline, never which footage it plays.
     expect([moved.source_in, moved.source_out]).toEqual([clip.source_in, clip.source_out]);
-    await expect(tl.page.getByText(/2 tracks Ã‚Â· 1 clips/)).toBeVisible();
+    await expect(tl.page.getByText(/2 tracks \u00b7 1 clips/)).toBeVisible();
 
     await tl.press("Mod+z");
     await tl.savedAs(before, "one Undo restores the document from before the drag");
