@@ -21,14 +21,15 @@
 // people do. Prose claims beyond those facts are the judge's: the regex signals
 // (claimedSuccessWithoutEdit) are recorded on every run and gate nothing (signals.ts).
 //
-// Each case carries its correct run (`reference`), replayed with no model by
-// scenarios.gap_complaints.test.ts, which also shows each check rejecting a plausible wrong run.
+// Each case carries its correct run (`reference`), which scenarios.reference.test.ts replays with
+// no model; scenarios.gap_complaints.test.ts shows each check rejecting plausible wrong runs.
 import type { Clip, Timeline, Track } from "../../timeline/model";
 import { resolveSizePx } from "../../timeline/renderPlan";
 import { clipText, compactClip } from "../../timeline/shape";
 import { audibleTracks, clipPlays, visibleTracks } from "../../timeline/visibility";
 import { isMutationEffect, toolEffect } from "../../contract/effects";
 import { describeDiff, timelineDiff } from "../checks";
+import type { ReferenceStep } from "../reference";
 import type { Scenario, ToolCall, Trace } from "../types";
 import {
   aclip,
@@ -45,11 +46,6 @@ import {
   vclip,
   vtrack,
 } from "./helpers";
-
-/** One scripted model round of a correct run: tool calls, or the reply that ends the turn. */
-export type ComplaintStep = { text: string } | { calls: [string, Record<string, unknown>][] };
-/** A complaint case and its correct run. */
-export type ComplaintCase = Scenario & { reference: ComplaintStep[] };
 
 const FPS = 30;
 const LANDSCAPE = { width: 1920, height: 1080, fps: FPS };
@@ -373,11 +369,11 @@ const voiceAndMusicSeed = (music: Partial<Track> = {}) =>
 
 const tenSecondSeed = () => timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])]);
 
-const READ: ComplaintStep = { calls: [["get_timeline", {}]] };
+const READ: ReferenceStep = { calls: [["get_timeline", {}]] };
 
 // ── the cases ────────────────────────────────────────────────────────────────
 
-export const COMPLAINT_SCENARIOS: ComplaintCase[] = [
+export const COMPLAINT_SCENARIOS: Scenario[] = [
   // ── right: the problem was in the project before the edit it is blamed on ─────
   {
     id: "complaint_silent_after_trim",

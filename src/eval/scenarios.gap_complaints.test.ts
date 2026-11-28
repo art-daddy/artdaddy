@@ -1,62 +1,23 @@
-// The complaint cases (scenarios/gap_complaints.ts), offline: each case's correct run replayed
-// through the real harness (agent loop, tools, stand-ins, oracle) with the model's rounds
-// scripted, and for each kind of complaint the plausible wrong answers that must fail: the "fix"
-// that is only a claim, the fix aimed at the cause the person blamed, the workaround that loses
-// something, and the doubled or repeated edit. No network and no model is reached: fetch is a spy
-// that throws, and every test checks it was never called.
+// The complaint cases (scenarios/gap_complaints.ts), offline. scenarios.reference.test.ts replays
+// each case's correct run; this file shows, for each kind of complaint, the plausible wrong answers
+// that must fail through the same real harness (agent loop, tools, stand-ins, oracle), with the
+// model's rounds scripted: the "fix" that is only a claim, the fix aimed at the cause the person
+// blamed, the workaround that loses something, and the doubled or repeated edit. It also shows
+// other right answers passing, so no check holds a case to one route. No network and no model is
+// reached: fetch is a spy that throws, and every test checks it was never called.
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
-import { DEFAULT_MODEL } from "../store/chatControls";
-import { driveScenario, type InferenceRequest } from "./harness";
-import { Budget } from "./pricing";
+import type { InferenceRequest } from "./harness";
+import { driveScripted, type ReferenceCalls, type ReferenceStep } from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
-import { COMPLAINT_SCENARIOS, type ComplaintCase } from "./scenarios/gap_complaints";
-import type { ScenarioResult } from "./types";
+import { COMPLAINT_SCENARIOS } from "./scenarios/gap_complaints";
+import type { Scenario, ScenarioResult } from "./types";
 
-type Calls = [string, Record<string, unknown>][];
-/** One scripted round: a reply that ends the turn, or tool calls (fixed, or made from the request
- *  the model got, for an id a tool minted). */
-type Step = { text: string } | { calls: Calls | ((req: InferenceRequest) => Calls) };
-
-const USAGE: Usage = { input_tokens: 1000, output_tokens: 50, cost_usd: 0.0002 };
-
-/** A model that answers from a script, one step per round; `rounds()` says how many it was asked. */
-function scripted(steps: readonly Step[]) {
-  let i = 0;
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    const step = steps[i++] ?? { text: "" };
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage: USAGE,
-        provider_snapshot: {},
-      };
-    const calls = typeof step.calls === "function" ? step.calls(req) : step.calls;
-    const pending: PendingCall[] = calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage: USAGE,
-      provider_snapshot: {},
-    };
-  };
-  return { send, rounds: () => i };
-}
+type Calls = ReferenceCalls;
+type Step = ReferenceStep;
 
 const WORK = path.resolve("reports", "eval", `complaints-${process.pid}`);
 
@@ -73,26 +34,15 @@ afterEach(() => {
 });
 afterAll(() => fsp.rm(WORK, { recursive: true, force: true }));
 
-const byId = (id: string): ComplaintCase => {
+/** A complaint case, with the correct run every one of them carries. */
+const byId = (id: string): Scenario & { reference: ReferenceStep[] } => {
   const s = COMPLAINT_SCENARIOS.find((c) => c.id === id);
-  if (!s) throw new Error(`no complaint case ${id}`);
-  return s;
+  if (!s?.reference) throw new Error(`no complaint case ${id} with a reference`);
+  return s as Scenario & { reference: ReferenceStep[] };
 };
 
 async function drive(id: string, steps: readonly Step[]): Promise<ScenarioResult> {
-  return (await driveCounted(id, steps)).result;
-}
-
-/** Drive a case, and say how many model rounds the run asked for. */
-async function driveCounted(id: string, steps: readonly Step[]) {
-  const model = scripted(steps);
-  const result = await driveScenario(byId(id), DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(2),
-    send: model.send,
-    workDir: WORK,
-  });
-  return { result, rounds: model.rounds() };
+  return (await driveScripted(byId(id), steps, { workDir: WORK })).result;
 }
 
 /** Why the run failed: every tier's and every check's violations. */
@@ -167,24 +117,12 @@ describe("the complaint cases are registered and well formed", () => {
         ]),
       );
       expect(s.followUps, s.id).toHaveLength(1);
-      const replies = s.reference.filter((x) => "text" in x).length;
+      const reference = byId(s.id).reference;
+      const replies = reference.filter((x) => "text" in x).length;
       expect(replies, `${s.id}: one reply per turn`).toBe(2);
-      expect("text" in s.reference[s.reference.length - 1], s.id).toBe(true);
+      expect("text" in reference[reference.length - 1], s.id).toBe(true);
     }
   });
-});
-
-describe("each complaint case passes its correct run, offline", () => {
-  for (const s of COMPLAINT_SCENARIOS)
-    it(s.id, async () => {
-      const { result: r, rounds } = await driveCounted(s.id, s.reference);
-      expect(why(r)).toEqual([]);
-      expect(r.passed).toBe(true);
-      // Every step was a round of the run, and the run asked for no round past the last one.
-      expect(rounds).toBe(s.reference.length);
-      // Both turns ran: the complaint was answered on the same project.
-      expect(r.trace.turnTexts).toHaveLength(2);
-    });
 });
 
 describe("a right complaint is answered only by removing its real cause", () => {
