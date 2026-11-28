@@ -417,6 +417,24 @@ describe("the look cases get the app's free looks and library, and no paid tool"
     expect(reply(requests[1], "library_op")).toEqual({ ok: false, error: HARNESS_UNAVAILABLE });
     expect(result.passed).toBe(true);
   });
+
+  // The same class as insert_between: its request names a file, so its library holds it too.
+  it("add_clip_after: the library holds outro.mp4, and the known-right append passes", async () => {
+    const { result, requests } = await drive("add_clip_after", [
+      calls(["library_op", { action: "list" }]),
+      calls([
+        "add_clips",
+        { entries: [{ media_ref: "outro.mp4", track_id: "v2", timeline_in: 60, duration: 60 }] },
+      ]),
+      { text: "Added two seconds of outro.mp4 right after the clip." },
+    ]);
+    expect(reply(requests[1], "library_op").clips.map((c: Any) => c.id)).toEqual([
+      "a.mp4",
+      "outro.mp4",
+    ]);
+    expect(why(result)).toEqual([]);
+    expect(result.passed).toBe(true);
+  });
 });
 
 describe("project_list_and_open: the projects listed are the projects that open", () => {
