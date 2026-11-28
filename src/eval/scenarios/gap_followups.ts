@@ -1864,7 +1864,6 @@ export const GAP_FOLLOWUPS: FollowupCase[] = [
     followUps: ["Try again."],
     faults: [{ tool: "web_search", times: 1, reply: blockedSearch }],
     maxToolErrors: 1,
-    paidTools: ["web_search"],
     scope: { add: ["text"], addTracks: true },
     expectTools: ["web_search", "add_text_clips"],
     maxRounds: 10,
