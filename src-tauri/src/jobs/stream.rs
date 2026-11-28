@@ -1344,11 +1344,20 @@ mod tests {
 
   // The PC's own floor, watched beside the export's limits. The sampler stands in for the PC's memory, so a test
   // can squeeze it without freezing the machine it runs on; the worker is a real process held by a real watcher.
-  fn hold_a_worker_while_the_pc_reports(sample: impl Fn() -> Option<u64> + Send + 'static) -> (bool, Result<(), String>, bool) {
+  // The worker is let finish once the watch has looked one time more than a stop takes (`PC_FLOOR_LOOKS`), or as soon
+  // as the watch has stopped the export, whichever comes first: the looks are counted, not timed. A busy PC takes fewer
+  // looks in a given time (fewer than four in 0.7 s failed on a busy macOS runner) and decides the same on each one.
+  // Also gives back how many looks were taken.
+  fn hold_a_worker_while_the_pc_reports(sample: impl Fn() -> Option<u64> + Send + 'static) -> (bool, Result<(), String>, bool, u32) {
     use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicU32, Ordering};
     let dir = tempfile::Builder::new().prefix("artdaddy-memory-qa-").tempdir().unwrap();
-    let control = Control::new(super::super::now_ms() + 30_000, None).unwrap()
-      .with_floor_every(1024 * 1024 * 1024, Duration::from_millis(10), sample);
+    let looks = Arc::new(AtomicU32::new(0));
+    let counted = looks.clone();
+    // Counted before the watch reads the answer: a look past `PC_FLOOR_LOOKS` is only ever taken once the watch has
+    // decided about the ones before it.
+    let control = Control::new(super::super::now_ms() + 120_000, None).unwrap()
+      .with_floor_every(1024 * 1024 * 1024, Duration::from_millis(10), move || { counted.fetch_add(1, Ordering::SeqCst); sample() });
     let control = Arc::new(control);
     let args = strings(&["--exact", "jobs::stream::tests::resident_allocator_child", "--ignored", "--nocapture"]);
     let guard: StartGuard = Arc::new(|| Ok(()));
@@ -1363,17 +1372,21 @@ mod tests {
       line.clear();
       if output.read_line(&mut line).unwrap_or(0) == 0 || line.contains("resident-child-ready") { break; }
     }
-    // Long enough for the looks to be taken, then the worker is let finish if it is still there to.
-    std::thread::sleep(Duration::from_millis(700));
+    let stopped = || control.state.lock().unwrap_or_else(|error| error.into_inner()).cancelled;
+    let end = Instant::now() + Duration::from_secs(30);
+    while looks.load(Ordering::SeqCst) <= super::super::budget::PC_FLOOR_LOOKS && !stopped() && Instant::now() < end {
+      std::thread::sleep(Duration::from_millis(5));
+    }
+    // Then the worker is let finish if it is still there to.
     let _ = input.write_all(&[1]);
     let finished = worker.wait().is_ok();
     let settled = control.settle();
-    (finished, settled, dir.path().join("completed.bin").exists())
+    (finished, settled, dir.path().join("completed.bin").exists(), looks.load(Ordering::SeqCst))
   }
 
   #[test]
   fn a_pc_squeezed_under_its_floor_stops_the_export_and_leaves_no_final_side_effect() {
-    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| Some(100 * 1024 * 1024));
+    let (finished, settled, completed, _) = hold_a_worker_while_the_pc_reports(|| Some(100 * 1024 * 1024));
     assert!(!finished, "the worker was left running on a PC with 100 MiB left");
     let error = settled.unwrap_err();
     assert!(error.contains("memory floor crossed"), "{error}");
@@ -1383,15 +1396,16 @@ mod tests {
 
   #[test]
   fn a_pc_that_keeps_its_floor_lets_the_export_finish() {
-    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| Some(8 * 1024 * 1024 * 1024));
+    let (finished, settled, completed, looks) = hold_a_worker_while_the_pc_reports(|| Some(8 * 1024 * 1024 * 1024));
     assert!(finished && settled.is_ok() && completed, "{settled:?}");
+    assert!(looks > super::super::budget::PC_FLOOR_LOOKS, "the watch looked only {looks} times in 30 s");
   }
 
   #[test]
   fn a_squeeze_shorter_than_the_looks_it_takes_is_not_a_stop() {
     let looks = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let counted = looks.clone();
-    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(move || {
+    let (finished, settled, completed, _) = hold_a_worker_while_the_pc_reports(move || {
       // Under the floor on the first two looks only: a browser tab that opened and closed.
       Some(if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < super::super::budget::PC_FLOOR_LOOKS - 1 { 100 * 1024 * 1024 } else { 8 * 1024 * 1024 * 1024 })
     });
@@ -1401,8 +1415,9 @@ mod tests {
 
   #[test]
   fn a_pc_that_does_not_say_how_much_memory_it_has_is_never_stopped_for_it() {
-    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| None);
+    let (finished, settled, completed, looks) = hold_a_worker_while_the_pc_reports(|| None);
     assert!(finished && settled.is_ok() && completed, "{settled:?}");
+    assert!(looks > super::super::budget::PC_FLOOR_LOOKS, "the watch looked only {looks} times in 30 s");
   }
 
   #[test]
