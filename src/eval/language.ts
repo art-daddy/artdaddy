@@ -20,10 +20,11 @@ export type Lang = (typeof LANGS)[number];
 
 export type Verdict = { ok: true } | { ok: false; why: string };
 
-const NAMES: Record<Lang | "en", string> = {
-  ru: "Russian",
-  uk: "Ukrainian",
-  el: "Greek",
+type LatinLang = "tr" | "pl" | "id" | "es" | "pt" | "de";
+const LATIN: readonly LatinLang[] = ["tr", "pl", "id", "es", "pt", "de"];
+
+/** The names a reason gives the languages told apart by their markers. */
+const NAMES: Record<LatinLang | "en", string> = {
   tr: "Turkish",
   pl: "Polish",
   id: "Indonesian",
@@ -41,9 +42,6 @@ export const MIN_SCRIPT_LETTERS = 4;
 export const MIN_MARKERS = 2;
 /** Letters count as markers up to this many per language, so one long word cannot outvote words. */
 export const MAX_LETTER_MARKERS = 4;
-
-type LatinLang = "tr" | "pl" | "id" | "es" | "pt" | "de";
-const LATIN: readonly LatinLang[] = ["tr", "pl", "id", "es", "pt", "de"];
 
 const words = (s: string): ReadonlySet<string> => new Set(s.split(/\s+/).filter(Boolean));
 

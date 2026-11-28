@@ -866,6 +866,7 @@ describe("writtenIn: a reply in the person's language", () => {
     expect(why("Привет, как дела", "uk")).toMatch(/none of the letters only Ukrainian uses/);
     expect(why("Привіт", "ru")).toMatch(/letters Russian does not have .*: it is not Russian/);
     expect(why("Готово", "pl")).toBe("only 0% of the reply's letters are Latin");
+    expect(why("Gotowe абвгдежзийклмн", "pl")).toBe("only 30% of the reply's letters are Latin");
     expect(why("Gotowe", "pl")).toBe("the reply carries 1 marker(s) of Polish");
     expect(why("ve", "tr")).toBe("the reply carries 1 marker(s) of Turkish");
     expect(why("und", "de")).toBe("the reply carries 1 marker(s) of German");
@@ -906,6 +907,8 @@ describe("writtenIn: a reply in the person's language", () => {
     expect(prose("п'ять секунд")).toContain("п'ять");
     expect(prose("Kapadokya'da")).toContain("Kapadokya'da");
     expect(prose("it's done")).toContain("it's");
+    // A quote mark that is never closed takes nothing out.
+    expect(prose("a „two words b").match(/\p{L}+/gu)).toEqual(["a", "two", "words", "b"]);
     expect(prose(undefined as unknown as string)).toBe("");
   });
 });
