@@ -32,15 +32,10 @@ import { plainFailure } from "../timeline/exportWords";
 import type { ExportReasonCode } from "../api/exportReason";
 import type { Clip, Timeline } from "../timeline/model";
 import { registerStudioStubs, type StudioState } from "./studio";
-import { STUDIO_PROJECT_NAME } from "./jobWake";
+import { EXPORT_RUNNING, LANDED_SECONDS, STUDIO_PROJECT_NAME } from "./jobWake";
 import type { JobPlan } from "./types";
 
-/** How long a generated file runs once it has landed, in seconds: what the stand-in probe then answers for it. A video
- *  runs the length it was asked for, and a still has no length of its own. */
-export const LANDED_SECONDS = { voiceover: 4, music: 30 } as const;
-
-/** What a running export reports: how far it is and how long it says is left (manage_exports `time_left_s`). */
-export const EXPORT_RUNNING = { progress_percent: 40, time_left_s: 45, elapsed_s: 30 } as const;
+export { EXPORT_RUNNING, LANDED_SECONDS } from "./jobWake";
 
 /** Where the export stand-in writes, as the app's Downloads folder. */
 export const EXPORT_DIR = "C:/Users/eval/Downloads";

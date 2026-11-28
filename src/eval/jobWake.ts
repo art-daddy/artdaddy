@@ -108,3 +108,10 @@ export const providerReturnedNothing = (ref: string): string =>
  *  request names none: the app names an export after its project (timeline/render.ts defaultExportStem). */
 export const STUDIO_PROJECT_NAME = "Current cut";
 export const STUDIO_EXPORT_FILE = `${STUDIO_PROJECT_NAME}.mp4`;
+
+/** How long a generated file runs once it has landed, in seconds: what the job stand-ins' probe then answers for it
+ *  (jobs.ts). A video runs the length it was asked for, and a still has no length of its own. */
+export const LANDED_SECONDS = { voiceover: 4, music: 30 } as const;
+
+/** What a running export reports: how far it is and how long it says is left (manage_exports `time_left_s`). */
+export const EXPORT_RUNNING = { progress_percent: 40, time_left_s: 45, elapsed_s: 30 } as const;

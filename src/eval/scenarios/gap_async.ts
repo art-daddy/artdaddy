@@ -19,15 +19,18 @@
 import { plainFailure } from "../../timeline/exportWords";
 import { clipText } from "../../timeline/shape";
 import {
+  EXPORT_RUNNING,
   exportDone,
   exportFailed,
   failedJob,
   LABEL,
   landed,
+  LANDED_SECONDS,
   providerReturnedNothing,
   STUDIO_EXPORT_FILE,
   wakeMessage,
 } from "../jobWake";
+import type { InferenceRequest } from "../harness";
 import type { CaseTranscript, Scenario, ToolCall, Trace } from "../types";
 import { aclip, allClips, atrack, timeline, vclip, vtrack } from "./helpers";
 
@@ -39,10 +42,10 @@ export const GO_AHEAD =
   "Yes, go ahead and use the credits. If it's already on its way, just let it finish.";
 
 /** The refs the job stand-ins mint, in order per kind (jobs.ts). */
-const IMG = (n = 1) => `media_gen_image_${n}`;
-const VID = (n = 1) => `media_gen_video_${n}`;
-const VO = (n = 1) => `media_gen_voiceover_${n}`;
-const MUSIC = (n = 1) => `media_gen_music_${n}`;
+export const IMG = (n = 1) => `media_gen_image_${n}`;
+export const VID = (n = 1) => `media_gen_video_${n}`;
+export const VO = (n = 1) => `media_gen_voiceover_${n}`;
+export const MUSIC = (n = 1) => `media_gen_music_${n}`;
 
 // ── readers ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1318,5 +1321,403 @@ const GEN_CASES: Scenario[] = [
     expectTrace: (t) => startedTimes(t, "generate_video", 1, "one intro"),
   },
 ];
+
+// ── the correct run of every case (ruling 22): one step per model round, every turn ending in a reply ─────────────
+
+type Calls = [string, Record<string, unknown>][];
+/** One model round of a correct run (the shape of src/eval/reference.ts ReferenceStep): a reply, which ends the turn,
+ *  or tool calls, fixed or made from the request the model got (its `round_input.tool_results` are the previous
+ *  round's replies), for an id an earlier tool minted. */
+export type Step = { text: string } | { calls: Calls | ((req: InferenceRequest) => Calls) };
+
+export const say = (text: string): Step => ({ text });
+export const call = (name: string, args: Record<string, unknown> = {}): Step => ({
+  calls: [[name, args]],
+});
+export const calls = (...c: Calls): Step => ({ calls: c });
+export const place = (...entries: Record<string, unknown>[]): Step =>
+  call("add_clips", { entries });
+
+/** The id of the clip that plays `ref`, from what the previous round's tools answered (a get_timeline read). */
+export function clipIdOf(req: InferenceRequest, ref: string): string {
+  const found: string[] = [];
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (!v || typeof v !== "object") return;
+    const o = v as Record<string, unknown>;
+    if (o.media_ref === ref && typeof (o.id ?? o.clip_id) === "string")
+      found.push(String(o.id ?? o.clip_id));
+    Object.values(o).forEach(walk);
+  };
+  walk((req.round_input.tool_results ?? []).map((r) => r.result));
+  if (found.length !== 1)
+    throw new Error(`expected one clip playing ${ref}, found ${found.length}`);
+  return found[0];
+}
+
+/** The id of the one clip the previous round's add_clips placed. */
+export function placedNow(req: InferenceRequest): string {
+  const placed = (req.round_input.tool_results ?? [])
+    .filter((r) => r.name === "add_clips")
+    .flatMap((r) => (r.result.created ?? []) as { clip_id: string }[]);
+  if (placed.length !== 1) throw new Error(`expected one clip placed, found ${placed.length}`);
+  return placed[0].clip_id;
+}
+
+/** Read the timeline, then point the clip that plays `from` at `to`, where it is. */
+const swapMedia = (from: string, to: string): Step[] => [
+  call("get_timeline"),
+  { calls: (req) => [["set_clip_properties", { clip_ids: [clipIdOf(req, from)], media_ref: to }]] },
+];
+
+export const STARTED = say("Started it. It takes a minute or so; I'll carry on when it lands.");
+export const LET_IT_FINISH = say("It is already on its way, so I'm letting it finish.");
+
+// ── the correct run of every case ─────────────────────────────────────────────────────────────────────────────────
+
+export const GAP_ASYNC_REFERENCES: Record<string, Step[]> = {
+  async_voiceover_lands_then_placed: [
+    call("generate_voiceover", { text: "Liftoff in three, two, one" }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: VO(), timeline_in: 0 }),
+    say("The voiceover is in, under the start of the video."),
+  ],
+  async_music_bed_fills_video: [
+    call("generate_music", {
+      prompt: "calm ambient instrumental bed, soft pads",
+      instrumental: true,
+    }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: MUSIC(), timeline_in: 0, timeline_out: 300 }),
+    say("The music runs under the whole video and stops where it ends."),
+  ],
+  async_image_placed_while_generating: [
+    call("generate_image", { prompt: "sunrise over a rocket launch pad, wide shot, warm light" }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(), timeline_in: 0, timeline_out: 90, track_id: "v2" }),
+    say(
+      "The image is generating and already placed over the first three seconds; it fills in by itself.",
+    ),
+    LET_IT_FINISH,
+    say("It has landed and is already in place, so there is nothing more to do."),
+  ],
+  async_generated_video_first_four_seconds: [
+    call("generate_video", { prompt: "a crowd cheering, handheld, waving", duration: 8 }),
+    place({ media_ref: VID(), timeline_in: 300, duration: 120 }),
+    say("The crowd shot is generating; its first four seconds are placed after your clip."),
+    LET_IT_FINISH,
+    say("It landed and fills its place."),
+  ],
+  async_export_reports_file_when_done: [
+    call("export"),
+    say("Exporting now. It will take a moment; I'll tell you when the file is written."),
+    say(`Your video is saved as ${STUDIO_EXPORT_FILE} in your Downloads folder.`),
+  ],
+  async_export_failed_offers_retry: [
+    call("export"),
+    say("Exporting now; I'll tell you when the file is written."),
+    say(
+      "The export failed: the drive ran out of space. Free up some space and I can try it again.",
+    ),
+  ],
+  async_export_is_it_done_yet: [
+    call("export"),
+    say("Exporting now."),
+    call("manage_exports", { action: "list" }),
+    say(
+      `Not yet: it is ${EXPORT_RUNNING.progress_percent}% through, with about ${EXPORT_RUNNING.time_left_s} seconds left.`,
+    ),
+    say(`It has finished: ${STUDIO_EXPORT_FILE} is in your Downloads folder.`),
+  ],
+  async_generation_failed_no_silent_retry: [
+    call("generate_video", { prompt: "waves rolling in at sunset, slow push in", duration: 6 }),
+    place({ media_ref: VID(), timeline_in: 300 }),
+    say("The waves shot is generating and placed at the end; it fills in by itself."),
+    LET_IT_FINISH,
+    say(
+      "The waves shot failed: the provider returned nothing, usually a content filter. Shall I try a reworded prompt?",
+    ),
+  ],
+  async_two_generations_one_message: [
+    calls(
+      ["generate_voiceover", { text: "Welcome to launch day" }],
+      ["generate_music", { prompt: "calm ambient instrumental bed" }],
+    ),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: VO(), timeline_in: 0 }),
+    place({ media_ref: MUSIC(), timeline_in: 0, timeline_out: 300 }),
+    say("Both are in: the voiceover at the start and the music under the whole video."),
+  ],
+  async_one_landed_one_failed: [
+    calls(
+      ["generate_image", { prompt: "a rocket on the pad at dawn, wide shot" }],
+      ["generate_voiceover", { text: "Here we go" }],
+    ),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(), timeline_in: 0, timeline_out: 90, track_id: "v2" }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: VO(), timeline_in: 0 }),
+    say(
+      "The voiceover is in at the start. The title image failed (the provider returned nothing); want me to try another prompt?",
+    ),
+  ],
+  async_tell_me_when_ready_leave_edit: [
+    call("generate_video", { prompt: "a sunrise over the sea, slow push in", duration: 6 }),
+    say("It is generating; that takes a minute or two."),
+    say("It is still on its way."),
+    say(`Your sunrise clip is ready (${VID()}). I've left the edit as it is.`),
+  ],
+  async_edit_while_music_generates: [
+    call("generate_music", { prompt: "upbeat electronic track" }),
+    STARTED,
+    call("set_clip_properties", { clip_ids: ["a"], duration: 240 }),
+    say("The video now runs 8 seconds; the music is still on its way."),
+    place({ media_ref: MUSIC(), timeline_in: 0, timeline_out: 240 }),
+    say("The music runs under the whole 8 seconds."),
+  ],
+  async_export_after_voiceover_lands: [
+    call("generate_voiceover", { text: "Thanks for watching" }),
+    say("The voiceover is generating. I'll place it and export once it lands."),
+    LET_IT_FINISH,
+    place({ media_ref: VO(), timeline_in: 180 }),
+    call("export"),
+    say("The voiceover is in over the last seconds, and the export is running."),
+    say(`The export has finished: ${STUDIO_EXPORT_FILE} in your Downloads folder.`),
+  ],
+  async_is_the_voiceover_ready: [
+    call("generate_voiceover", { text: "Coming up next" }),
+    STARTED,
+    call("library_op", { action: "list" }),
+    say("Not yet, it is still being generated. I'll put it at the start when it lands."),
+    place({ media_ref: VO(), timeline_in: 0 }),
+    say("The voiceover is in at the start."),
+  ],
+  async_stop_running_export: [
+    call("export"),
+    say("Exporting now."),
+    call("manage_exports", { action: "cancel", job_id: "job_1" }),
+    say("Stopped. I won't export again until you say so."),
+  ],
+  async_where_is_the_exported_file: [
+    call("export"),
+    say("Exporting now."),
+    say(`It has finished: ${STUDIO_EXPORT_FILE}.`),
+    say(`In your Downloads folder, as ${STUDIO_EXPORT_FILE}.`),
+  ],
+  async_export_asked_while_image_generates: [
+    call("generate_image", { prompt: "a rocket on the pad at dawn, title card framing" }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(), timeline_in: 0, timeline_out: 90, track_id: "v2" }),
+    STARTED,
+    LET_IT_FINISH,
+    call("library_op", { action: "list" }),
+    say(
+      "The title image is still being generated, and an export would leave it out. I'll export as soon as it lands.",
+    ),
+    call("export"),
+    say("The image landed, so the export is running now."),
+    say(`The export has finished: ${STUDIO_EXPORT_FILE} in your Downloads folder.`),
+  ],
+  async_changed_mind_while_generating: [
+    call("generate_image", { prompt: "a red rocket on the pad at dawn" }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(1), timeline_in: 0, timeline_out: 90, track_id: "v2" }),
+    STARTED,
+    LET_IT_FINISH,
+    call("generate_image", { prompt: "a blue rocket on the pad at dawn" }),
+    ...swapMedia(IMG(1), IMG(2)),
+    say("Making the blue one now; it replaces the red one over the first three seconds."),
+    say("Both landed; the blue rocket is the one on screen."),
+  ],
+  async_captions_wait_for_the_words: [
+    call("add_captions"),
+    say(
+      "The speech is still being transcribed, about 40 seconds more. I'll add the captions as soon as the words are ready.",
+    ),
+    call("add_captions"),
+    say("The captions are on, following what's said."),
+  ],
+  async_cut_the_pause_once_words_land: [
+    call("get_transcript"),
+    say("The words are still being transcribed; I'll cut the pause once they're ready."),
+    call("get_transcript"),
+    call("ripple_delete", { track_id: "a1", ranges: [{ start: 72, end: 159 }] }),
+    say("The pause between the two sentences is cut; it runs straight on."),
+  ],
+
+  gen_replace_placeholder_card: [
+    call("generate_image", { prompt: "a mountain lake at dawn, mist, wide shot" }),
+    call("set_clip_properties", { clip_ids: ["card"], media_ref: IMG() }),
+    say("The lake image is generating and already in the card's place; it fills in by itself."),
+    LET_IT_FINISH,
+    say("It landed and is in place."),
+  ],
+  gen_brighter_version_replaces: [
+    call("generate_image", { prompt: "the launch pad at night, floodlights" }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: IMG(1), timeline_in: 0, timeline_out: 60, track_id: "v2" }),
+    STARTED,
+    LET_IT_FINISH,
+    say("It landed and shows over the first two seconds."),
+    call("generate_image", { prompt: "the launch pad at night, brightly lit, lifted shadows" }),
+    ...swapMedia(IMG(1), IMG(2)),
+    say("Making a brighter one; it already replaces the dark one."),
+    say("The brighter version landed and is on screen."),
+  ],
+  gen_voiceover_with_matching_words: [
+    call("generate_voiceover", { text: "Three, two, one, liftoff" }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: VO(), timeline_in: 0 }),
+    call("add_text_clips", {
+      entries: [
+        {
+          timeline_in: 0,
+          timeline_out: LANDED_SECONDS.voiceover * 30,
+          content: "Three, two, one, liftoff",
+        },
+      ],
+    }),
+    say("The voiceover is at the start and its words show while it plays."),
+  ],
+  gen_music_quiet_under_talking: [
+    call("generate_music", { prompt: "soft ambient background music, no drums" }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: MUSIC(), timeline_in: 0, timeline_out: 300 }),
+    {
+      calls: (req) => [["set_clip_properties", { clip_ids: [placedNow(req)], volume: 0.25 }]],
+    },
+    say("The music sits under the whole clip at a quarter volume, below the talking."),
+  ],
+  gen_three_stills_in_a_row: [
+    call("generate_image", { prompt: "a rocket on the launch pad, three takes", count: 3 }),
+    place(
+      { media_ref: IMG(1), timeline_in: 300, timeline_out: 360 },
+      { media_ref: IMG(2), timeline_in: 360, timeline_out: 420 },
+      { media_ref: IMG(3), timeline_in: 420, timeline_out: 480 },
+    ),
+    say("Three stills are generating and placed after the video, two seconds each."),
+    LET_IT_FINISH,
+    say("All three landed."),
+  ],
+  gen_not_needed_library_has_ocean: [
+    call("library_op", { action: "list" }),
+    place({ media_ref: "media_broll_ocean", timeline_in: 300 }),
+    say("Your library already had an ocean shot; it's right after the clip."),
+  ],
+  gen_not_needed_title_words: [
+    call("add_text_clips", {
+      entries: [{ timeline_in: 0, timeline_out: 90, content: "LAUNCH DAY" }],
+    }),
+    say("LAUNCH DAY is on screen for the first three seconds."),
+  ],
+  gen_animate_the_still: [
+    call("generate_image", { prompt: "a paper kite resting on a sandy beach, bright day" }),
+    STARTED,
+    LET_IT_FINISH,
+    call("generate_video", {
+      prompt: "the kite lifts off the sand and climbs into the wind",
+      start_frame: IMG(),
+    }),
+    place({ media_ref: VID(), timeline_in: 300 }),
+    say("The still landed; the clip animated from it is generating and placed after your video."),
+    say("The animated clip landed and is in place."),
+  ],
+  gen_same_cat_two_shots: [
+    call("generate_image", {
+      prompt: "an orange tabby cat, full body, plain background, reference",
+    }),
+    STARTED,
+    LET_IT_FINISH,
+    calls(
+      [
+        "generate_video",
+        { prompt: "the cat chasing a red ball across a wooden floor", reference_images: [IMG()] },
+      ],
+      [
+        "generate_video",
+        { prompt: "the cat asleep on a sofa, slow push in", reference_images: [IMG()] },
+      ],
+    ),
+    place({ media_ref: VID(1), timeline_in: 300 }, { media_ref: VID(2), timeline_in: 540 }),
+    say(
+      "Both shots use the cat's reference and are placed after your clip: the chase, then the nap.",
+    ),
+    say("Both landed and are in place."),
+  ],
+  gen_story_shots_in_order: [
+    calls(
+      ["generate_video", { prompt: "a seed resting in dark soil, macro" }],
+      ["generate_video", { prompt: "a green sprout pushing up through soil, macro" }],
+      ["generate_video", { prompt: "an open flower in sunlight, macro" }],
+    ),
+    place(
+      { media_ref: VID(1), timeline_in: 300 },
+      { media_ref: VID(2), timeline_in: 540 },
+      { media_ref: VID(3), timeline_in: 780 },
+    ),
+    say("The three shots are generating and placed after your clip in story order."),
+    LET_IT_FINISH,
+    say("All three landed."),
+  ],
+  gen_swap_music_bed: [
+    call("generate_music", { prompt: "upbeat electronic track, driving beat" }),
+    STARTED,
+    LET_IT_FINISH,
+    call("remove_clips", { clip_ids: ["m"] }),
+    place({ media_ref: MUSIC(), timeline_in: 0, timeline_out: 300, track_id: "a1" }),
+    say("The new track replaces the old music under the whole video."),
+  ],
+  gen_cover_the_jump_cut: [
+    call("generate_video", { prompt: "a crowd watching, looking up, handheld", duration: 4 }),
+    call("add_track", { id: "v2", kind: "video" }),
+    place({ media_ref: VID(), timeline_in: 90, track_id: "v2" }),
+    say("The crowd shot is generating and placed above the cut, from 3 to 7 seconds."),
+    LET_IT_FINISH,
+    say("It landed and covers the cut."),
+  ],
+  gen_voiceover_new_line_replaces: [
+    call("generate_voiceover", { text: "Welcome to the launch" }),
+    STARTED,
+    LET_IT_FINISH,
+    place({ media_ref: VO(1), timeline_in: 0 }),
+    say("The voiceover is in at the start."),
+    call("generate_voiceover", { text: "Hello and welcome" }),
+    say("Making the new line; I'll swap it in when it lands."),
+    call("get_timeline"),
+    { calls: (req) => [["remove_clips", { clip_ids: [clipIdOf(req, VO(1))] }]] },
+    place({ media_ref: VO(2), timeline_in: 0 }),
+    say("The new line replaces the old one at the start."),
+  ],
+  gen_not_needed_reuse_the_still: [
+    place({ media_ref: "sunset.png", timeline_in: 360, duration: 60 }),
+    say("The sunset still now also closes the video, for two seconds."),
+  ],
+  gen_widescreen_shot_matches_canvas: [
+    call("get_project_state"),
+    call("generate_video", {
+      prompt: "storm clouds rolling in over a plain, time-lapse",
+      duration: 6,
+      aspect_ratio: "16:9",
+    }),
+    place({ media_ref: VID(), timeline_in: 300 }),
+    say("The storm shot is generating in 16:9 like your project, placed after your clip."),
+    LET_IT_FINISH,
+    say("It landed and is in place."),
+  ],
+  gen_intro_shot_crossfades_in: [
+    call("generate_video", { prompt: "a starry night sky, slow drift", duration: 4 }),
+    call("insert_clips", { at: 0, track_id: "v1", entries: [{ media_ref: VID(), duration: 120 }] }),
+    call("set_transition", { clip_id: "a", transition_in: { kind: "crossfade", duration: 15 } }),
+    say("The starry intro is generating and placed before your clip, with a crossfade into it."),
+    LET_IT_FINISH,
+    say("It landed and is in place."),
+  ],
+};
 
 export const GAP_ASYNC_SCENARIOS: Scenario[] = [...ASYNC_CASES, ...GEN_CASES];
