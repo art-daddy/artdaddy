@@ -378,7 +378,7 @@ Typed HTTP/SSE to the ArtDaddy cloud: `client.ts` (transport), `auth.ts`, `ai.ts
 `Shell.tsx` (resizable Premiere-style workspace) hosts: `TimelineEditor.tsx`
 (+ `components/timeline/` — tracks, clips, ruler, labels, zoom), `Inspector.tsx`
 (keyframable property fields), `PreviewCanvas.tsx` (the WebGL player surface),
-`SourceMonitor.tsx` / `LeftColumn.tsx` (library + source preview), `ChatView.tsx` /
+`SourceMonitor.tsx` / `PreviewTabs.tsx` (the source preview, a tab beside the program preview), `ChatView.tsx` /
 `MessagePart.tsx` (agent chat), `MenuBar.tsx`, `ProjectSidebar.tsx`,
 `StagePanel.tsx`, `FileTree.tsx`, `AuthGate.tsx`, `ScrubInput.tsx`, `ui.tsx`,
 `ClipThumbnail`/`ClipWaveform`. **UI gestures call the same timeline ops as the

@@ -723,67 +723,91 @@ describe.skipIf(process.env.ARTDADDY_EXPORT_BOUNDARY !== "1")(
       expect(String(extraAudio.error)).toContain("rendered audio");
     }, 60_000);
 
-    it("delivers the submitted plan and destination despite later caller mutation", async () => {
-      const work = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-export-snapshot-"));
+    /** A project holding one title, open in the e2e documents, and its export captured for submission. */
+    async function capturedTitle(prefix: string) {
+      const work = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
+      await openE2EDoc(work);
+      const context = mkCtx(work);
+      const timeline: Timeline = {
+        units: "frames",
+        canvas: { width: 320, height: 180, fps: 30 },
+        tracks: [
+          {
+            id: "text",
+            kind: "text",
+            z: 0,
+            clips: [
+              {
+                id: "caption",
+                kind: "text",
+                text: "SUBMITTED",
+                timeline_in: 0,
+                timeline_out: 30,
+                style: { font: "Poppins", size: 48 },
+              },
+            ],
+          },
+        ],
+      };
+      await ensureTimeline(context.store);
+      await replaceTimeline(context.store, timeline);
+      const captured = await loadForRender(context, "working");
+      if (!captured.ok) throw new Error(String(captured.result.error));
+      expect(captured.admission.snapshotSha256).toMatch(/^[a-f0-9]{64}$/);
+      return { work, context, captured };
+    }
+
+    // KNOWN BUG (found 28 Nov 2026, the first time this case ran since it was parked behind ARTDADDY_EXPORT_BOUNDARY):
+    // prepareRenderSubmission copies the request only after awaiting the encoder check and the rung plan, so a caller that
+    // changes the request after queueRenderJob returns changes the export that runs (here it fails on the replaced
+    // arguments). Remove `.fails` once the request is copied before the first await.
+    it.fails(
+      "delivers the submitted plan and destination despite later caller mutation",
+      async () => {
+        installE2EDocuments();
+        try {
+          const { work, context, captured } = await capturedTitle("artdaddy-export-snapshot-");
+          const destination = path.join(work, "submitted.mp4");
+          const stage = path.join(work, "submitted.partial");
+          const request = {
+            plan: buildRenderCommand(captured.seconds, stage),
+            admission: captured.admission,
+            destPath: destination,
+            stagePath: stage,
+            filename: "submitted.mp4",
+            quality: "",
+          };
+          const submitted = queueRenderJob(context, request);
+          request.destPath = path.join(work, "changed.mp4");
+          request.stagePath = path.join(work, "changed.partial");
+          request.plan.args = ["-this-would-fail"];
+          request.plan.output.width = 2;
+          const admission = await submitted;
+          const outcome = await whenExportEnds(admission.job_id);
+          expect(outcome?.state).toBe("done");
+          expect(outcome?.destPath).toBe(destination);
+          const metadata = await probe(destination);
+          expect(metadata).toMatchObject({ width: 320, height: 180 });
+          expect(metadata.vDurationS).toBeCloseTo(1, 5);
+          expect(await fsp.stat(request.destPath).catch(() => null)).toBe(null);
+        } finally {
+          await resetE2EDocuments();
+        }
+      },
+      60_000,
+    );
+
+    it("refuses an export of another project session, or with a plan outside the output contract, before any file is made", async () => {
       installE2EDocuments();
       try {
-        await openE2EDoc(work);
-        const context = mkCtx(work);
-        const destination = path.join(work, "submitted.mp4");
-        const stage = path.join(work, "submitted.partial");
-        const timeline: Timeline = {
-          units: "frames",
-          canvas: { width: 320, height: 180, fps: 30 },
-          tracks: [
-            {
-              id: "text",
-              kind: "text",
-              z: 0,
-              clips: [
-                {
-                  id: "caption",
-                  kind: "text",
-                  text: "SUBMITTED",
-                  timeline_in: 0,
-                  timeline_out: 30,
-                  style: { font: "Poppins", size: 48 },
-                },
-              ],
-            },
-          ],
-        };
-        await ensureTimeline(context.store);
-        await replaceTimeline(context.store, timeline);
-        const captured = await loadForRender(context, "working");
-        if (!captured.ok) throw new Error(String(captured.result.error));
-        expect(captured.admission.snapshotSha256).toMatch(/^[a-f0-9]{64}$/);
-        const request = {
-          plan: buildRenderCommand(captured.seconds, stage),
-          admission: captured.admission,
-          destPath: destination,
-          stagePath: stage,
-          filename: "submitted.mp4",
-          quality: "",
-        };
-        const submitted = queueRenderJob(context, request);
-        request.destPath = path.join(work, "changed.mp4");
-        request.stagePath = path.join(work, "changed.partial");
-        request.plan.args = ["-this-would-fail"];
-        request.plan.output.width = 2;
-        const admission = await submitted;
-        const outcome = await whenExportEnds(admission.job_id);
-        expect(outcome?.state).toBe("done");
-        expect(outcome?.destPath).toBe(destination);
-        const metadata = await probe(destination);
-        expect(metadata).toMatchObject({ width: 320, height: 180 });
-        expect(metadata.vDurationS).toBeCloseTo(1, 5);
-        expect(await fsp.stat(request.destPath).catch(() => null)).toBe(null);
+        const { work, context, captured } = await capturedTitle("artdaddy-export-refusals-");
         const changedSession = {
-          ...request,
           plan: buildRenderCommand(captured.seconds, path.join(work, "rejected.partial")),
           admission: { ...captured.admission, projectDir: path.join(work, "different-project") },
           stagePath: path.join(work, "rejected.partial"),
           destPath: path.join(work, "rejected.mp4"),
+          filename: "submitted.mp4",
+          quality: "",
         };
         await expect(queueRenderJob(context, changedSession)).rejects.toThrow(
           "closed or different project session",

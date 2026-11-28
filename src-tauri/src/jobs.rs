@@ -3107,7 +3107,7 @@ mod export_delivery_tests {
     assert_eq!(std::fs::metadata(stage).unwrap().len(), 0);
   }
   #[test]
-  #[ignore = "requires the shipped ffmpeg artifact fixture"]
+  #[ignore = "needs the shipped ffmpeg named by ARTDADDY_QA_FFMPEG; ci.yml's cargo test jobs run it"]
   fn scratch_capture_preserves_real_nut_frames_and_audio() {
     let binary = PathBuf::from(std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"));
     let dir = tempfile::tempdir().unwrap();
@@ -7247,7 +7247,7 @@ mod export_delivery_tests {
     outcomes
   }
   #[test]
-  #[ignore = "requires the shipped ffmpeg artifact fixture"]
+  #[ignore = "needs the shipped ffmpeg and ffprobe, ARTDADDY_QA_FFMPEG naming the ffmpeg; ci.yml's cargo test jobs run it"]
   fn crash_recovery_renders_and_publishes_a_real_video() {
     struct RealSpawner(PathBuf);
     impl Spawner for RealSpawner {
@@ -7280,7 +7280,8 @@ mod export_delivery_tests {
     assert!(recovered.recover_exports().is_empty());
     assert_eq!(recovered.list()[0].code, Some(0));
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"old destination must survive until publication");
-    let probe = binary.with_file_name("artdaddy-ffprobe-x86_64-pc-windows-msvc.exe");
+    // The staged ffprobe beside the staged ffmpeg, on whichever system this runs (artdaddy-ffmpeg-<triple>[.exe]).
+    let probe = binary.with_file_name(binary.file_name().unwrap().to_string_lossy().replacen("ffmpeg", "ffprobe", 1));
     let output = std::process::Command::new(probe).args(["-v", "error", "-count_frames", "-select_streams", "v:0",
       "-show_entries", "stream=width,height,nb_read_frames", "-of", "json"]).arg(&delivery.stage_path).output().unwrap();
     assert!(output.status.success());

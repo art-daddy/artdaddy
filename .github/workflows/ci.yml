@@ -163,11 +163,63 @@ jobs:
             libwebkit2gtk-4.1-dev librsvg2-dev
       - name: Compile the real native export fixture before case deadlines
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
+      # The whisper set fetch:sidecars just staged must load on a clean Windows, one without the Visual C++ runtime: a
+      # library it imports that is neither staged nor part of Windows kills transcription with no message
+      # (src/contract/whisperRuntimeDeps.test.ts). The unit job stages nothing, so the test skips there; here it must run.
+      - name: whisper's staged libraries load on a clean Windows
+        if: runner.os == 'Windows'
+        env:
+          ARTDADDY_WHISPER_REQUIRED: "1"
+        run: npx vitest run src/contract/whisperRuntimeDeps.test.ts
+      # The suite's transcription cases (inspectMedia, whisperBatch, whisperFacts, indexClose) skip without the speech model
+      # the app downloads, and no runner had it: they ran only on the lab PC, or here only when an earlier case had happened
+      # to download it. Whisper is staged on Windows only, so here: fetched from the app's own public source and checked.
+      - name: the speech model, where the transcription cases look for it
+        if: runner.os == 'Windows'
+        run: npx vite-node scripts/ci/speechModel.ts
       - name: export suite (real ffmpeg)
         env:
           # The one sidecar this lane deliberately did not stage. Release lanes set nothing here.
           ARTDADDY_E2E_SKIP_SIDECARS: ${{ runner.os != 'Windows' && 'whisper-cli' || '' }}
+          # The export boundary cases of bench_render.e2e.ts (duplicate streams refused, a file that does not match its
+          # plan refused, stereo kept when the first source is mono): checks, not benchmarks, and no lane ran them before.
+          ARTDADDY_EXPORT_BOUNDARY: "1"
         run: npx vitest run --config vitest.smoke.config.ts --maxWorkers=2 --reporter=default --reporter=json --outputFile=reports/qa/exporter/full-smoke.json
+      # Real speech through the shipped whisper and the model above becomes caption words (scripts/smokeSpeech.mjs).
+      - name: real speech becomes captions (npm run smoke:speech)
+        if: runner.os == 'Windows'
+        run: npm run smoke:speech
+      # The release fetch-sidecars pins for whisper still exist on GitHub with the asset it downloads: a pin to a release
+      # that is gone makes every clean fetch fall back to the processor-only engine without a word (whisperRelease.e2e.ts).
+      - name: the pinned whisper releases exist upstream (network)
+        if: runner.os == 'Linux'
+        env:
+          ARTDADDY_SMOKE_NET: "1"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx vitest run --config vitest.smoke.config.ts src/contract/whisperRelease.e2e.ts
+      # The speech chip as the app shows it through its own path is checked against a replay of the same run
+      # (speechLive.replay.test.ts), which needs a capture with a run through the app; no committed capture has one. The
+      # live-speech harness makes one with its stand-in engine (no model, no network), and the replay reads it.
+      - name: the speech chip through the app's own path, on a capture made with the stand-in engine
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ARTDADDY_LIVE_FAKE_ENGINE: "1"
+          ARTDADDY_LIVE_CAPTURE_OUT: ${{ runner.temp }}/speechLive.capture.json
+        run: |
+          npx vitest run --config vitest.smoke.config.ts src/tools/speechLive.smoke.e2e.ts
+          ARTDADDY_LIVE_CAPTURE_IN="$ARTDADDY_LIVE_CAPTURE_OUT" npx vitest run src/tools/speechLive.replay.test.ts \
+            --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/replay.json"
+          node -e '
+            const report = require(process.argv[1]);
+            const ran = report.testResults.flatMap((file) => file.assertionResults)
+              .filter((test) => test.fullName.includes("(ARTDADDY_LIVE_CAPTURE_IN) shows the chip") && test.status === "passed");
+            if (ran.length !== 1) {
+              console.log("::error title=Speech chip::the replay did not pass the case through the app on the new capture");
+              process.exit(1);
+            }
+            console.log("passed: " + ran[0].fullName);
+          ' "$RUNNER_TEMP/replay.json"
       - name: Preserve real export results and bounded synthetic failure artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -231,6 +283,13 @@ jobs:
         run: |
           DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/bus cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
             -- --ignored --exact tests::without_a_secret_service_the_session_lives_in_a_private_file
+      # The #[ignore]d tests this runner has what they need for, which a plain `cargo test` leaves out: an export's scratch
+      # capture and a crash-recovered export, each through the real pinned ffmpeg fetched above, and on Linux the reading
+      # of this process's own cgroup v2 memory limits. Until 28 Nov no lane named them. The count is checked, so a renamed
+      # test cannot turn this into a run of nothing.
+      - name: cargo test, the ignored tests that need the real ffmpeg (and, on Linux, cgroup v2)
+        shell: bash
+        run: node scripts/ci/ignoredRustTests.mjs
 
   desktop:
     name: tauri desktop build (windows)
@@ -272,6 +331,10 @@ jobs:
       # Its unit tests live next to it so a regression fails the PR, not a user.
       - name: cargo test (trash_path)
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      # The same #[ignore]d real-ffmpeg tests as the Unix cargo test jobs, here on Windows with the sidecars fetched above.
+      - name: cargo test, the ignored tests that need the real ffmpeg
+        shell: bash
+        run: node scripts/ci/ignoredRustTests.mjs
       - name: tauri build
         # A build GATE, not a release: no updater signature is wanted, and without the private key
         # (never given to a PR build) tauri wrote both installers and then exited 1 on

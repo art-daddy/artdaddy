@@ -36,7 +36,6 @@ export default defineConfig({
       exclude: [
         "src/main.tsx",
         "src/vite-env.d.ts",
-        "src/api/schema.d.ts",
         "src/**/*.d.ts",
         // Type-only modules (interfaces/types only — no runtime code to test).
         "src/agent/types.ts",
@@ -71,7 +70,6 @@ export default defineConfig({
         "src/components/SourceMonitor.tsx",
         "src/components/ClipWaveform.tsx",
         "src/components/ClipThumbnail.tsx",
-        "src/components/LeftColumn.tsx",
       ],
       reporter: ["text", "text-summary"],
       thresholds: { statements: 95, lines: 95, functions: 90, branches: 82 },

@@ -5,8 +5,8 @@
 // Runs src/tools/captionsSpeech.e2e.ts on the committed recording (src/tools/__fixtures__/speech:
 // Windows' own voice reading a known script, made by scripts/genSpeechFixture.ps1) through the
 // shipped whisper-cli and the speech model this PC already has. Nothing is downloaded and nothing
-// leaves the PC; without the engine or the model the run fails. Not part of `npm run smoke`, the
-// hook or CI (no runner has the model): the lab PC runs it on its own schedule.
+// leaves the PC; without the engine or the model the run fails. Not part of `npm run smoke` or the
+// hook: CI's Windows export job runs it, after scripts/ci/speechModel.ts has put the model in place.
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 

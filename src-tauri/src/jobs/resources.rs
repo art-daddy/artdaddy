@@ -294,7 +294,7 @@ mod tests {
 
   #[cfg(target_os = "linux")]
   #[test]
-  #[ignore = "requires the supported cgroup v2 QA host; the profile launcher independently checks actual app observations"]
+  #[ignore = "needs a Linux host on the unified cgroup v2 hierarchy; ci.yml's Linux cargo test job runs it"]
   fn actual_kernel_snapshot_retains_its_process_and_directory_identity() {
     let snapshot = current().unwrap();
     assert_eq!(snapshot.process_id, std::process::id());

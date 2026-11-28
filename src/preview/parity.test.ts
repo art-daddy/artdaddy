@@ -108,9 +108,10 @@ describe("preview <-> render parity: features BOTH sides honour", () => {
 
 describe("preview <-> render parity: render-only features (preview GAPS)", () => {
   const gaps: Array<[string, Any]> = [
-    // `custom` is a raw ffmpeg filter string — there is nothing for WebGL to interpret.
+    // `custom` is a raw ffmpeg filter string — there is nothing for WebGL to interpret. Known gap, art-daddy/backlog#23.
     ["custom ffmpeg filter", { effects: [{ type: "custom", params: { expr: "hflip" } }] }],
-    // A .cube LUT needs the file loaded + a 3D texture; the preview has no asset path for it yet.
+    // A .cube LUT needs the file loaded + a 3D texture; the preview has no asset path for it yet. Known gap,
+    // art-daddy/backlog#23.
     ["3D LUT (.cube)", { color: { lut: "media_1.cube" } }],
     // Hub mismatch 2 (art-daddy/backlog#83): neither is in the preview's shader.
     ["colour wheels", { color: { shadowsHue: 210, shadowsAmount: 0.8 } }],

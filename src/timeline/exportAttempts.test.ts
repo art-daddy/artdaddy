@@ -1369,7 +1369,7 @@ describe("every function that takes a job id resolves it through the registry", 
     ]);
   });
 
-  it.todo(
-    "passes a superseded id through current() in every entry point of ID_ENTRY_POINTS: a two-attempt case for each, filled in where the queue is wired",
-  );
+  // That each entry point really passes a superseded id through current() is shown by the behaviour, one two-attempt case
+  // per entry of ID_ENTRY_POINTS and a check that the cases are exactly the table: exportAutoRestart.test.ts, "every entry
+  // point that takes a job id works with either attempt's id of a restarted export".
 });

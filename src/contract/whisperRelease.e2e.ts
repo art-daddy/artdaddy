@@ -14,6 +14,12 @@ import { describe, expect, it } from "vitest";
 
 const NET = process.env.ARTDADDY_SMOKE_NET === "1";
 const fetcher = readFileSync(join(process.cwd(), "scripts/fetch-sidecars.mjs"), "utf8");
+// CI's runners share their addresses, and GitHub allows an address 60 unsigned API calls an hour: CI signs with its own
+// read-only token (the Linux export job runs this file).
+const HEADERS: Record<string, string> = {
+  accept: "application/vnd.github+json",
+  ...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+};
 
 function constant(name: string): string {
   const m = new RegExp(`${name}\\s*=\\s*"([^"]+)"`).exec(fetcher);
@@ -27,7 +33,7 @@ describe.skipIf(!NET)("pinned whisper release exists upstream", () => {
     const asset = constant("WHISPER_VULKAN_ASSET");
     const res = await fetch(
       `https://api.github.com/repos/art-daddy/artdaddy/releases/tags/${encodeURIComponent(tag)}`,
-      { headers: { accept: "application/vnd.github+json" } },
+      { headers: HEADERS },
     );
     expect(
       res.status,
@@ -41,7 +47,7 @@ describe.skipIf(!NET)("pinned whisper release exists upstream", () => {
     const tag = constant("WHISPER_UPSTREAM_TAG");
     const res = await fetch(
       `https://api.github.com/repos/ggml-org/whisper.cpp/releases/tags/${encodeURIComponent(tag)}`,
-      { headers: { accept: "application/vnd.github+json" } },
+      { headers: HEADERS },
     );
     expect(res.status, `upstream whisper.cpp release '${tag}' not found`).toBe(200);
   });

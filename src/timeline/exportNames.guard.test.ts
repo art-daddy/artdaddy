@@ -603,6 +603,17 @@ describe("every old name that a person could read is accounted for", () => {
     expect(at("timeline/routeWords.ts", "describeFullRow")?.live).toBe(false);
     expect(at("timeline/routeWords.ts", "describeQuickRow")?.live).toBe(false);
     expect(at("timeline/estimateWords.ts", "describeHeavyProject")?.live).toBe(false);
+    // NAMES_GUARD_PRINT=1 prints every finding as a table, from this test (it runs on every run; the table checks nothing).
+    if (process.env.NAMES_GUARD_PRINT) {
+      const lines = findings
+        .map((f) => {
+          const row = ROWS.find((r) => f.live && sameRow(r, f));
+          return `| ${f.file}:${f.line} | ${f.decl} | ${f.live ? "reachable" : "dead"} | ${row ? row.gate : ""} | ${JSON.stringify(f.text)} |`;
+        })
+        .sort();
+      // eslint-disable-next-line no-console
+      console.log(`NAMES-TABLE-BEGIN\n${lines.join("\n")}\nNAMES-TABLE-END ${lines.length}`);
+    }
   });
 
   it("has a row for each old name in a declaration that can be reached, and no row for a name nothing reaches", () => {
@@ -623,17 +634,6 @@ describe("every old name that a person could read is accounted for", () => {
       stale,
       "the table names a declaration that no longer holds an old name: remove its row",
     ).toEqual([]);
-  });
-
-  it.skipIf(!process.env.NAMES_GUARD_PRINT)("prints the table when asked", () => {
-    const lines = real()
-      .findings.map((f) => {
-        const row = ROWS.find((r) => f.live && sameRow(r, f));
-        return `| ${f.file}:${f.line} | ${f.decl} | ${f.live ? "reachable" : "dead"} | ${row ? row.gate : ""} | ${JSON.stringify(f.text)} |`;
-      })
-      .sort();
-    // eslint-disable-next-line no-console
-    console.log(`NAMES-TABLE-BEGIN\n${lines.join("\n")}\nNAMES-TABLE-END ${lines.length}`);
   });
 });
 
