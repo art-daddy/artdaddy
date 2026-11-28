@@ -29,6 +29,7 @@ import type { ClientToolContext } from "../tools/context";
 import { ClientToolRegistry } from "../tools/registry";
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import { gradeRun } from "./oracle";
+import { stageFaults } from "./faults";
 import { registerJourneyStubs } from "./journey";
 import {
   emptyStudioState,
@@ -251,6 +252,8 @@ export async function driveScenario(
   let recovery: RecoveryRuntime | null = null;
   let providerError = "";
   let roundLimitReached = false;
+  // The person's Stop (Scenario.stopAfter): set once the turn's calls reach the stop point.
+  let stopPressed = false;
   const usage: Trace["usage"] = {
     inputTokens: 0,
     outputTokens: 0,
@@ -382,6 +385,8 @@ export async function driveScenario(
           "model catalog and executable recovery handlers differ; no paid inference permitted",
         );
     }
+    // A failure the case stages on purpose (faults.ts), after every stand-in is in place.
+    stageFaults(registry, scenario.faults);
 
     let snapshot: Record<string, unknown> | null = null;
     const send =
@@ -492,6 +497,12 @@ export async function driveScenario(
           startMs,
           ms,
         });
+        if (
+          scenario.stopAfter &&
+          turn === scenario.stopAfter.turn &&
+          toolCalls.filter((c) => c.turn === turn).length >= scenario.stopAfter.calls
+        )
+          stopPressed = true;
         return r;
       },
       emit: (event, data) => {
@@ -504,7 +515,7 @@ export async function driveScenario(
         if (event === "error") providerError = String(data.error ?? "unknown provider error");
       },
       mode: () => mode as "autopilot",
-      stopped: () => opts.budget.exceeded(),
+      stopped: () => opts.budget.exceeded() || stopPressed,
       onUsage: () => {},
       session: () => ({}),
     };
@@ -542,7 +553,10 @@ export async function driveScenario(
       if (opts.budget.exceeded() || roundLimitReached) break;
       recovery?.releaseQueuedFailure();
       turn += 1;
-      await runner.start(followUp);
+      // After a Stop the app sends the next message with an answer for every call left
+      // unanswered (store/chat.ts carriedDebt); otherwise nothing is owed and this is empty.
+      stopPressed = false;
+      await runner.start(followUp, runner.takeUnsentResults());
       turnTexts.push(finalText);
       await recovery?.recordClaim(finalText);
       if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
