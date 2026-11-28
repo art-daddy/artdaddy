@@ -337,6 +337,47 @@ describe("addClip duration probing", () => {
     await cmds.addClip("a.mp4", "v1", 0);
     expect((addClipsTool.mock.calls[0][1] as Any).runner).toBe(runner);
   });
+
+  // ffprobe as it really answers: the bare number of seconds only for `-show_entries format=duration
+  // -of csv=p=0`, its sectioned default output for any other format, and an error for an option it does
+  // not know or one given no value. A dropped clip is as long as its file only if it is asked properly.
+  const realProbe =
+    (seconds: string, code = 0) =>
+    async (program: string, args: string[]) => {
+      if (program !== "ffprobe") return { code: 1, stdout: "", stderr: "not ffprobe" };
+      const options = new Map<string, string>();
+      for (let i = 0; i < args.length - 1; i += 2) {
+        if (!["-v", "-show_entries", "-of"].includes(args[i]) || !args[i + 1])
+          return { code: 1, stdout: "", stderr: `Unrecognized option '${args[i]}'` };
+        options.set(args[i], args[i + 1]);
+      }
+      if (options.get("-show_entries") !== "format=duration")
+        return { code, stdout: "", stderr: "" };
+      if (options.get("-of") !== "csv=p=0")
+        return { code, stdout: `[FORMAT]\nduration=${seconds}\n[/FORMAT]\n`, stderr: "" };
+      return { code, stdout: `${seconds}\n`, stderr: "" };
+    };
+
+  it("a dropped file is as long as ffprobe, asked the way it answers, says it is", async () => {
+    const { cmds, runner } = harness();
+    runner.run.mockImplementation(realProbe("4.000000"));
+    await cmds.addClip("a.mp4", "v1", 0);
+    expect((addClipsTool.mock.calls[0][0] as Any).entries[0].timeline_out).toBe(120);
+  });
+
+  it("a file ffprobe calls 0 s long gets the 5-second default, not a one-frame flash", async () => {
+    const { cmds, runner } = harness();
+    runner.run.mockImplementation(realProbe("0.000000"));
+    await cmds.addClip("still.png", "v1", 0);
+    expect((addClipsTool.mock.calls[0][0] as Any).entries[0].timeline_out).toBe(150);
+  });
+
+  it("a probe that failed is not trusted, even when it printed a length", async () => {
+    const { cmds, runner } = harness();
+    runner.run.mockImplementation(realProbe("4.000000", 1));
+    await cmds.addClip("broken.mp4", "v1", 0);
+    expect((addClipsTool.mock.calls[0][0] as Any).entries[0].timeline_out).toBe(150);
+  });
 });
 
 describe("processImport", () => {
