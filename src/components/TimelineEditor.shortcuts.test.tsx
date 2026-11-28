@@ -5,7 +5,7 @@
 // or the playback the person would see. A shortcut added to the registry without saying here what it does fails the
 // first test, so the walk cannot quietly fall behind the sheet. The three pane keys of the View section are the menu
 // bar's (MenuBar.test.tsx walks them).
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SHORTCUTS, type Combo } from "../timeline/shortcuts";
@@ -148,6 +148,11 @@ function press(c: Combo, extra: { shiftKey?: boolean } = {}): void {
 
 const s = (): Any => h.state;
 const step = (c: Combo): number => (c.key === "ArrowRight" ? 1 : -1);
+/** Pick the razor with its button, not its key, so a shortcut that brings the pointer back is tested on its own. */
+const pickRazor = (): void => {
+  fireEvent.click(screen.getByRole("button", { name: "razor tool" }));
+  expect(activeTool()).toEqual(["razor"]);
+};
 
 /** What each shortcut must do, from the state set up above (clip c1 selected, playhead at 1 s, zoom 40, pointer tool,
  *  snapping on). `before` runs first when the shortcut needs another state to show its effect. */
@@ -181,7 +186,7 @@ const DOES: Record<string, { before?: () => void; then: (c: Combo) => void }> = 
   },
   split: { then: () => expect(s().splitClip).toHaveBeenCalledWith("c1", PLAYHEAD * FPS) },
   toolPointer: {
-    before: () => press({ key: "c" }), // from the razor, so the switch back shows
+    before: () => pickRazor(), // from the razor, so the switch back shows
     then: () => expect(activeTool()).toEqual(["pointer"]),
   },
   toolRazor: { then: () => expect(activeTool()).toEqual(["razor"]) },
@@ -201,7 +206,7 @@ const DOES: Record<string, { before?: () => void; then: (c: Combo) => void }> = 
     },
   },
   deselect: {
-    before: () => press({ key: "c" }),
+    before: () => pickRazor(),
     then: () => {
       expect(s().select).toHaveBeenCalledWith(null);
       expect(activeTool()).toEqual(["pointer"]);
