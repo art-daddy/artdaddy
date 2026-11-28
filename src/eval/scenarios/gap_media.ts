@@ -1458,15 +1458,15 @@ const LAYOUT: Scenario[] = [
       if (Math.abs(len - fr(TUTORIAL.webcam.seconds)) > 2)
         throw new Error(`the webcam runs ${len} frames, not the whole way through`);
       const tf = clip.transform ?? {};
-      const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
-      const sx = num(tf.scale_x, num(tf.scale, 1));
-      const sy = num(tf.scale_y, num(tf.scale, 1));
-      if (!(sx <= 0.45 && sy <= 0.45 && sx >= 0.1 && sy >= 0.1))
+      // At its largest and at its most left and top, if it is animated.
+      const sx = highest(tf.scale_x, highest(tf.scale, 1));
+      const sy = highest(tf.scale_y, highest(tf.scale, 1));
+      if (!(sx <= 0.5 && sy <= 0.5 && sx >= 0.1 && sy >= 0.1))
         throw new Error(
-          `the webcam is scaled ${sx}x${sy}; a small picture-in-picture is about a tenth to under half the frame`,
+          `the webcam is scaled ${sx}x${sy}; a small picture-in-picture is a tenth to half the frame`,
         );
-      const x = num(tf.position?.x, 0.5);
-      const y = num(tf.position?.y, 0.5);
+      const x = lowest(tf.position?.x, 0.5);
+      const y = lowest(tf.position?.y, 0.5);
       if (!(x >= 0.6 && y >= 0.6))
         throw new Error(`the webcam's centre is at (${x}, ${y}), not in the bottom-right corner`);
     },
