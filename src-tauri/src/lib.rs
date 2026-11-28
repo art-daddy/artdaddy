@@ -1,4 +1,6 @@
 mod fdlimit;
+#[cfg(test)]
+mod aaa_proof_132;
 #[cfg(desktop)]
 mod jobs;
 mod mcp;

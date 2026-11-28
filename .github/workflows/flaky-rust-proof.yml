@@ -1,0 +1,119 @@
+# TEMPORARY: lives only on the throwaway branch work/flaky-rust-proof (art-daddy/backlog#132). Never opened as a pull
+# request; the branch is deleted once the result is read. It runs the tests under proof 20 times in a row, before
+# (staging 948ddb46) and after (the fix on work/flaky-rust), with CPU load beside them, on the two runners where they
+# failed. No secrets, no other jobs.
+name: flaky-rust proof (temporary, backlog 132)
+
+on:
+  push:
+    branches: [work/flaky-rust-proof]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Named like CI's job so the Rust cache CI saved on main can be reused.
+  rust-unix:
+    name: 20 runs before and after (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev
+      - name: stand-in sidecars and resources (build.rs only checks they exist)
+        shell: bash
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries src-tauri/resources/ms-playwright src-tauri/resources/node_modules
+          for n in ffmpeg ffprobe yt-dlp whisper-cli browser; do touch "src-tauri/binaries/artdaddy-$n-$triple"; done
+          touch src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb
+          touch src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
+      - name: the machine
+        shell: bash
+        run: |
+          uname -a
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "cores: $(nproc)"; echo "ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range)"
+          else
+            echo "cores: $(sysctl -n hw.ncpu)"; sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last
+          fi
+      - name: build the tests before (staging 948ddb46) and after (this branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="src-tauri/src/mcp.rs src-tauri/src/jobs/stream.rs src-tauri/src/jobs/stream/activity.rs"
+          exe() {
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run --message-format=json \
+              | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' | tail -n 1
+          }
+          git checkout 948ddb46272d -- $files
+          cp "$(exe)" "$RUNNER_TEMP/before"
+          git checkout HEAD -- $files
+          cp "$(exe)" "$RUNNER_TEMP/after"
+          git status --short
+          git diff --stat 948ddb46272d HEAD -- src-tauri
+      - name: the mechanism alone (a child between fork and exec keeps a closed listener accepting)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          "$RUNNER_TEMP/after" aaa_proof_132::tests::fork_window --test-threads=1 --nocapture 2>&1 | tail -n 15
+      - name: 20 runs of each, with CPU load beside them (and child processes started in the same process)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -u
+          if [ "$RUNNER_OS" = Linux ]; then cores=$(nproc); else cores=$(sysctl -n hw.ncpu); fi
+          filters="aaa_proof_132::tests::storm mcp::tests:: jobs::stream::activity::tests:: jobs::stream::tests::a_pc jobs::stream::tests::a_squeeze"
+          mkdir -p "$RUNNER_TEMP/logs"
+          {
+            echo "### ${{ matrix.os }}: 20 runs per row"
+            echo
+            echo "| tests | beside them | runs with a failure | failures, by test |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          after_failed=0
+          for variant in before after; do
+            for condition in "cpu load" "cpu load + child processes"; do
+              pids=""
+              for i in $(seq 1 $((2 * cores))); do yes > /dev/null & pids="$pids $!"; done
+              if [ "$condition" = "cpu load" ]; then unset PROOF_132_STORM; else export PROOF_132_STORM=10; fi
+              bad=0
+              : > "$RUNNER_TEMP/failed.txt"
+              for run in $(seq 1 20); do
+                log="$RUNNER_TEMP/logs/$variant-${condition// /_}-$run.log"
+                perl -e 'alarm shift; exec @ARGV' 600 "$RUNNER_TEMP/$variant" $filters > "$log" 2>&1
+                status=$?
+                grep -E '^test .* \.\.\. FAILED$' "$log" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' >> "$RUNNER_TEMP/failed.txt" || true
+                echo "$variant, $condition, run $run: exit $status, $(grep -E '^test result:' "$log" | tail -n 1)"
+                if [ $status -ne 0 ]; then
+                  bad=$((bad + 1))
+                  echo "::group::$variant, $condition, run $run failed"
+                  grep -E -A 6 -- '^---- ' "$log" | head -n 60
+                  echo "::endgroup::"
+                fi
+              done
+              kill $pids 2>/dev/null || true
+              wait 2>/dev/null || true
+              by_test=$(sort "$RUNNER_TEMP/failed.txt" | uniq -c | awk '{printf "%s x%s; ", $2, $1}')
+              echo "| $variant | $condition | $bad of 20 | ${by_test:-none} |" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$variant" = after ] && [ $bad -gt 0 ]; then after_failed=1; fi
+            done
+          done
+          cat "$GITHUB_STEP_SUMMARY"
+          exit $after_failed
