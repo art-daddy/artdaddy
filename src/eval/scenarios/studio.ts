@@ -169,18 +169,18 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       const c = clipsOf(final, "v1")[0];
       const color = (c?.color ?? {}) as Record<string, unknown>;
       if (Object.keys(color).length === 0) throw new Error("measured the shot but never graded it");
-      // The stub reports a cold (warm_cool -0.13), flat (saturation 0.11) shot. The fix warms it or
-      // lifts its colour, and moves nothing the other way. The knobs' neutrals are 6500 K for
-      // temperature (higher is warmer) and 1 for the saturation multiplier (apply_color's contract);
-      // compared with 0, any grade at all passed, a colder one included.
+      // The stub reports a cold (warm_cool -0.13), flat (saturation 0.11) shot. apply_color's
+      // temperature is in kelvin with 6500 K neutral (higher is warmer), and its saturation a
+      // multiplier with 1 neutral. So the fix sets the temperature above 6500 K, and drains no
+      // colour. Compared with 0, any grade passed, a colder one included.
       const temp = Number(color.temperature ?? 6500);
       const sat = Number(color.saturation ?? 1);
       const vib = Number(color.vibrance ?? 0);
       const values = `temperature ${temp} K, saturation ${sat}, vibrance ${vib}`;
-      if (temp < 6500 || sat < 1 || vib < 0)
-        throw new Error(`the grade makes the shot colder or flatter (${values})`);
-      if (temp <= 6500 && sat <= 1 && vib <= 0)
-        throw new Error(`the grade does not warm or saturate the shot (${values})`);
+      if (!(temp > 6500))
+        throw new Error(`the grade does not warm the cold shot (${values}; 6500 K is neutral)`);
+      if (sat < 1 || vib < 0)
+        throw new Error(`the grade drains colour from the flat shot (${values})`);
     },
     expectTrace: (t) => mustCall(t, "inspect_color"),
     reference: [

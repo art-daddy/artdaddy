@@ -235,15 +235,29 @@ const cases: Array<{ id: string; good: Timeline; bad: Timeline; why: string }> =
     bad: timeline([vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300)])]) as Timeline,
   },
   // Temperature is in kelvin (6500 neutral) and saturation a multiplier (1 neutral): compared
-  // with 0, these two passed.
+  // with 0, these passed.
   {
     id: "inspect_color_then_warm",
     why: "graded the cold shot colder still",
     good: timeline([
-      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { saturation: 1.3 } } as Any)]),
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 7400, saturation: 1.3 } } as Any),
+      ]),
     ]) as Timeline,
     bad: timeline([
-      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { temperature: 5000 } } as Any)]),
+      vtrack("v1", 0, [
+        vclip("a", "a.mp4", 0, 300, { color: { temperature: 5000, saturation: 1.3 } } as Any),
+      ]),
+    ]) as Timeline,
+  },
+  {
+    id: "inspect_color_then_warm",
+    why: "added colour but left the shot cold",
+    good: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { temperature: 7000 } } as Any)]),
+    ]) as Timeline,
+    bad: timeline([
+      vtrack("v1", 0, [vclip("a", "a.mp4", 0, 300, { color: { saturation: 1.3 } } as Any)]),
     ]) as Timeline,
   },
   {
