@@ -67,7 +67,9 @@ export function emptyStudioState(): StudioState {
 
 /** The one moment `video_find_moment` ever reports, in BOTH unit domains.
  *  A scenario that asks the model to trim to "the best bit" is graded on whether
- *  the clip really ends up spanning THIS window — not on the call happening. */
+ *  the clip really ends up spanning THIS window — not on the call happening. The frames are
+ *  those of a clip playing the footage whole from frame 0 at 30 fps, as the studio seeds place
+ *  it; a look at a clip placed otherwise reports that clip's own frames (clipFrameOf). */
 export const STUDIO_MOMENT_FRAMES = { start: 90, end: 150, peak: 120 } as const;
 export const STUDIO_MOMENT_SECONDS = { start: 3, end: 5, peak: 4 } as const;
 
@@ -159,6 +161,9 @@ export function registerStudioStubs(
   fps = 30,
   timeline?: () => Promise<Timeline>,
 ): void {
+  // A reply that states a fact of the case's own project (its canvas, its length, its frame rate) reads it from the
+  // case's timeline when the tool runs, not from the arguments here (caseProject and clipFrameOf, at the end of this file).
+  registry = caseProject(registry, timeline);
   // A studio workflow still needs import / transcript / export.
   registerJourneyStubs(registry, state, fps);
 
@@ -398,12 +403,13 @@ export function registerStudioStubs(
     // The paid look hears the shot unless asked not to (`visual_only`); the free look's frames,
     // loudness and speech transcript cannot say what a sound that is not speech is.
     const heard = a.visual_only === true ? "" : ` ${STUDIO_SOUND}`;
+    const frameOf = await clipFrameOf(a, fps, timeline);
     return {
       ok: true,
       response: `A wide shot of a launch pad, then the vehicle clears the tower.${heard}`,
       timing: byClip ? "project_frames" : "source_seconds",
       timestamps_found: byClip
-        ? [{ text: "clears the tower", frame: STUDIO_MOMENT_FRAMES.peak }]
+        ? [{ text: "clears the tower", frame: frameOf(STUDIO_MOMENT_SECONDS.peak) }]
         : [{ text: "clears the tower", seconds: STUDIO_MOMENT_SECONDS.peak }],
       video_duration_s: 12,
       window_s: null,
@@ -414,19 +420,20 @@ export function registerStudioStubs(
     const a = (args ?? {}) as Record<string, unknown>;
     state.inspections.push({ tool: "video_find_moment", subject: str(a.clip_id ?? a.media_ref) });
     if (isClipSubject(a)) {
+      const frameOf = await clipFrameOf(a, fps, timeline);
       return {
         ok: true,
         timing: "project_frames",
         moments: [
           {
-            start_frame: STUDIO_MOMENT_FRAMES.start,
-            end_frame: STUDIO_MOMENT_FRAMES.end,
-            peak_frame: STUDIO_MOMENT_FRAMES.peak,
+            start_frame: frameOf(STUDIO_MOMENT_SECONDS.start),
+            end_frame: frameOf(STUDIO_MOMENT_SECONDS.end),
+            peak_frame: frameOf(STUDIO_MOMENT_SECONDS.peak),
             why: "the vehicle clears the tower here",
             shots: [
               {
-                in_frame: STUDIO_MOMENT_FRAMES.start,
-                out_frame: STUDIO_MOMENT_FRAMES.end,
+                in_frame: frameOf(STUDIO_MOMENT_SECONDS.start),
+                out_frame: frameOf(STUDIO_MOMENT_SECONDS.end),
                 description: "wide, vehicle rising",
               },
             ],
@@ -483,13 +490,14 @@ export function registerStudioStubs(
     const subject = str(a.clip_id ?? a.media_ref, "?");
     state.inspections.push({ tool: "inspect_media", subject });
     // The real result, key for key, for a fixed 12 s 1080p clip with sound. Times are project
-    // frames for a clip_id (the seeds place it at frame 0, untrimmed), source seconds otherwise;
-    // the samples are the real tool's own.
+    // frames for a clip_id (through where the case places it, clipFrameOf), source seconds
+    // otherwise; the samples are the real tool's own.
     const clip = isClipSubject(a);
+    const frameOf = await clipFrameOf(a, fps, timeline);
     const start = num(a.start_seconds, 0);
     const end = num(a.end_seconds, 12);
     const at = (t: number): { frame: number } | { t: number } =>
-      clip ? { frame: Math.round(t * fps) } : { t: Math.round(t * 1000) / 1000 };
+      clip ? { frame: frameOf(t) } : { t: Math.round(t * 1000) / 1000 };
     // No pixels to attach, so a look at the footage is told what its pictures show, in words; a
     // look that showed nothing left the model nothing to act on (the case then failed whatever it
     // did). Any other subject has no agreed content and stays unseen.
@@ -498,9 +506,7 @@ export function registerStudioStubs(
       footage
         ? `; what the pictures show: ${times
             .map((t) => {
-              const when = clip
-                ? `frame ${Math.round(t * fps)}`
-                : `${Math.round(t * 1000) / 1000} s`;
+              const when = clip ? `frame ${frameOf(t)}` : `${Math.round(t * 1000) / 1000} s`;
               return `at ${when}, ${studioShotAt(t)}`;
             })
             .join("; ")}`
@@ -519,7 +525,7 @@ export function registerStudioStubs(
     };
     if (a.overview === true) {
       const seconds = [0, 4, 8];
-      const tiles = seconds.map((t) => Math.round(t * (clip ? fps : 1)));
+      const tiles = seconds.map((t) => (clip ? frameOf(t) : t));
       return {
         ...base,
         overview: clip ? { tile_frames: tiles } : { tile_times: tiles },
@@ -874,4 +880,90 @@ export function studioRefIsAudio(ref: string): boolean {
   return (
     ref === STUDIO_VOICEOVER_REF || ref === STUDIO_MUSIC_REF || /voiceover|music|_bed/.test(ref)
   );
+}
+
+/** How long a timeline runs, in seconds, to the millisecond (as an export of it reports). */
+export function timelineSeconds(tl: Timeline): number {
+  const fps = Number(tl?.canvas?.fps) > 0 ? Number(tl.canvas.fps) : 30;
+  const ends = (tl?.tracks ?? []).flatMap((t) =>
+    (t.clips ?? []).map((c) => Number(c.timeline_out) || 0),
+  );
+  return Math.round((Math.max(0, ...ends) / fps) * 1000) / 1000;
+}
+
+/** The case's timeline as it is now, or undefined when there is none to read. */
+async function caseTimeline(timeline?: () => Promise<Timeline>): Promise<Timeline | undefined> {
+  return timeline ? timeline().catch(() => undefined) : undefined;
+}
+
+/** For a look at a placed clip: the PROJECT frame that `seconds` into the footage it plays lands on, at the project's
+ *  own frame rate and through the clip's trim, speed and position, by the mapping of clipSpanToFrames (frame =
+ *  timeline_in + (seconds * fps - source_in) / speed); unlike the real look, a time the clip does not show is not
+ *  dropped. A clip the timeline does not hold is taken as the footage placed whole from frame 0, as the studio seeds
+ *  place it; with no timeline to read, at `fps`. */
+async function clipFrameOf(
+  a: Record<string, unknown>,
+  fps: number,
+  timeline?: () => Promise<Timeline>,
+): Promise<(seconds: number) => number> {
+  const tl = isClipSubject(a) ? await caseTimeline(timeline) : undefined;
+  const rate = Number(tl?.canvas?.fps) > 0 ? Number(tl?.canvas.fps) : fps;
+  const clip = (tl?.tracks ?? []).flatMap((t) => t.clips ?? []).find((c) => c.id === a.clip_id);
+  const tin = Number(clip?.timeline_in) || 0;
+  const srcIn = Number(clip?.source_in) || 0;
+  const speed = Number(clip?.speed) > 0 ? Number(clip?.speed) : 1;
+  return (seconds) => Math.round(tin + (seconds * rate - srcIn) / speed);
+}
+
+type Handler = Parameters<ClientToolRegistry["register"]>[1];
+type Args = Record<string, unknown>;
+
+/** The facts of the case's own project that a stand-in's reply states, read from the case's timeline when the tool
+ *  runs: the canvas get_project_state reports (a widescreen case was told 1080x1920), how long an export of the whole
+ *  timeline says the video runs (a 15 s timeline was said to run 10 s), and the frame rate a transcript's frames are
+ *  at (a 24 fps case was told 30). Each patch rewrites only that fact of the handler's reply. */
+const CASE_FACTS: Record<string, (reply: Args, tl: Timeline, args: Args) => Args> = {
+  get_project_state: (reply, tl) => (tl.canvas ? { ...reply, canvas: tl.canvas } : reply),
+  // Clips or library files exported as separate files are not the timeline's length; the stand-in does not make them.
+  export: (reply, tl, args) =>
+    typeof reply.duration_s === "number" && !hasItems(args.clip_ids) && !hasItems(args.media_refs)
+      ? { ...reply, duration_s: timelineSeconds(tl) }
+      : reply,
+  get_transcript: (reply, tl) =>
+    typeof reply.fps === "number" && Number(tl.canvas?.fps) > 0
+      ? { ...reply, fps: tl.canvas.fps }
+      : reply,
+};
+
+function hasItems(v: unknown): boolean {
+  return Array.isArray(v) && v.length > 0;
+}
+
+/** `registry`, with every reply of a tool in CASE_FACTS that succeeded patched from the case's timeline. Anything
+ *  else passes through untouched; with no timeline to read, the registry is returned as it is. */
+function caseProject(
+  registry: ClientToolRegistry,
+  timeline?: () => Promise<Timeline>,
+): ClientToolRegistry {
+  if (!timeline) return registry;
+  return new Proxy(registry, {
+    get(target, prop, receiver) {
+      if (prop !== "register") return Reflect.get(target, prop, receiver);
+      return (name: string, handler: Handler) => {
+        const patch = CASE_FACTS[name];
+        target.register(
+          name,
+          patch
+            ? async (args) => {
+                const reply = (await handler(args)) as Args | null;
+                if (!reply || typeof reply !== "object" || reply.ok === false) return reply;
+                const tl = await caseTimeline(timeline);
+                return tl ? patch(reply, tl, args ?? {}) : reply;
+              }
+            : handler,
+        );
+        return receiver;
+      };
+    },
+  });
 }

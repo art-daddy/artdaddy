@@ -31,7 +31,7 @@ import { exportDestination, unresolvedMediaBlockers } from "../timeline/render";
 import { plainFailure } from "../timeline/exportWords";
 import type { ExportReasonCode } from "../api/exportReason";
 import type { Clip, Timeline } from "../timeline/model";
-import { registerStudioStubs, type StudioState } from "./studio";
+import { registerStudioStubs, timelineSeconds, type StudioState } from "./studio";
 import { EXPORT_RUNNING, LANDED_SECONDS, STUDIO_PROJECT_NAME } from "./jobWake";
 import type { JobPlan } from "./types";
 
@@ -276,13 +276,6 @@ export function registerJobStubs(
     return { ...out, clips: [...out.clips, ...generated] };
   });
 
-  // ── the project's canvas is the timeline's, whatever the seed (the studio one reports a fixed vertical canvas) ──
-  registry.register("get_project_state", async (args) => {
-    const out = (await studio.run("get_project_state", args ?? {})) as Record<string, unknown>;
-    const canvas = (await env.timeline()).canvas;
-    return canvas ? { ...out, canvas } : out;
-  });
-
   // ── export: refused while generated media is pending; runs past the turn; one at a time ────────────────────────
   const destStore = {
     projectDir: "C:/projects/eval-project",
@@ -342,7 +335,7 @@ export function registerJobStubs(
       queue_position: ahead,
       format: "mp4",
       saved_to: dest.filename,
-      duration_s: 10,
+      duration_s: timelineSeconds(await env.timeline()),
       warnings: [],
       ...(dest.defaulted ? { note: "Saving to your Downloads folder." } : {}),
     };
@@ -457,13 +450,18 @@ function registerWordStubs(
           out.push({ clip: c, track: String(t.id) });
     return out.sort((x, y) => Number(x.clip.timeline_in) - Number(y.clip.timeline_in));
   };
+  /** The project's frame rate now: the words are project frames at the case's own canvas rate. */
+  const rateNow = async () => {
+    const rate = Number((await timeline()).canvas?.fps);
+    return rate > 0 ? rate : fps;
+  };
   /** The words a clip plays, as [text, start_frame, end_frame]: a word the clip does not play is not heard. */
-  const heard = (clip: Clip): [string, number, number][] => {
-    const [from, to] = clipSourceSpanSeconds(clip, fps);
+  const heard = (clip: Clip, rate: number): [string, number, number][] => {
+    const [from, to] = clipSourceSpanSeconds(clip, rate);
     const out: [string, number, number][] = [];
     for (const [text, s, e] of speech.words) {
       if (e <= from || s >= to) continue;
-      const span = clipSpanToFrames(clip, s, e, fps);
+      const span = clipSpanToFrames(clip, s, e, rate);
       if (span) out.push([text, span[0], span[1]]);
     }
     return out;
@@ -474,9 +472,10 @@ function registerWordStubs(
   registry.register("get_transcript", async (args) => {
     const a = args ?? {};
     const hosts = await speaking(str(a.clip_id) || undefined);
+    const rate = await rateNow();
     const empty = {
       ok: true,
-      fps,
+      fps: rate,
       timing: "project_frames",
       word_format: ["index", "text", "start_frame", "end_frame"],
       clips: [] as unknown[],
@@ -499,7 +498,7 @@ function registerWordStubs(
       .map((h) => ({
         clip_id: String(h.clip.id),
         track_id: h.track,
-        words: heard(h.clip)
+        words: heard(h.clip, rate)
           .filter(([, s]) => s >= from && s < to)
           .map(([text, s, e]) => [index++, text, s, e]),
       }))
@@ -528,6 +527,7 @@ function registerWordStubs(
         note: "",
       });
     // Caption-sized phrases on word boundaries: a sentence end, a pause, or four words closes one.
+    const rate = await rateNow();
     const entries: Record<string, unknown>[] = [];
     for (const h of hosts) {
       let phrase: [string, number, number][] = [];
@@ -540,11 +540,12 @@ function registerWordStubs(
         });
         phrase = [];
       };
-      const words = heard(h.clip);
+      const words = heard(h.clip, rate);
       words.forEach((w, i) => {
         phrase.push(w);
         const next = words[i + 1];
-        if (/[.!?]$/.test(w[0]) || phrase.length >= 4 || !next || next[1] - w[2] > fps / 2) close();
+        if (/[.!?]$/.test(w[0]) || phrase.length >= 4 || !next || next[1] - w[2] > rate / 2)
+          close();
       });
       close();
     }
