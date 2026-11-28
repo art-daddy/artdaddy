@@ -31,6 +31,7 @@ import { gradeRun } from "./oracle";
 import { stageFaults } from "./faults";
 import { useFootage } from "./footage";
 import { registerJourneyStubs } from "./journey";
+import { registerJobStubs, type JobBoard } from "./jobs";
 import {
   emptyStudioState,
   registerStudioStubs,
@@ -252,6 +253,7 @@ export async function driveScenario(
   let finalText = "";
   const turnTexts: string[] = [];
   let recovery: RecoveryRuntime | null = null;
+  let board: JobBoard | null = null;
   let providerError = "";
   let roundLimitReached = false;
   // The person's Stop (Scenario.stopAfter): set once the turn's calls reach the stop point.
@@ -374,6 +376,12 @@ export async function driveScenario(
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
       // A case with its own footage: the library, looks, speech and probe answer from it.
       if (scenario.footage) useFootage(registry, ctx, scenario.footage);
+      // Generations and exports that run past the turn, landing when a later user turn begins (jobs.ts).
+      if (scenario.jobs)
+        board = registerJobStubs(registry, studio, scenario.jobs, {
+          store,
+          timeline: () => loadTimeline(store),
+        });
     } else if (scenario.surface === "recovery") {
       recovery = new RecoveryRuntime(scenario.recovery, ctx);
       await recovery.initialize();
@@ -569,6 +577,8 @@ export async function driveScenario(
       // After a Stop the app sends the next message with an answer for every call left
       // unanswered (store/chat.ts carriedDebt); otherwise nothing is owed and this is empty.
       stopPressed = false;
+      // Work due by this turn lands before any of its calls run, as the app's job lands before its message arrives.
+      await board?.atTurn(turn);
       // The person changed the timeline by hand before this message: made as the editor makes it,
       // and the message then says so, or carries a fresh read of the project instead (store/chat.ts).
       const edit = turnContextOf(scenario, turn)?.editedBefore;
