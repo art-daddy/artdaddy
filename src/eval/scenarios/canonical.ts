@@ -175,6 +175,9 @@ export const CANONICAL: Scenario[] = [
     scope: { add: ["video"] },
     title: "Append a clip",
     tags: ["placement"],
+    // The file the request names is in the person's library, where the agent can find it.
+    surface: "look",
+    library: ["outro.mp4"],
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 60)])]),
     prompt: "Add a 2-second clip using outro.mp4 right after the existing clip.",
     expect: (tl) => {
@@ -193,6 +196,11 @@ export const CANONICAL: Scenario[] = [
     scope: { change: ["b"], add: ["video"] },
     title: "Insert a clip between two",
     tags: ["placement"],
+    // The file the request names is in the person's library, where the agent can find it. With
+    // an empty library and no way to look, the agent rightly would not insert a file it could not
+    // find (the first baseline, 27 Nov).
+    surface: "look",
+    library: ["intro.mp4"],
     seed: () =>
       timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 30), vclip("b", "b.mp4", 30, 60)])]),
     prompt: "Insert intro.mp4 for one second between the two clips, pushing the later clip back.",
@@ -323,6 +331,8 @@ export const CANONICAL: Scenario[] = [
     scope: { change: ["a"] },
     title: "Warmer, more saturated grade (open-ended)",
     tags: ["color", "open-ended"],
+    // A grade is judged by eye and by the scopes, which the app offers: a careful editor looks first.
+    surface: "look",
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
     prompt: "Make this clip look warmer and a little more saturated.",
     expect: (tl) => {
@@ -678,6 +688,8 @@ export const CANONICAL: Scenario[] = [
     scope: { change: ["a"] },
     title: "Make it pop (underspecified)",
     tags: ["adversarial", "open-ended"],
+    // A grade is judged by eye and by the scopes, which the app offers: a careful editor looks first.
+    surface: "look",
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
     prompt: "Make this clip pop more.",
     // Underspecified on purpose, and an ordinary edit like this one is expected without asking
@@ -785,6 +797,8 @@ export const CANONICAL: Scenario[] = [
     scope: { change: ["a"] },
     title: "Increase contrast",
     tags: ["color"],
+    // A grade is judged by eye and by the scopes, which the app offers: a careful editor looks first.
+    surface: "look",
     seed: () => timeline([vtrack("v2", 1, [vclip("a", "a.mp4", 0, 90)])]),
     prompt: "Punch up the contrast on this clip.",
     expect: (tl) => {

@@ -17,12 +17,16 @@ import {
   STUDIO_DOWNLOAD_REF,
   STUDIO_FOOTAGE_REF,
   STUDIO_IMAGE_REF,
+  STUDIO_LIBRARY,
   STUDIO_MOMENT_FRAMES,
   STUDIO_MUSIC_REF,
+  STUDIO_PROJECTS,
+  STUDIO_REPLAY_REF,
   STUDIO_SCREENSHOT_REF,
   STUDIO_URL,
   STUDIO_VIDEO_REF,
   STUDIO_VOICEOVER_REF,
+  studioDownloadRef,
 } from "../studio";
 import type { Scenario, Trace } from "../types";
 import { timelineLookFrames } from "../../tools/inspect";
@@ -82,6 +86,16 @@ function untouched(seed: () => ReturnType<Scenario["seed"]>) {
     const after = JSON.stringify(final.tracks);
     if (before !== after) throw new Error("a read-only request modified the timeline");
   };
+}
+/** The project open_project was pointed at: an id, or a project folder's path ending in one. */
+function projectNamed(ref: unknown): string {
+  return (
+    String(ref ?? "")
+      .trim()
+      .replace(/[\\/]+$/, "")
+      .split(/[\\/]/)
+      .pop() ?? ""
+  );
 }
 
 // ── seeds ────────────────────────────────────────────────────────────────────
@@ -254,16 +268,20 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     prompt: "Find me a rocket launch clip on YouTube and add the full replay after this shot.",
     expectTools: ["youtube_search", "download_video", "add_clips"],
     maxRounds: 12,
-    expect: (final) => placed(final, STUDIO_DOWNLOAD_REF),
+    expect: (final) => {
+      const hit = placed(final, STUDIO_REPLAY_REF);
+      if (Number(hit.timeline_in) < 300 - 2)
+        throw new Error(`placed at ${hit.timeline_in}f, not after the existing shot (300f)`);
+    },
     expectTrace: (t) => {
       mustCall(t, "youtube_search");
-      // It must download the one it was told to want — the replay, not the short.
-      // Compared EXACTLY: the short's url has the replay's url as a prefix, so a
-      // substring check would score the wrong pick as correct.
+      // It must download the one it was told to want: the full replay, not the highlights or the
+      // short. Matched by the video, so any form of the replay's link counts.
       const dl = called(t, "download_video")[0];
       if (!dl) throw new Error("never downloaded anything");
       const url = String((dl.args ?? {}).url ?? "");
-      if (url !== STUDIO_URL) throw new Error(`downloaded the wrong result: "${url}"`);
+      if (studioDownloadRef(url) !== STUDIO_REPLAY_REF)
+        throw new Error(`downloaded the wrong result: "${url}"`);
     },
   },
   {
@@ -441,7 +459,6 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       "Find out when the launch window at example.com opens and put that time on screen as a " +
       "caption over the first couple of seconds.",
     expectTools: ["web_search", "add_text_clips"],
-    paidTools: ["web_search"],
     maxRounds: 12,
     expect: (final) => {
       const texts = allClips(final).filter((c) => c.kind === "text");
@@ -463,7 +480,6 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       "Search the web for the launch at example.com and tell me when the launch window " +
       "opens. Don't touch the edit.",
     expectTools: ["web_search"],
-    paidTools: ["web_search"],
     maxRounds: 8,
     expect: untouched(oneClip),
     expectTrace: (t) => mustCall(t, "web_search"),
@@ -642,11 +658,25 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expectTools: ["list_projects", "open_project"],
     maxRounds: 8,
     expectTrace: (t) => {
-      mustCall(t, "list_projects");
-      const open = called(t, "open_project")[0];
-      if (!open) throw new Error("never opened the other project");
-      if (!/teaser/i.test(JSON.stringify(open.args)))
-        throw new Error(`opened the wrong project: ${JSON.stringify(open.args)}`);
+      const teaser = STUDIO_PROJECTS[1].id;
+      // Over MCP the app's door (manage_project, recorded by a host that serves it) switches
+      // projects, so a run that has the door must switch. In the app the agent cannot switch:
+      // open_project points the person to the project, which is all it can do there.
+      const door = called(t, "manage_project");
+      const listed =
+        called(t, "list_projects").length > 0 || door.some((c) => (c.args ?? {}).action === "list");
+      if (!listed) throw new Error("never listed the projects");
+      const opened = door.length
+        ? door.some((c) => (c.args ?? {}).action === "open" && (c.args ?? {}).id === teaser)
+        : called(t, "open_project").some((c) => projectNamed((c.args ?? {}).project) === teaser);
+      if (!opened)
+        throw new Error(
+          door.length
+            ? "never switched to the Teaser project, which manage_project can do"
+            : "never opened the Teaser project",
+        );
+      if (!/teaser/i.test(t.finalText))
+        throw new Error("the answer does not name the other project (Teaser)");
     },
   },
   {
@@ -704,7 +734,28 @@ export const STUDIO_SCENARIOS: Scenario[] = [
       if (ops.length === 0) throw new Error("never touched the library");
       const actions = ops.map((o) => String((o.args ?? {}).action ?? ""));
       if (!actions.includes("list")) throw new Error(`never listed the library (${actions})`);
-      if (!actions.includes("update")) throw new Error(`never tagged anything (${actions})`);
+      // The tags each item ends with: an update's tags replace the item's, as in the app.
+      const tags = new Map<string, string[]>();
+      for (const o of ops) {
+        const a = o.args ?? {};
+        if (a.action === "update" && Array.isArray(a.tags))
+          tags.set(
+            String(a.id ?? ""),
+            a.tags.map((tag) => String(tag)),
+          );
+      }
+      const isBroll = (id: string) =>
+        (tags.get(id) ?? []).some((tag) => tag.trim().toLowerCase() === "broll");
+      // The person keeps their b-roll in the broll folder, and their own footage (a.mp4, the shot
+      // on the timeline) under footage: every b-roll clip gets the tag, and nothing else does.
+      const missed = STUDIO_LIBRARY.filter((r) => r.folder === "broll" && !isBroll(r.id));
+      if (missed.length)
+        throw new Error(`b-roll left untagged: ${missed.map((r) => r.filename).join(", ")}`);
+      const wrong = STUDIO_LIBRARY.filter((r) => r.folder !== "broll" && isBroll(r.id));
+      if (wrong.length)
+        throw new Error(
+          `tagged as b-roll what the person keeps elsewhere: ${wrong.map((r) => `${r.filename} (${r.folder})`).join(", ")}`,
+        );
     },
   },
   {

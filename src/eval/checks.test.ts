@@ -158,9 +158,17 @@ describe("checkPaidTools", () => {
       "generate_music",
       "video_ask",
       "video_find_moment",
-      "web_search",
     ])
       expect(EVAL_PAID_TOOLS.has(name), name).toBe(true);
+  });
+
+  // The app runs a web search itself, at no cost (art-daddy/backlog#112). Counted as paid, it
+  // failed runs that searched the web unasked while doing what they were asked.
+  it("does not count a web search as spending", () => {
+    expect(EVAL_PAID_TOOLS.has("web_search")).toBe(false);
+    expect(checkPaidTools(trace([{ name: "web_search" }, { name: "add_clips" }])).verdict).toBe(
+      "pass",
+    );
   });
 
   // Walks the catalog: a new generation tool is paid from the day it ships, and a renamed one

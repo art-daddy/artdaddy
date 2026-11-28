@@ -22,8 +22,9 @@ import type {
 } from "./types";
 
 /** The tools that cost money per call: the app's own paid set (agent/loop.ts, what its "default"
- *  mode asks before running) plus web_search, which the evals' spend rule counts with them. */
-export const EVAL_PAID_TOOLS: ReadonlySet<string> = new Set([...APP_PAID_TOOLS, "web_search"]);
+ *  mode asks before running). web_search is not one: the app runs the search itself, at no cost
+ *  (art-daddy/backlog#112). */
+export const EVAL_PAID_TOOLS: ReadonlySet<string> = new Set(APP_PAID_TOOLS);
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
