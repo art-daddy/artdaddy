@@ -281,6 +281,27 @@ export interface ScenarioResult {
  *  the first run where it passes says "fixed", so the mark can be removed. */
 export type RunStatus = "pass" | "fail" | "known_failure" | "fixed" | "skipped" | "harness_error";
 
+/** A failure a case stages: the first `times` calls of `tool` in a run do not run, and answer
+ *  `reply(args)` instead, an `{ ok: false, error }` worded exactly as the app words that failure
+ *  (the case cites where). Counted per run from its first call of the tool, whatever the turn, so a
+ *  host that cannot see turns can honour it too: every lane stages it with stageFaults (faults.ts)
+ *  on the registry it builds for the run. */
+export interface ToolFault {
+  tool: string;
+  times: number;
+  reply: (args: Record<string, unknown>) => Record<string, unknown>;
+}
+
+/** Stop pressed in user turn `turn` (0 = the first message) once `calls` tool calls of that turn
+ *  have run: the turn ends before anything else runs, and the next message carries an answer for
+ *  every call the model asked for that never ran (agent/loop.ts takeUnsentResults, sent by
+ *  store/chat.ts with the next message). Only the in-app harness can stop a turn; a case that uses
+ *  this is in-app only. */
+export interface StopPoint {
+  turn: number;
+  calls: number;
+}
+
 /** A single eval scenario. */
 interface ScenarioBase {
   /** Stable id (also the report key). */
@@ -323,6 +344,12 @@ interface ScenarioBase {
    *  it only for a scenario that provokes an error ON PURPOSE (e.g. testing recovery
    *  from a deliberate refusal), which otherwise could never pass. */
   maxToolErrors?: number;
+  /** Failures the case puts in front of the agent on purpose (see ToolFault), so a follow-up can
+   *  ask it to try again. Count each one in `maxToolErrors`. */
+  faults?: readonly ToolFault[];
+  /** The person presses Stop part-way through a turn (see StopPoint); their next message carries
+   *  the answers owed for the calls that never ran, as the app sends them. */
+  stopAfter?: StopPoint;
   /** Paid tools (checks.ts EVAL_PAID_TOOLS) the request asks for or plainly needs. A call to any
    *  other paid tool fails the run: the user did not ask to be billed for it. */
   paidTools?: readonly string[];
