@@ -37,8 +37,8 @@ import type { JobPlan } from "./types";
 
 export { EXPORT_RUNNING, LANDED_SECONDS } from "./jobWake";
 
-/** Where the export stand-in writes, as the app's Downloads folder. */
-export const EXPORT_DIR = "C:/Users/eval/Downloads";
+/** Where the export stand-in writes: the person's Downloads folder, as far as the agent is told. */
+const EXPORT_DIR = "D:/Downloads";
 
 type GenTool = "generate_image" | "generate_video" | "generate_voiceover" | "generate_music";
 type Kind = "image" | "video" | "audio";
