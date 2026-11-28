@@ -3,6 +3,7 @@ import { WITHDRAWN_TOOLS } from "../../contract/withdrawn";
 import { CANONICAL } from "./canonical";
 import { EFFECT_SCENARIOS } from "./effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./exports";
+import { COMPLAINT_SCENARIOS } from "./gap_complaints";
 import { GAP_LANGUAGES } from "./gap_languages";
 import { JOURNEYS } from "./journeys";
 import { REGRESSIONS } from "./regressions";
@@ -26,6 +27,7 @@ const scenarios: Scenario[] = [
   ...JOURNEYS,
   ...EXPORT_SCENARIOS,
   ...STUDIO_SCENARIOS,
+  ...COMPLAINT_SCENARIOS,
   ...GAP_LANGUAGES,
 ];
 
