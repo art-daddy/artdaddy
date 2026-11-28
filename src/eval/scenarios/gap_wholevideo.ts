@@ -11,6 +11,7 @@
 // The footage stand-ins (footage.ts) tell a look what each clip shows in words and what is said in it,
 // so a careful agent learns the library the way it would in the app: by listing it and looking.
 import type { InferenceRequest } from "../harness";
+import type { ReferenceStep } from "../reference";
 import { buildScene } from "../../preview/scene";
 import { clipSourceSpanSeconds, clipSpanToFrames } from "../../timeline/helpers";
 import type { Clip, Timeline, Track } from "../../timeline/model";
@@ -961,12 +962,11 @@ const tags = (kind: string, size: number, turns = 1): string[] => [
 const LOOK = ["library_op", "get_project_state", "inspect_media", "add_clips"];
 
 // ── correct runs ─────────────────────────────────────────────────────────────────
-// The calls a careful editor makes, one step per model round (a text step ends the turn). Each is
-// replayed through the real harness with no model (scenarios.gap_wholevideo.test.ts), which proves the
-// request can be done with these tools and that the checks accept the right result.
+// The calls a careful editor makes, one step per model round (a text step ends the turn): each case's
+// `reference`. scenarios.reference.test.ts replays it through the real harness with no model, which
+// proves the request can be done with these tools and that the checks accept the right result.
 
-export type Calls = [string, Record<string, unknown>][];
-export type Step = { text: string } | { calls: Calls | ((req: InferenceRequest) => Calls) };
+type Step = ReferenceStep;
 
 /** List the library, then look at every clip in it: how the agent learns what the person filmed. */
 function lookAtAll(lib: Footage): Step[] {
@@ -1352,8 +1352,8 @@ const TEASER: (readonly [string, number, number])[] = [
 
 const sizeOf = (lib: Footage): number => lib.clips.length;
 
-/** The cases, with each one's correct run (attached to the case as its `reference`). */
-const CASES: (Scenario & { correct: Step[] })[] = [
+/** The cases, each with its correct run as its `reference`. */
+const CASES: Scenario[] = [
   // ── one sentence, choices left open ─────────────────────────────────────────
   {
     id: "wv_trailer_30s",
@@ -1367,7 +1367,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: LOOK,
     maxRounds: 30,
     expect: all(TRIP, lengthBetween(27, 33), distinctClips(3)),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back(TRAILER)),
       say("Your 30-second trailer is on the timeline: six shots from the bay to the sunset."),
@@ -1386,7 +1386,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     maxRounds: 30,
     // The person chose nothing: only that a video was made from their clips is graded.
     expect: all(EVENT, distinctClips(2), lengthBetween(5, 600)),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back(POST)),
       say("I cut a 35-second highlight of the meetup you can post."),
@@ -1414,7 +1414,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       endsWith(E.volunteers),
       uses(E.trophy),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back(HIGHLIGHT)),
       say(
@@ -1440,7 +1440,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       avoids(T.pocket, T.octopus, T.market, T.iceCream),
       distinctClips(4),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back(TRAVEL_45)),
       say("45 seconds of the coast, without the accidental clip or the food shots."),
@@ -1460,7 +1460,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expect: all(TRIP, lengthBetween(27, 33)),
     // There are no fireworks in the library: the honest reply says so instead of claiming the ending.
     expectTrace: saysMissing(/firework/i),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back(RECAP_30)),
       say(
@@ -1487,7 +1487,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       endsWith(H.balcony),
       lengthBetween(50, 70),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(HOME),
       place(back2back(TOUR)),
       say("The walkthrough runs 68 seconds, room by room in your order."),
@@ -1505,7 +1505,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: LOOK,
     maxRounds: 30,
     expect: all(PARTY, uses(...PARTY_VIDEOS), lengthBetween(8, 45)),
-    correct: [
+    reference: [
       ...lookAtAll(PARTY),
       place(back2back(EVERY_CLIP)),
       say("All eight party clips, five seconds each: 40 seconds."),
@@ -1524,7 +1524,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: [...LOOK, "set_clip_properties"],
     maxRounds: 30,
     expect: all(TRIP, uses(T.jump, T.cave, T.snorkel), slowMotion(T.jump), lengthBetween(27, 33)),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back([[T.jump, 5, 11]])),
       {
@@ -1569,7 +1569,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       keepsSeedOrder(ROUGH),
       distinctClips(3),
     ),
-    correct: [
+    reference: [
       { calls: [["get_timeline", {}]] },
       {
         calls: ROUGH.map((r): [string, Record<string, unknown>] => [
@@ -1602,7 +1602,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       keptWhole(EVENT_ROUGH),
       runsFor(130),
     ),
-    correct: [
+    reference: [
       { calls: [["get_timeline", {}]] },
       {
         calls: EVENT_ROUGH.map((r): [string, Record<string, unknown>] => [
@@ -1657,7 +1657,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       fadesToBlack,
       inOrder(...TOUR_ORDER),
     ),
-    correct: [
+    reference: [
       { calls: [["get_timeline", {}]] },
       {
         calls: [
@@ -1691,7 +1691,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: ["inspect_color", "apply_color"],
     maxRounds: 20,
     expect: all(CAFE, sameWarmLook, uses(...GRADE_ORDER)),
-    correct: [
+    reference: [
       { calls: [["get_timeline", {}]] },
       {
         calls: [
@@ -1722,7 +1722,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: ["get_transcript", "ripple_delete"],
     maxRounds: 30,
     expect: all(LESSON, deadAirGone(), noBlackGaps),
-    correct: [
+    reference: [
       { calls: [["get_transcript", {}]] },
       { calls: [["ripple_delete", { track_id: "v1", ranges: DEAD_AIR }]] },
       say("Cut the pauses and the four filler words; the lesson now runs about 33 seconds."),
@@ -1749,7 +1749,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       noBlackGaps,
       distinctClips(2),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       { calls: [["set_project_settings", { size: { aspect_ratio: "9:16" } }]] },
       place(back2back(REEL)),
@@ -1776,7 +1776,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       lengthBetween(15, 20),
       fillsFrame,
     ),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       { calls: [["set_project_settings", { size: { aspect_ratio: "9:16" } }]] },
       place(back2back(DRONES)),
@@ -1804,7 +1804,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: [...LOOK, "set_project_settings"],
     maxRounds: 30,
     expect: all(HOME, shapeIs(1, 1, "square"), lengthBetween(18, 22), endsWith(H.balcony)),
-    correct: [
+    reference: [
       ...lookAtAll(HOME),
       { calls: [["set_project_settings", { size: { aspect_ratio: "1:1" } }]] },
       place(back2back(TEASER)),
@@ -1829,7 +1829,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       uses(B.balloons, B.present, B.cakeCut),
       fillsFrame,
     ),
-    correct: [
+    reference: [
       ...lookAtAll(PARTY),
       place(back2back(TV)),
       {
@@ -1864,7 +1864,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       uses(K.bag, K.beans, K.espresso),
       endsWith(K.logo),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(CAFE),
       place(back2back(PRODUCT)),
       titleAt("Small Batch, Big Flavour", 0, 90),
@@ -1889,7 +1889,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       endCard(K.logo, "Order at freshbeans.example", 3),
       avoids(K.greyCard),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(CAFE),
       place(back2back(AD)),
       titleAt("Order at freshbeans.example", 360, 450, 0.85),
@@ -1918,7 +1918,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
         ["Bake", V.bake],
       ]),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(BAKE),
       place(back2back(STEPS)),
       {
@@ -1951,7 +1951,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: [...LOOK, "set_clip_properties"],
     maxRounds: 30,
     expect: all(CAFE, lengthBetween(27, 33), cornerLogo(K.logo), distinctClips(3, [K.logo])),
-    correct: [
+    reference: [
       ...lookAtAll(CAFE),
       place(back2back(WATERMARKED)),
       place([
@@ -1991,7 +1991,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       speechHeard(),
       captioned(),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(BAKE),
       place(back2back(BAKE_DAY)),
       { calls: [["add_captions", {}]] },
@@ -2011,7 +2011,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: [...LOOK, "add_captions"],
     maxRounds: 30,
     expect: all(EVENT, lengthBetween(54, 66), speechHeard(), captioned()),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back(MEETUP_MINUTE)),
       { calls: [["add_captions", {}]] },
@@ -2038,7 +2038,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       everyWordOf(V.restTalk),
       everyWordOf(V.crustTalk),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(BAKE),
       place(back2back(TALKING)),
       say("The three bits where you talk to the camera, in order: 24.5 seconds."),
@@ -2062,7 +2062,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       coveredWhileTalking(E.interview, [E.printer, E.handshake, E.kids], 0.4),
       noBlackGaps,
     ),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back([[E.interview, 0, 10]])),
       place(
@@ -2098,7 +2098,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: LOOK,
     maxRounds: 30,
     expect: all(PARTY, musicUnder(B.song), distinctClips(3)),
-    correct: [
+    reference: [
       ...lookAtAll(PARTY),
       place(back2back(PARTY_MONTAGE)),
       music(B.song, lengthOf(PARTY_MONTAGE)),
@@ -2125,7 +2125,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       speechHeard(),
       musicQuietUnderSpeech(V.music),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(BAKE),
       place(back2back(BAKE_40)),
       music(V.music, lengthOf(BAKE_40)),
@@ -2155,7 +2155,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       titleAtStart("Coast Days 2026"),
       noTextExactly("Coast Days"),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back(COAST_45)),
       titleAt("Coast Days", 0, 90),
@@ -2190,7 +2190,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: [...LOOK, "set_clip_properties"],
     maxRounds: 40,
     expect: all(EVENT, lengthBetween(54, 66), musicUnder(E.theme), musicFadesOut(E.theme)),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back(MEETUP_60)),
       say("A one-minute recap."),
@@ -2214,7 +2214,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
     expectTools: LOOK,
     maxRounds: 30,
     expect: all(PARTY, photosFirst([B.photo1986, B.photo1994], 4), distinctClips(5)),
-    correct: [
+    reference: [
       ...lookAtAll(PARTY),
       place(back2back(THEN_NOW)),
       say("The two old photos for four seconds each, then the party."),
@@ -2256,7 +2256,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       musicQuietUnderSpeech(T.song),
       shapeIs(16, 9, "widescreen"),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(TRIP),
       place(back2back(FILM)),
       titleAt("Summer on the Coast", 0, 120),
@@ -2302,7 +2302,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       avoids(K.greyCard),
       shapeIs(16, 9, "landscape"),
     ),
-    correct: [
+    reference: [
       ...lookAtAll(CAFE),
       place(back2back(BRAND)),
       titleAt("Roasted This Week", 30, 120),
@@ -2346,7 +2346,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       musicQuietUnderSpeech(B.song, 0.35, [B.toast]),
       noBlackGaps,
     ),
-    correct: [
+    reference: [
       ...lookAtAll(PARTY),
       place(back2back(BIRTHDAY)),
       titleAt("Happy 60th, Mum", 0, 120),
@@ -2405,7 +2405,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       shapeIs(16, 9, "landscape"),
       noBlackGaps,
     ),
-    correct: [
+    reference: [
       ...lookAtAll(EVENT),
       place(back2back(RECAP_PAGE)),
       titleAt("Ana Ruiz, Organiser", 570, 720, 0.82),
@@ -2438,7 +2438,7 @@ const CASES: (Scenario & { correct: Step[] })[] = [
       musicUnder(H.piano),
     ),
     expectTrace: exportsOnceAfterEditing,
-    correct: [
+    reference: [
       ...lookAtAll(HOME),
       place(back2back(LISTING_45)),
       music(H.piano, lengthOf(LISTING_45)),
@@ -2466,10 +2466,4 @@ function endCardHolds(ref: string, seconds: number): Check {
   };
 }
 
-export const WHOLEVIDEO_REFERENCES: Record<string, Step[]> = Object.fromEntries(
-  CASES.map((c) => [c.id, c.correct]),
-);
-
-export const GAP_WHOLEVIDEO: Scenario[] = CASES.map(
-  ({ correct: _correct, ...scenario }) => scenario,
-);
+export const GAP_WHOLEVIDEO: Scenario[] = CASES;

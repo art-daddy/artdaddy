@@ -1,6 +1,6 @@
-// The whole-video cases (scenarios/gap_wholevideo.ts), offline: each case's correct run passes through
-// the real harness, and a realistic wrong run of each kind fails for the reason a person would give. The
-// footage stand-ins (footage.ts) are checked against what the cases rely on them for.
+// The whole-video cases (scenarios/gap_wholevideo.ts), offline: a realistic wrong run of each kind fails
+// for the reason a person would give, and the footage stand-ins (footage.ts) answer as the cases rely on
+// them to. Each case's correct run (its `reference`) is replayed by scenarios.reference.test.ts.
 //
 // No network and no model: every round is scripted, and fetch is replaced by a spy that throws (each test
 // checks it was never called).
@@ -9,17 +9,16 @@ import path from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PendingCall, RoundResultDTO, Usage } from "../agent/types";
-import { DEFAULT_MODEL } from "../store/chatControls";
 import { ClientToolRegistry } from "../tools/registry";
 import type { ClientToolContext } from "../tools/context";
 import { emptyStudioState, registerStudioStubs } from "./studio";
 import { footageClip, footageRunner, footageWordRows, useFootage, type Footage } from "./footage";
-import { driveScenario, harnessProbeRunner, type InferenceRequest } from "./harness";
+import { harnessProbeRunner } from "./harness";
 import { gradeRun } from "./oracle";
 import { Budget } from "./pricing";
+import { driveScripted, type ReferenceStep } from "./reference";
 import { ALL_SCENARIOS } from "./scenarios";
-import { GAP_WHOLEVIDEO, WHOLEVIDEO_REFERENCES, type Step } from "./scenarios/gap_wholevideo";
+import { GAP_WHOLEVIDEO } from "./scenarios/gap_wholevideo";
 import {
   BAKE,
   BAKE_REF as V,
@@ -42,47 +41,7 @@ import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
 
-// ── the scripted model (as harness.scripted.test.ts; reference.ts will own it) ──────
-
-const USAGE: Usage & { cached_tokens: number } = {
-  input_tokens: 1000,
-  output_tokens: 50,
-  cost_usd: 0.0002,
-  cached_tokens: 800,
-};
-
-function scripted(steps: readonly Step[]) {
-  let i = 0;
-  const send = async (req: InferenceRequest): Promise<RoundResultDTO> => {
-    const step = steps[i++] ?? { text: "" };
-    if ("text" in step)
-      return {
-        kind: "text",
-        pending_calls: [],
-        final_text: step.text,
-        error: "",
-        finish_reason: "stop",
-        usage: USAGE,
-        provider_snapshot: {},
-      };
-    const calls = typeof step.calls === "function" ? step.calls(req) : step.calls;
-    const pending: PendingCall[] = calls.map(([name, args], k) => ({
-      call_id: `c${i}_${k}`,
-      name,
-      arguments: args,
-    }));
-    return {
-      kind: "tool_calls",
-      pending_calls: pending,
-      final_text: "",
-      error: "",
-      finish_reason: "tool_calls",
-      usage: USAGE,
-      provider_snapshot: {},
-    };
-  };
-  return { send };
-}
+type Step = ReferenceStep;
 
 const WORK = path.resolve("reports", "eval", `wholevideo-${process.pid}`);
 const byId = (id: string): Scenario => {
@@ -90,16 +49,10 @@ const byId = (id: string): Scenario => {
   if (!s) throw new Error(`no case ${id}`);
   return s;
 };
-const correct = (id: string): Step[] => WHOLEVIDEO_REFERENCES[id];
+const correct = (id: string): Step[] => byId(id).reference ?? [];
 
 async function drive(scenario: Scenario, steps: readonly Step[]) {
-  const { send } = scripted(steps);
-  return driveScenario(scenario, DEFAULT_MODEL, {
-    server: "http://offline.invalid",
-    budget: new Budget(5),
-    send,
-    workDir: WORK,
-  });
+  return (await driveScripted(scenario, steps, { workDir: WORK, budget: new Budget(5) })).result;
 }
 const why = (r: Awaited<ReturnType<typeof drive>>): string =>
   [...r.tier0.violations, ...r.tier1.violations, ...(r.harm?.violations ?? [])].join("\n");
@@ -117,24 +70,6 @@ afterEach(() => {
 });
 afterAll(() => fsp.rm(WORK, { recursive: true, force: true }));
 
-// ── every case: its correct run passes ───────────────────────────────────────────────
-
-describe("each whole-video case passes its correct run, through the real harness", () => {
-  for (const s of GAP_WHOLEVIDEO)
-    it(s.id, async () => {
-      const steps = correct(s.id);
-      expect(steps?.length, "the case has a correct run").toBeGreaterThan(0);
-      const r = await drive(s, steps);
-      expect(r.harnessError).toBeUndefined();
-      expect(why(r)).toBe("");
-      expect(r.passed).toBe(true);
-      // The correct run makes no failed call: a wasted call would itself fail a run.
-      expect(r.trace.toolCalls.filter((c) => !c.ok).map((c) => `${c.name}: ${c.error}`)).toEqual(
-        [],
-      );
-    });
-});
-
 // ── what every case declares ─────────────────────────────────────────────────────────
 
 describe("the whole-video cases are declared for the lanes that run them", () => {
@@ -147,6 +82,7 @@ describe("the whole-video cases are declared for the lanes that run them", () =>
   for (const s of GAP_WHOLEVIDEO)
     it(`${s.id}: studio surface, own footage, tags, nothing paid`, () => {
       expect(s.surface).toBe("studio");
+      expect(s.reference?.length, "the case carries its correct run").toBeGreaterThan(0);
       expect(s.footage?.clips.length).toBeGreaterThanOrEqual(6);
       const t = s.tags ?? [];
       for (const prefix of ["gap:wholevideo", "lang:en", "turns:", "clips:", "kind:"])
