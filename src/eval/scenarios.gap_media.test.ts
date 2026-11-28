@@ -87,6 +87,13 @@ const repliesIn = (
   round: number,
 ) => requests[round]?.round_input.tool_results ?? [];
 
+/** The look's note says `shows` for the time `when` ("785 s", "frame 38100"): one entry per shot,
+ *  or one per shot listing every time that shows it, whichever way the stand-in words it. */
+function pairs(note: unknown, when: string, shows: string): void {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  expect(String(note)).toMatch(new RegExp(`\\b${esc(when)}[^;]*${esc(shows)}`));
+}
+
 // ── the facts are in what the agent is shown ──────────────────────────────────────────────────
 
 describe("what a look shows is enough to do the task", () => {
@@ -98,11 +105,10 @@ describe("what a look shows is enough to do the task", () => {
     const look = repliesIn(requests, 1)[0].result;
     const times = (look.overview as { tile_times: number[] }).tile_times;
     for (const g of MATCH.goals) expect(times).toContain(g.shot[0]);
-    const note = String(look.note);
-    expect(note).toMatch(/at 785 s, the blue number 9 .*into the top corner/);
-    expect(note).toMatch(/at 2320 s, a corner for red: a red player heads the ball in/);
-    expect(note).toMatch(/at 4280 s, a penalty for blue/);
-    expect(note).toMatch(/at 5290 s, the blue number 7 shoots/);
+    pairs(look.note, "785 s", "the blue number 9 runs onto a through ball");
+    pairs(look.note, "2320 s", "a corner for red: a red player heads the ball in");
+    pairs(look.note, "4280 s", "a penalty for blue");
+    pairs(look.note, "5290 s", "the blue number 7 shoots from thirty metres");
   });
 
   it("the panel names Mara once, on a lower third, then shows her by her blazer, in frames for a clip", async () => {
@@ -113,14 +119,12 @@ describe("what a look shows is enough to do the task", () => {
     const look = repliesIn(requests, 1)[0].result;
     const tiles = (look.overview as { tile_frames: number[] }).tile_frames;
     for (const [a] of PANEL.mara) expect(tiles).toContain(fr(a));
-    const note = String(look.note);
-    expect(note).toMatch(
-      /frame 7200, close-up of the woman on the left of the stage in a grey blazer, speaking; the lower third reads 'Mara Lindqvist/,
-    );
-    expect(note).toMatch(
-      /frame 38100, close-up of the woman on the left in the grey blazer, speaking/,
-    );
-    expect(note).toMatch(/frame 93600, a member of the audience at the microphone/);
+    pairs(look.note, "frame 7200", "in a grey blazer, speaking");
+    expect(String(look.note)).toContain("the lower third reads 'Mara Lindqvist");
+    for (const [a] of PANEL.mara.slice(1))
+      pairs(look.note, `frame ${fr(a)}`, "close-up of the woman on the left in the grey blazer");
+    for (const [a] of PANEL.questions)
+      pairs(look.note, `frame ${fr(a)}`, "a member of the audience at the microphone");
   });
 
   it("the panel's transcript has each question from the floor, in source seconds", async () => {
@@ -160,8 +164,10 @@ describe("what a look shows is enough to do the task", () => {
     expect(String(repliesIn(stream.requests, 1)[0].result.error)).toMatch(
       /video too long for video_find_moment/,
     );
-    expect(String(repliesIn(stream.requests, 2)[0].result.note)).toMatch(
-      new RegExp(`frame ${fr(STREAM.dragonFalls)}, the dragon collapses, a 'VICTORY' banner`),
+    pairs(
+      repliesIn(stream.requests, 2)[0].result.note,
+      `frame ${fr(STREAM.dragonFalls)}`,
+      "the dragon collapses, a 'VICTORY' banner",
     );
   });
 
@@ -172,10 +178,9 @@ describe("what a look shows is enough to do the task", () => {
     ]);
     const look = repliesIn(requests, 1)[0].result;
     expect(look.transcript).toBeNull();
-    const note = String(look.note);
-    for (const [a] of DRONE.boat) expect(note).toContain(`at ${a} s, `);
-    expect(note.match(/red sailing boat/g)).toHaveLength(3);
-    expect(note).toMatch(/at 900 s, a white motorboat/);
+    for (const [a] of DRONE.boat) pairs(look.note, `${a} s`, "red sailing boat");
+    expect(String(look.note).match(/red sailing boat/g)).toHaveLength(3);
+    pairs(look.note, "900 s", "a white motorboat");
   });
 
   it("a folder imports in plain name order, so take 10 comes before take 2", async () => {
