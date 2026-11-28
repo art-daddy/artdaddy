@@ -5,6 +5,7 @@ import { EFFECT_SCENARIOS } from "./effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./exports";
 import { COMPLAINT_SCENARIOS } from "./gap_complaints";
 import { GAP_FOLLOWUPS } from "./gap_followups";
+import { GAP_CONTEXT_SCENARIOS } from "./gap_context";
 import { GAP_WHOLEVIDEO } from "./gap_wholevideo";
 import { JOURNEYS } from "./journeys";
 import { REGRESSIONS } from "./regressions";
@@ -30,6 +31,7 @@ const scenarios: Scenario[] = [
   ...STUDIO_SCENARIOS,
   ...COMPLAINT_SCENARIOS,
   ...GAP_FOLLOWUPS,
+  ...GAP_CONTEXT_SCENARIOS,
   ...GAP_WHOLEVIDEO,
 ];
 

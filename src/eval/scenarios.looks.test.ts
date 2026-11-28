@@ -14,6 +14,7 @@ import { EFFECT_SCENARIOS } from "./scenarios/effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./scenarios/exports";
 import { COMPLAINT_SCENARIOS } from "./scenarios/gap_complaints";
 import { GAP_FOLLOWUPS } from "./scenarios/gap_followups";
+import { GAP_CONTEXT_SCENARIOS } from "./scenarios/gap_context";
 import { GAP_WHOLEVIDEO } from "./scenarios/gap_wholevideo";
 import { timeline, ttrack, vclip, vtrack } from "./scenarios/helpers";
 import { JOURNEYS } from "./scenarios/journeys";
@@ -94,6 +95,7 @@ describe("caption-look eval graders (validated without the model)", () => {
       ...STUDIO_SCENARIOS,
       ...COMPLAINT_SCENARIOS,
       ...GAP_FOLLOWUPS,
+      ...GAP_CONTEXT_SCENARIOS,
       ...GAP_WHOLEVIDEO,
     ];
     const withdrawn = new Set(
