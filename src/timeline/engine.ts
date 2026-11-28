@@ -14,6 +14,7 @@
 // so a deferred write is never lost); the bare-store fallback does a synchronous load->save.
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
+import { agentCallOf } from "../tools/agentCall";
 import { beginProjectClose, runProjectMutation } from "../tools/coordinator";
 import {
   MutationAbortedError,
@@ -25,6 +26,7 @@ import {
 import { openDocumentByDir } from "../project/openDocuments";
 import { useProjectNotice } from "../store/projectNotice";
 import type { ProjectDocument } from "../project/ProjectDocument";
+import { noteHandEdit, noteHistoryMove } from "./agentUndo";
 import { emitTimelineChange } from "./bus";
 import { clampTimelineValues } from "./clamp";
 import { OpError, timelineUnreadable } from "./errors";
@@ -598,21 +600,26 @@ export async function runGesture<T>(
         }
         ctx?.assertCanCommit(); // re-checked after the awaited lazy load, like applyOpLocked
         const revisionBefore = session.revision();
+        const before = session.current();
+        const call = agentCallOf(store);
         try {
-          const out = await session.transaction(label, () =>
-            work((stepLabel, mutate) => {
-              const r = session.apply(stepLabel, mutate);
-              // A refused step voids the INTENT. `apply` reports a rejection rather than throwing,
-              // so without this the gesture would sail past it and commit the steps that DID land
-              // as one entry — a half-applied intent the user never asked for.
-              if (!r.ok)
-                throw new GestureStepError(
-                  r.validation_errors
-                    ? { ok: false, error: r.error, validation_errors: r.validation_errors }
-                    : { ok: false, error: r.error },
-                );
-              return r.receipt;
-            }),
+          const out = await session.transaction(
+            label,
+            () =>
+              work((stepLabel, mutate) => {
+                const r = session.apply(stepLabel, mutate);
+                // A refused step voids the INTENT. `apply` reports a rejection rather than throwing,
+                // so without this the gesture would sail past it and commit the steps that DID land
+                // as one entry — a half-applied intent the user never asked for.
+                if (!r.ok)
+                  throw new GestureStepError(
+                    r.validation_errors
+                      ? { ok: false, error: r.error, validation_errors: r.validation_errors }
+                      : { ok: false, error: r.error },
+                  );
+                return r.receipt;
+              }),
+            call ?? undefined,
           );
           // One emit, one persist, one revision bump for the whole intent — a per-step emit would
           // show the user a half-applied timeline that a later step or a rollback then contradicts.
@@ -620,6 +627,7 @@ export async function runGesture<T>(
             emitTimelineChange(session.current(), "engine", store.projectDir, session.isDirty());
             scheduleTimelinePersist(store, doc);
             ctx?.markCommitted();
+            if (call === undefined) noteHandEdit(session, before, session.current());
           }
           return out;
         } catch (e) {
@@ -670,7 +678,9 @@ async function applyOpLocked(
     return { ok: false, error: `${label}: ${timelineUnreadable(String(e))}` };
   }
   ctx?.assertCanCommit(); // re-check origin/session AFTER any awaited lazy load — reject a supersede that landed mid-lease (the fence's second gate, past preflight)
-  const r = session.apply(label, mutate);
+  // Who is editing: the agent's tool call when this store is an agent's view, else the person by hand.
+  const call = agentCallOf(store);
+  const r = session.apply(label, mutate, undefined, call ?? undefined);
   if (!r.ok)
     return r.validation_errors
       ? { ok: false, error: r.error, validation_errors: r.validation_errors }
@@ -678,6 +688,7 @@ async function applyOpLocked(
   emitTimelineChange(session.current(), "engine", store.projectDir, session.isDirty());
   scheduleTimelinePersist(store, doc);
   ctx?.markCommitted(); // a real in-memory change -> advance the document revision (a {ok:false} validation reject above does NOT)
+  if (call === undefined) noteHandEdit(session, r.before, r.next);
   return r.receipt;
 }
 
@@ -713,6 +724,8 @@ async function doUndoLocked(
   const before = clone(session.current()); // undo reverts in place; snapshot to diff against
   const r = session.undo();
   if (!r.ok) return { ok: false, error: r.error };
+  // The person (the editor's own store, never an agent's view) took back an edit the agent made.
+  noteHistoryMove("undo", r, agentCallOf(store) === undefined);
   // Composite (Phase 7): a cascade-delete slot also restores its library half (re-add the deleted
   // catalog item). The timeline already reverted in-memory; a rare library-write failure leaves the
   // restored clips transiently referencing an un-restored row until the next save/undo — report, not crash.
@@ -768,6 +781,7 @@ async function doRedoLocked(
   const before = clone(session.current());
   const r = session.redo();
   if (!r.ok) return { ok: false, error: r.error };
+  noteHistoryMove("redo", r, agentCallOf(store) === undefined);
   // Composite (Phase 7): mirror of undo — re-remove the cascade-deleted catalog item with its clips.
   let redoWarning: string | undefined;
   try {
@@ -802,7 +816,9 @@ export async function applyTaggedInGate(
   tag: string,
 ): Promise<TimelineTransitionResult> {
   const session = await doc.timelineSession(() => loadTimeline(store));
-  const r = session.apply(label, mutate, tag);
+  // A cascade delete the agent asked for is the agent's edit, like any other it commits. A hand edit
+  // here is not compared for a put-back clip: its library half can still fail and void it.
+  const r = session.apply(label, mutate, tag, agentCallOf(store) ?? undefined);
   if (!r.ok) return r;
   emitTimelineChange(session.current(), "engine", store.projectDir, session.isDirty());
   scheduleTimelinePersist(store, doc);

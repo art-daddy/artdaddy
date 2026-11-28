@@ -17,6 +17,7 @@ import {
   agentEventContext,
   createToolTrace,
   recordLook,
+  type AgentEditCall,
   type AgentEventContext,
   type ToolTrace,
 } from "../api/agentEvents";
@@ -80,6 +81,8 @@ class ProjectToolHost implements ToolHost {
   private currentSurface: ToolRunOptions["surface"] | undefined;
   // Where the running tool's look reports go: tied to this call and to who made it (tools/lookReport.ts).
   private currentLook: ClientToolContext["look"];
+  // The running tool call, which its edits are made in the name of (timeline/agentUndo.ts).
+  private currentCall: AgentEditCall | undefined;
   constructor(readonly projectId: string) {
     this.registry = createToolRegistry(() => this.viewCtx());
     this.ready = buildContext(projectId, this.holder);
@@ -100,6 +103,7 @@ class ProjectToolHost implements ToolHost {
       },
       this.currentSignal,
       this.currentOrigin,
+      this.currentCall,
     );
   }
   has(name: string): boolean {
@@ -191,6 +195,7 @@ class ProjectToolHost implements ToolHost {
     this.currentExportRoute = exportRoute;
     this.currentSurface = surface;
     this.currentLook = (report) => recordLook(report, trace.callId ?? "", trace.context);
+    this.currentCall = { tool: name, callId: trace.callId ?? "", labels: trace.context };
     try {
       return await this.registry.run(name, args, trace.context, trace);
     } finally {
@@ -199,6 +204,7 @@ class ProjectToolHost implements ToolHost {
       this.currentExportRoute = undefined;
       this.currentSurface = undefined;
       this.currentLook = undefined;
+      this.currentCall = undefined;
     }
   }
   store(): ProjectStoreAccess | null {

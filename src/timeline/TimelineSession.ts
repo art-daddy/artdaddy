@@ -12,15 +12,31 @@ import {
   type TimelineTransitionResult,
 } from "./engine";
 import type { Timeline } from "./model";
+import type { AgentEditCall } from "../api/agentEvents";
 
 const HISTORY_CAP = 50;
 
 /** One history slot: a whole-timeline snapshot plus an optional `tag` that couples a COMPOSITE
  *  command (e.g. a cascade delete: remove a library item + its using clips as ONE undo entry) to a
- *  side effect the document restores on undo / re-applies on redo. A plain edit has no tag. */
+ *  side effect the document restores on undo / re-applies on redo. A plain edit has no tag.
+ *  `by` is the agent's tool call that made the edit (absent for an edit made by hand) and `at` when
+ *  it was made; both travel with the slot between the stacks, so an undo or a redo can say whose
+ *  edit it moved and how long ago it was made (timeline/agentUndo.ts). */
 interface UndoEntry {
   readonly timeline: Timeline;
   readonly tag?: string;
+  readonly by?: AgentEditCall;
+  readonly at: number;
+}
+
+/** An agent's edit still on the timeline: who made it, when, and the timeline just before and just
+ *  after it. `key` is the same object for as long as the edit stays in the undo history. */
+export interface AgentEditRecord {
+  readonly key: object;
+  readonly by: AgentEditCall;
+  readonly at: number;
+  readonly before: Timeline;
+  readonly after: Timeline;
 }
 
 /** The outcome of an undo/redo/replace: `ok` plus the remaining stack depths (for the UI enablement
@@ -33,6 +49,9 @@ export interface TimelineHistoryResult {
   /** The moved slot's composite `tag`, if any — the document runs its companion (undo restores the
    *  library side, redo re-applies it) so timeline + library move as ONE undo entry. */
   readonly tag?: string;
+  /** The moved slot's agent call (absent for a hand edit) and when its edit was made. */
+  readonly by?: AgentEditCall;
+  readonly at?: number;
 }
 
 export class TimelineSession {
@@ -41,7 +60,7 @@ export class TimelineSession {
   private readonly _redo: UndoEntry[] = [];
   private _revision = 0;
   private _dirty = false;
-  private _tx: { before: Timeline; tags: string[] } | null = null;
+  private _tx: { before: Timeline; tags: string[]; by?: AgentEditCall } | null = null;
 
   /** @param initial the timeline loaded from disk at open (in sync with disk => not dirty). */
   constructor(initial: Timeline) {
@@ -80,11 +99,27 @@ export class TimelineSession {
     return [...this._undo, ...this._redo].map((e) => e.timeline);
   }
 
+  /** The agent's edits still in the undo history (so still on the timeline), oldest first, each with
+   *  the timeline just before it and just after it: the snapshot of the slot above it, or the live
+   *  timeline for the newest. Inside an open transaction the newest is not settled, so there is none. */
+  agentEdits(): AgentEditRecord[] {
+    if (this._tx) return [];
+    const out: AgentEditRecord[] = [];
+    this._undo.forEach((entry, i) => {
+      if (!entry.by) return;
+      const after = i + 1 < this._undo.length ? this._undo[i + 1].timeline : this._timeline;
+      out.push({ key: entry, by: entry.by, at: entry.at, before: entry.timeline, after });
+    });
+    return out;
+  }
+
   /** Apply one mutation to the in-memory timeline via the SAME pure pipeline as disk-based applyOp.
    *  On success: records the before-snapshot for undo, clears redo, bumps the revision, marks dirty,
    *  and returns the diff receipt. On failure (OpError / validation): state is untouched and the
-   *  structured error returns — the caller reports it without mutating anything. */
-  apply(label: string, mutate: Mutate, tag?: string): TimelineTransitionResult {
+   *  structured error returns — the caller reports it without mutating anything. `by` is the agent
+   *  call making the edit (absent: the person, by hand); inside a transaction the transaction's own
+   *  `by` names the one entry it pushes. */
+  apply(label: string, mutate: Mutate, tag?: string, by?: AgentEditCall): TimelineTransitionResult {
     const r = applyTimelineTransition(this._timeline, label, mutate);
     if (!r.ok) return r;
     if (this._tx) {
@@ -93,7 +128,7 @@ export class TimelineSession {
       // document must run its library companion on undo (see `transaction`, which refuses a second).
       if (tag !== undefined) this._tx.tags.push(tag);
     } else {
-      this._pushUndo({ timeline: r.before, tag });
+      this._pushUndo({ timeline: r.before, tag, by, at: Date.now() });
       this._redo.length = 0; // a fresh edit invalidates the redo branch (its composite tags become unreachable)
     }
     this._timeline = r.next;
@@ -114,12 +149,13 @@ export class TimelineSession {
    *
    *  The CALLER must hold the mutation lease for the whole call — `MutationGate.run` is exclusive,
    *  so the steps inside must not re-enter it. Without that, another edit could land between two
-   *  steps and this entry's snapshot would revert it too. */
-  async transaction<T>(label: string, work: () => Promise<T> | T): Promise<T> {
+   *  steps and this entry's snapshot would revert it too. `by` names the agent call the whole intent
+   *  belongs to (absent: the person's own gesture). */
+  async transaction<T>(label: string, work: () => Promise<T> | T, by?: AgentEditCall): Promise<T> {
     if (this._tx) return await work(); // joined: the outer transaction owns the entry
     const before = this._timeline;
     const revisionBefore = this._revision;
-    this._tx = { before, tags: [] };
+    this._tx = { before, tags: [], by };
     try {
       return await work();
     } catch (e) {
@@ -139,7 +175,7 @@ export class TimelineSession {
             `${label}: a transaction may contain at most one composite (library-coupled) edit, got ${tx.tags.length}`,
           );
         }
-        this._pushUndo({ timeline: before, tag: tx.tags[0] });
+        this._pushUndo({ timeline: before, tag: tx.tags[0], by: tx.by, at: Date.now() });
         this._redo.length = 0;
       }
     }
@@ -164,7 +200,8 @@ export class TimelineSession {
         ok: false,
         error: `undo: invalid timeline snapshot — ${errors.slice(0, 3).join("; ")}`,
       };
-    this._pushRedo({ timeline: this._timeline, tag: entry.tag }); // redo re-applies the SAME composite
+    // Redo re-applies the SAME composite, and it is still the same call's edit made at the same time.
+    this._pushRedo({ timeline: this._timeline, tag: entry.tag, by: entry.by, at: entry.at });
     this._undo.pop();
     this._timeline = entry.timeline;
     this._revision++;
@@ -174,6 +211,8 @@ export class TimelineSession {
       remainingUndo: this._undo.length,
       remainingRedo: this._redo.length,
       tag: entry.tag,
+      by: entry.by,
+      at: entry.at,
     };
   }
 
@@ -187,7 +226,7 @@ export class TimelineSession {
         ok: false,
         error: `redo: invalid timeline snapshot — ${errors.slice(0, 3).join("; ")}`,
       };
-    this._pushUndo({ timeline: this._timeline, tag: entry.tag });
+    this._pushUndo({ timeline: this._timeline, tag: entry.tag, by: entry.by, at: entry.at });
     this._redo.pop();
     this._timeline = entry.timeline;
     this._revision++;
@@ -197,6 +236,8 @@ export class TimelineSession {
       remainingUndo: this._undo.length,
       remainingRedo: this._redo.length,
       tag: entry.tag,
+      by: entry.by,
+      at: entry.at,
     };
   }
 

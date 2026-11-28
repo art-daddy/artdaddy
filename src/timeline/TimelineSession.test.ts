@@ -38,6 +38,61 @@ describe("TimelineSession", () => {
     expect(s.redo().tag).toBe("T1"); // then the composite — so redo re-runs the companion
   });
 
+  // The undo rate (timeline/agentUndo.ts) reads whose edit a slot is, when it was made, and what the timeline was just
+  // before and just after it: the person's later edits on top, an undo and a redo must not change any of that.
+  it("keeps whose edit a slot is and the timelines around it, through later edits, an undo and a redo", () => {
+    const labels = {
+      surface: "app",
+      model: "m",
+      project_id: "p",
+      transcript_id: "t",
+      generation: 0,
+    };
+    const agent = { tool: "add_track", callId: "c1", labels };
+    const s = new TimelineSession(emptyTimeline());
+    s.apply("by hand", addTrack("h1"));
+    s.apply("agent", addTrack("a1"), undefined, agent);
+    const afterAgent = s.current();
+    s.apply("by hand", addTrack("h2"));
+    expect(s.agentEdits()).toHaveLength(1);
+    const [edit] = s.agentEdits();
+    expect(edit.by).toBe(agent);
+    expect(edit.before.tracks.map((t) => t.id)).toEqual(["h1"]);
+    expect(edit.after).toEqual(afterAgent);
+
+    expect(s.undo()).toMatchObject({ ok: true, by: undefined }); // the person's h2
+    expect(s.undo()).toMatchObject({ ok: true, by: agent, at: edit.at }); // the agent's a1
+    expect(s.agentEdits(), "an undone edit is no longer on the timeline").toEqual([]);
+    expect(s.redo()).toMatchObject({ ok: true, by: agent, at: edit.at });
+    expect(
+      s.agentEdits().map((e) => [e.by, e.at, e.before.tracks.length, e.after.tracks.length]),
+    ).toEqual([[agent, edit.at, 1, 2]]);
+  });
+
+  it("names one agent call for a whole transaction, and none for the person's", async () => {
+    const labels = {
+      surface: "app",
+      model: "m",
+      project_id: "p",
+      transcript_id: "t",
+      generation: 0,
+    };
+    const agent = { tool: "move_clips", callId: "c7", labels };
+    const s = new TimelineSession(emptyTimeline());
+    await s.transaction(
+      "agent gesture",
+      () => {
+        s.apply("one", addTrack("a1"));
+        s.apply("two", addTrack("a2"));
+      },
+      agent,
+    );
+    await s.transaction("hand gesture", () => void s.apply("three", addTrack("h1")));
+    expect(
+      s.agentEdits().map((e) => [e.by.callId, e.before.tracks.length, e.after.tracks.length]),
+    ).toEqual([["c7", 0, 2]]);
+  });
+
   it("revertLastApply erases the just-applied tagged slot CLEANLY — restores the timeline, leaves NO redo entry (blocker 3)", () => {
     const s = new TimelineSession(emptyTimeline());
     s.apply("plain", addTrack("v1"));
