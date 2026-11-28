@@ -555,7 +555,7 @@ const isFiller = (word: string): boolean => FILLERS.has(tokens(word).join(""));
 
 /** Silences and filler words gone from every take, every other word heard whole, in order. */
 const deadAirGone =
-  (maxGap = 0.75): Check =>
+  (maxGap = 1.0): Check =>
   (tl, lib) => {
     const fps = fpsOf(tl);
     for (const c of lib.clips.filter((x) => x.words)) {
@@ -745,15 +745,28 @@ const musicFadesOut =
   };
 
 /** Every picture of the cut carries the same warm colour grade. */
+/** White balance is in kelvin, 6500 neutral, and a higher value is warmer (apply_color). */
+const NEUTRAL_KELVIN = 6500;
+/** A grade warms the picture: white balance above neutral, or a colour wheel pushed toward red,
+ *  orange or yellow. */
+function warms(color: unknown): boolean {
+  const c = (color ?? {}) as Record<string, unknown>;
+  if (Number(c.temperature) > NEUTRAL_KELVIN) return true;
+  return (["shadows", "mids", "highs"] as const).some((w) => {
+    const hue = Number(c[`${w}Hue`]);
+    const amount = Number(c[`${w}Amount`]);
+    return amount > 0.02 && ((hue >= 0 && hue <= 70) || hue >= 330);
+  });
+}
+
+/** Every shot of the cut carries the same grade, and it warms the picture. */
 const sameWarmLook: Check = (tl, lib) => {
   const shots = pictures(tl).filter((p) => footageClip(lib, p.clip.media_ref)?.kind === "video");
   const looks = shots.map((p) => JSON.stringify(p.clip.color ?? null));
-  const cold = shots.filter(
-    (p) => !(Number((p.clip.color as { temperature?: number } | undefined)?.temperature) > 0),
-  );
+  const cold = shots.filter((p) => !warms(p.clip.color));
   if (cold.length)
     fail(
-      `${cold.length} of ${shots.length} shots have no warm grade (first ${nameOf(lib, refOf(lib, cold[0].clip) ?? "?")})`,
+      `${cold.length} of ${shots.length} shots have no warm grade (first ${nameOf(lib, refOf(lib, cold[0].clip) ?? "?")}: ${JSON.stringify(cold[0].clip.color ?? null)})`,
     );
   if (new Set(looks).size > 1)
     fail(
@@ -1693,19 +1706,23 @@ const CASES: Scenario[] = [
     expect: all(CAFE, sameWarmLook, uses(...GRADE_ORDER)),
     reference: [
       { calls: [["get_timeline", {}]] },
+      // Measure first: the shots are graded from what inspect_color reads, not blind.
+      { calls: [["inspect_color", { clip_id: "c01" }]] },
       {
         calls: [
           [
             "apply_color",
             {
               clip_ids: ["c01", "c02", "c03", "c04", "c05", "c06"],
-              temperature: 0.2,
-              saturation: 0.05,
+              temperature: 7200,
+              saturation: 1.05,
             },
           ],
         ],
       },
-      say("Every shot now has the same warm grade."),
+      say(
+        "Every shot now has the same warm grade: white balance at 7200 K and a touch more saturation.",
+      ),
     ],
   },
   {

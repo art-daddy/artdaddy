@@ -334,10 +334,24 @@ const WRONG: { id: string; what: string; steps: () => Step[]; fails: RegExp }[] 
     id: "wv_same_warm_look_all",
     what: "the warm grade on half the shots",
     steps: () =>
-      replaced("wv_same_warm_look_all", 1, {
-        calls: [["apply_color", { clip_ids: ["c01", "c02", "c03"], temperature: 0.2 }]],
+      replaced("wv_same_warm_look_all", 2, {
+        calls: [["apply_color", { clip_ids: ["c01", "c02", "c03"], temperature: 7200 }]],
       }),
     fails: /3 of 6 shots have no warm grade/,
+  },
+  {
+    id: "wv_same_warm_look_all",
+    what: "one grade on every shot, but it cools them (white balance below neutral)",
+    steps: () =>
+      replaced("wv_same_warm_look_all", 2, {
+        calls: [
+          [
+            "apply_color",
+            { clip_ids: ["c01", "c02", "c03", "c04", "c05", "c06"], temperature: 5200 },
+          ],
+        ],
+      }),
+    fails: /6 of 6 shots have no warm grade/,
   },
   {
     id: "wv_dead_air_chip",
@@ -396,6 +410,37 @@ const WRONG: { id: string; what: string; steps: () => Step[]; fails: RegExp }[] 
         ],
       }),
     fails: /"just" in MVI_1002\.MP4 is cut or missing/,
+  },
+  {
+    id: "wv_dead_air_chip",
+    what: "the longest pause only half cut",
+    steps: () =>
+      replaced("wv_dead_air_chip", 1, {
+        calls: [
+          [
+            "ripple_delete",
+            {
+              track_id: "v1",
+              ranges: [
+                [0, 12],
+                [39, 49],
+                [150, 192],
+                [288, 369],
+                [435, 533],
+                [594, 678],
+                [828, 1062],
+                [1134, 1149],
+                [1194, 1275],
+                [1386, 1461],
+                [1530, 1569],
+                [1610, 1621],
+                [1683, 1800],
+              ].map(([start, end]) => ({ start, end })),
+            },
+          ],
+        ],
+      }),
+    fails: /1\.40 s of silence between "puncture\." and "It"/,
   },
   {
     id: "wv_reel_vertical_under_30",
