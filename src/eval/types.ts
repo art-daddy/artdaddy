@@ -304,7 +304,11 @@ interface ScenarioBase {
    *  The grader runs on the FINAL timeline after all turns. */
   followUps?: string[];
   /** Which tool surface the harness registers. "timeline" (default) is the
-   *  zero-spend timeline-only surface. "journey" additionally registers
+   *  zero-spend timeline-only surface. "look" adds what the app offers beside its
+   *  edit tools that neither bills nor reaches the network: the looks
+   *  (inspect_media, inspect_timeline, inspect_color), the person's library
+   *  (library_op's reads, get_project_state) and import_media (look.ts), for a
+   *  request a careful editor would not do blind. "journey" additionally registers
    *  deterministic stand-ins for import / transcript / export so a multi-step
    *  WORKFLOW can be driven with no network, ffmpeg, or paid calls. "studio"
    *  widens that to the WHOLE non-timeline catalog (research, vision, generation,
@@ -328,6 +332,10 @@ interface ScenarioBase {
   paidTools?: readonly string[];
   /** Tools this case must not call at all (a cheaper path exists, or the user said not to). */
   mustNotCall?: readonly string[];
+  /** Files the person keeps in the project's library besides those the seed places, by the
+   *  filename that is also the media_ref (a file the request names, such as "intro.mp4"). Read by
+   *  the "look" surface, whose library lists the seed's files and these. */
+  library?: readonly string[];
   /** What the request may change. Declared, anything else changed fails the run. */
   scope?: EditScope;
   /** What is spoken in a source the case places, for the craft checks on cuts and captions. */
@@ -353,6 +361,6 @@ interface ScenarioBase {
 
 export type Scenario = ScenarioBase &
   (
-    | { surface?: "timeline" | "journey" | "studio"; recovery?: never }
+    | { surface?: "timeline" | "look" | "journey" | "studio"; recovery?: never }
     | { surface: "recovery"; recovery: RecoveryCase }
   );

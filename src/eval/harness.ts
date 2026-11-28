@@ -36,6 +36,7 @@ import {
   studioRefIsAudio,
   type StudioState,
 } from "./studio";
+import { registerLookStubs } from "./look";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
@@ -382,6 +383,16 @@ export async function driveScenario(
           "model catalog and executable recovery handlers differ; no paid inference permitted",
         );
     }
+    // The "look" surface: the timeline tools plus the app's free looks and the person's library
+    // (look.ts). The Copilot lane's host registers it the same way.
+    if (scenario.surface === "look")
+      registerLookStubs(
+        registry,
+        scenario,
+        studio,
+        { id: String(projectId), name: EVAL_PROJECT_NAME },
+        () => loadTimeline(store),
+      );
 
     let snapshot: Record<string, unknown> | null = null;
     const send =

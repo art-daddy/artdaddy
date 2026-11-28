@@ -17,7 +17,11 @@ import { timeline, vclip, vtrack } from "./helpers";
 
 const FPS = 30;
 
-const calls = (trace: Trace, name: string) => trace.toolCalls.filter((c) => c.name === name);
+/** The calls of one tool that RAN. A refused call (a junk argument, a bad destination) rendered
+ *  nothing and cancelled nothing; counting it read one refused call and two renders as "exported
+ *  3x". The refusal itself still fails the run, as a wasted call (maxToolErrors). */
+const calls = (trace: Trace, name: string) =>
+  trace.toolCalls.filter((c) => c.name === name && c.ok);
 /** mp4 renders only — an fcpxml write is not a deliverable render and costs nothing. */
 const renders = (trace: Trace) =>
   calls(trace, "export").filter((c) => (c.args?.format ?? "mp4") !== "fcpxml");
@@ -99,8 +103,9 @@ export const EXPORT_SCENARIOS: Scenario[] = [
     expectTrace: (trace) => {
       exportedExactlyOnce(trace);
       const exportAt = trace.toolCalls.indexOf(renders(trace)[0]);
-      const edits = trace.toolCalls.filter((c) =>
-        ["remove_clips", "ripple_delete", "split_clips", "move_clips"].includes(c.name),
+      const edits = trace.toolCalls.filter(
+        (c) =>
+          c.ok && ["remove_clips", "ripple_delete", "split_clips", "move_clips"].includes(c.name),
       );
       if (!edits.length) throw new Error("never made the edit it was asked for");
       const lastEdit = trace.toolCalls.indexOf(edits[edits.length - 1]);
@@ -201,6 +206,13 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       if (renders(trace)[1].args?.resolution !== "720p")
         throw new Error("the second export did not use the new setting");
     },
+    reference: [
+      { calls: [["export", {}]] },
+      { text: "Your video is exporting to your Downloads folder." },
+      { calls: [["manage_exports", { action: "cancel", job_id: "job_1" }]] },
+      { calls: [["export", { resolution: "720p" }]] },
+      { text: "Stopped the first export and started it again at 720p." },
+    ],
   },
 ];
 

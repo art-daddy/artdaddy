@@ -23,9 +23,12 @@ import { emptyStudioState, registerStudioStubs, STUDIO_BBOX, studioRefIsAudio } 
 import {
   STUDIO_CROP_REF,
   STUDIO_DOWNLOAD_REF,
+  STUDIO_HIGHLIGHTS_URL,
   STUDIO_IMAGE_REF,
   STUDIO_MUSIC_REF,
+  STUDIO_REPLAY_URL,
   STUDIO_SCREENSHOT_REF,
+  STUDIO_SHORT_URL,
   STUDIO_VOICEOVER_REF,
 } from "./studio";
 import { gradeRun } from "./oracle";
@@ -352,7 +355,7 @@ describe("studio trace graders reject a broken chain", () => {
     const s = byId("list_models_before_generating");
     expect(() => s.expectTrace!(trace([{ name: "list_models", args: {} }]))).not.toThrow();
     expect(harmOf("list_models_before_generating", [{ name: "list_models" }]).passed).toBe(true);
-    for (const paid of ["generate_video", "generate_image", "video_ask", "web_search"]) {
+    for (const paid of ["generate_video", "generate_image", "video_ask"]) {
       const burned = harmOf("list_models_before_generating", [
         { name: "list_models", args: {} },
         { name: paid, args: {} },
@@ -360,6 +363,12 @@ describe("studio trace graders reject a broken chain", () => {
       expect(burned.passed, paid).toBe(false);
       expect(burned.violations.join("\n")).toContain(`harm(paid_tool): ${paid}`);
     }
+    // A web search costs nothing, so it spends nothing either.
+    const searched = harmOf("list_models_before_generating", [
+      { name: "list_models", args: {} },
+      { name: "web_search", args: {} },
+    ]);
+    expect(searched.passed).toBe(true);
   });
 
   it("inspect_timeline_check: rejects inspecting a frame the prompt didn't ask for", () => {
@@ -377,22 +386,25 @@ describe("studio trace graders reject a broken chain", () => {
 
   it("search_then_fetch: rejects downloading a result other than the one asked for", () => {
     const s = byId("search_then_fetch");
-    expect(() =>
+    const fetched = (url: string) => () =>
       s.expectTrace!(
         trace([
           { name: "youtube_search", args: { query: "rocket launch" } },
-          { name: "download_video", args: { url: "https://example.com/launch" } },
+          { name: "download_video", args: { url, output_name: "launch.mp4" } },
         ]),
-      ),
-    ).not.toThrow();
-    expect(() =>
-      s.expectTrace!(
-        trace([
-          { name: "youtube_search", args: { query: "rocket launch" } },
-          { name: "download_video", args: { url: "https://example.com/launch-short" } },
-        ]),
-      ),
-    ).toThrow();
+      );
+    // The full replay, by any form of its link.
+    expect(fetched(STUDIO_REPLAY_URL)).not.toThrow();
+    expect(fetched("https://youtu.be/Orb1tReplay")).not.toThrow();
+    expect(fetched(`${STUDIO_REPLAY_URL}&t=42s`)).not.toThrow();
+    // The other results, the page the replay is also on, and a link the search never gave.
+    for (const url of [
+      STUDIO_HIGHLIGHTS_URL,
+      STUDIO_SHORT_URL,
+      "https://example.com/launch",
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    ])
+      expect(fetched(url), url).toThrow(/wrong result/);
   });
 
   it("project_rename: rejects renaming to something else", () => {
@@ -419,11 +431,16 @@ describe("studio trace graders reject a broken chain", () => {
 
   it("library_tag_broll: rejects listing without ever tagging", () => {
     const s = byId("library_tag_broll");
+    const tag = (id: string) => ({
+      name: "library_op",
+      args: { action: "update", id, tags: ["broll"] },
+    });
     expect(() =>
       s.expectTrace!(
         trace([
           { name: "library_op", args: { action: "list" } },
-          { name: "library_op", args: { action: "update", tags: ["broll"] } },
+          tag("media_broll_city"),
+          tag("media_broll_ocean"),
         ]),
       ),
     ).not.toThrow();
