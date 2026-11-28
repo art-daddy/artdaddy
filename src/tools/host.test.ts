@@ -13,6 +13,7 @@ import {
   setAgentContext,
 } from "../api/agentEvents";
 import type { LookReport } from "./lookReport";
+import { agentCallOf } from "./agentCall";
 import { useAuth } from "../store/auth";
 import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 
@@ -133,6 +134,50 @@ describe("openToolHost", () => {
     expect(appContext.surface).toBe("app");
     // The work a tool hands off to outlive its turn keeps the caller too.
     expect(appContext.detach().surface).toBe("app");
+  });
+
+  // An edit is the agent's, and whose, by the store it is committed through (tools/agentCall.ts): every run's store names
+  // its own tool call, overlapping runs never see each other's, and work handed off to outlive the turn keeps it.
+  it("names each overlapping run's own tool call on the store its edits go through", async () => {
+    const host = openToolHost("call-project");
+    await host.ready;
+    let release!: (value: unknown) => void;
+    toolGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const appTrace = createToolTrace(
+      "add_clips",
+      {},
+      { ...agentEventContext(), model: "gpt-6-luna", transcript_id: "t1" },
+      "call_7",
+    );
+    const app = host.run(
+      "add_clips",
+      {},
+      { surface: "app", signal: new AbortController().signal, trace: appTrace },
+    );
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const appContext = toolCtx;
+    toolCtx = null;
+    const mcpTrace = createToolTrace(
+      "library_op",
+      {},
+      { ...agentEventContext(), surface: "mcp", mcp_client: "claude_code" },
+      "41",
+    );
+    const mcp = host.run("library_op", {}, { surface: "mcp", trace: mcpTrace });
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const mcpContext = toolCtx;
+    release({ ok: true });
+    await Promise.all([app, mcp]);
+    const appCall = { tool: "add_clips", callId: "call_7", labels: appTrace.context };
+    expect(agentCallOf(appContext.store)).toEqual(appCall);
+    expect(agentCallOf(appContext.detach().store)).toEqual(appCall);
+    expect(agentCallOf(mcpContext.store)).toEqual({
+      tool: "library_op",
+      callId: "41",
+      labels: mcpTrace.context,
+    });
   });
 
   it("isolates overlapping export modes through ignored cancellation and leaves an omitted MCP mode unset", async () => {

@@ -29,6 +29,7 @@ import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "..
 import { useEditor } from "./editor";
 import { discardFirstPrompt } from "./firstPrompt";
 import { loadTimeline, replaceTimeline } from "../timeline/engine";
+import { agentEditsOfCalls, noteChatRedo, noteChatUndo, toolCallIds } from "../timeline/agentUndo";
 import { withProjectLock } from "../tools/coordinator";
 import type { ProjectStoreAccess } from "../tools/store";
 import { openDocumentById } from "../project/openDocuments";
@@ -1346,7 +1347,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const next = turns.map((t, k) => (k === i ? { ...t, undone: true } : t));
         const cp = next[i].checkpoint;
         if (cp) {
+          // The agent's edits this takes back, read before the restore starts the history over.
+          const takenBack = agentEditsOfCalls(ed.store.projectDir, toolCallIds([turns[i]]));
           if (!(await replaceTimeline(ed.store, cp))) return; // project closed mid-restore: leave chat state untouched
+          noteChatUndo(takenBack);
           await ed.reload();
         }
         // Reset provider continuity so the next turn rebuilds context from the
@@ -1387,6 +1391,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const ta = next[i].timelineAfter;
         if (ta) {
           if (!(await replaceTimeline(ed.store, ta))) return; // project closed mid-restore: leave chat state untouched
+          noteChatRedo(toolCallIds([turns[i]]));
           await ed.reload();
         }
         set((s) => ({
@@ -1429,7 +1434,12 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const before = cp ? (ed.timeline ?? null) : null; // what the restore replaces
         const hid = turns.filter((t, k) => k >= i && !t.undone).map((t) => t.id);
         if (cp) {
+          const takenBack = agentEditsOfCalls(
+            ed.store.projectDir,
+            toolCallIds(turns.filter((t, k) => k >= i && !t.undone)),
+          );
           if (!(await replaceTimeline(ed.store, cp))) return null; // project closed mid-restore: leave chat state untouched
+          noteChatUndo(takenBack);
           await ed.reload();
         }
         wakeDropChat(ed.store.projectDir, get().transcriptId ?? undefined); // the undone turns' waiting is over
@@ -1463,6 +1473,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const next = turns.map((t) => (hid.has(t.id) ? { ...t, undone: false } : t));
         if (restored.before) {
           if (!(await replaceTimeline(ed.store, restored.before))) return false; // project closed mid-restore
+          noteChatRedo(toolCallIds(turns.filter((t) => hid.has(t.id))));
           await ed.reload();
         }
         set((s) => ({

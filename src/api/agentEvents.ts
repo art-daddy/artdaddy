@@ -99,7 +99,35 @@ export const MAX_LOOK_DIM = 100_000;
 export const MAX_LOOK_SECONDS = 31_536_000;
 export const MAX_LOOK_KBPS = 10_000_000;
 
+/** What the person did, soon after, to an edit the agent made (timeline/agentUndo.ts): took it back, or brought it back again.
+ *  A list of their own and not part of AGENT_EVENT_KINDS, so a server that predates them drops these two kinds and keeps the
+ *  rest of the flush (written down again on the server, analytics.py AGENT_UNDO_KINDS). */
+export const UNDO_EVENT_KINDS = ["edit_undone", "edit_redone"] as const;
+/** Where: the editor's Undo or Redo (the keys, the menu, the toolbar), the chat's Undo, Redo or Restore, or by hand (a clip the
+ *  agent changed put back the way it was). */
+export const UNDO_VIAS = ["editor", "chat", "hand"] as const;
+
+/** Whether this build sends the undo events. Off in every commit but the one that turns it on, which also changes both privacy
+ *  documents (the app's src-tauri/PRIVACY.txt and the website's privacy page) after the owner approved their words
+ *  (art-daddy/backlog#131). That commit sets this to true and changes the test that pins it. */
+export const UNDO_EVENTS_SHIPPED = false;
+
+let undoShipped: boolean = UNDO_EVENTS_SHIPPED;
+
+/** Whether the undo events are told by this build right now: the one question every place that notices one asks first, so a
+ *  build that keeps them dark does no work for them. */
+export function undoEventsOn(): boolean {
+  return undoShipped;
+}
+
+/** Tests only. */
+export function __setUndoEventsShipped(value: boolean): void {
+  undoShipped = value;
+}
+
 export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
+export type UndoEventKind = (typeof UNDO_EVENT_KINDS)[number];
+export type UndoVia = (typeof UNDO_VIAS)[number];
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 export type TurnTrigger = (typeof TURN_TRIGGERS)[number];
 export type TurnStateRead = (typeof TURN_STATE_READS)[number];
@@ -117,7 +145,7 @@ export interface AgentEvent extends Partial<
     number
   >
 > {
-  kind: AgentEventKind;
+  kind: AgentEventKind | UndoEventKind;
   at: number;
   name?: string;
   call_id?: string;
@@ -140,6 +168,8 @@ export interface AgentEvent extends Partial<
   bytes_up?: number;
   /** A look: its source's codec, one short label (tools/lookReport.ts `codecLabel`). */
   codec?: string;
+  /** An undo event: where the person undid or brought back the agent's edit. */
+  via?: UndoVia;
 }
 
 /** Matches AgentEventItem on the server. Truncating HERE as well keeps a pathological
@@ -605,6 +635,39 @@ export function recordApprovalDecided(
   );
 }
 
+/** The agent's tool call an edit belongs to, with the labels of that call's own trace (its model, its program, the account
+ *  session it ran in). Kept on the edit (timeline/agentUndo.ts), so an undo event names who made the edit, not whatever is
+ *  current when the person takes it back. */
+export interface AgentEditCall {
+  readonly tool: string;
+  readonly callId: string;
+  readonly labels: Readonly<AgentEventContext>;
+}
+
+/** The person took back an edit the agent made (`edit_undone`), or brought it back again (`edit_redone`), `ms` after the agent
+ *  made it. The tool's name, the call's id and where, and nothing of what the edit was or what it touched. Sent only by a
+ *  build that tells it (UNDO_EVENTS_SHIPPED); filed under the edit's own labels, so one made under another account is
+ *  dropped like every other event of that session. */
+export function recordAgentEditUndo(
+  kind: UndoEventKind,
+  call: AgentEditCall,
+  via: UndoVia,
+  ms: number,
+): void {
+  if (!undoShipped) return;
+  push(
+    {
+      kind,
+      at: Date.now() / 1000,
+      name: legalText(call.tool, 40),
+      call_id: legalText(call.callId, 100),
+      ms: clampTo(ms, MAX_CALL_MS),
+      via,
+    },
+    call.labels as AgentEventContext,
+  );
+}
+
 /** Send whatever is buffered. Never throws and never blocks a turn. */
 export async function flushAgentEvents(): Promise<void> {
   if (flushTimer) clearTimeout(flushTimer);
@@ -723,6 +786,7 @@ export function __resetAgentEvents(): void {
   discardSessionEvents();
   inFlight.clear();
   context = { surface: "app", model: "", project_id: "", transcript_id: "" };
+  undoShipped = UNDO_EVENTS_SHIPPED;
 }
 
 /** Tests only. */

@@ -9,6 +9,8 @@
 // comes in, and it catalogues what it links.
 import type { MutationOrigin } from "../project/MutationGate";
 import { loadTimeline } from "../timeline/engine";
+import type { AgentEditCall } from "../api/agentEvents";
+import { AGENT_CALL } from "./agentCall";
 import type { ClientToolContext } from "./context";
 import { clipAbs, isAbsolutePath, type ProjectStoreAccess } from "./store";
 
@@ -41,8 +43,13 @@ export async function projectKnowsPath(store: ProjectStoreAccess, abs: string): 
 }
 
 /** The same store, with resolveRef limited to what the project knows. A Proxy over the one
- *  instance, so session state and every other method stay exactly the store's own. */
-export function agentStoreView(store: ProjectStoreAccess): ProjectStoreAccess {
+ *  instance, so session state and every other method stay exactly the store's own. It also says it
+ *  is an agent's (tools/agentCall.ts), and for which tool call when `call` is given, so whatever is
+ *  committed through it is told apart from the person's own edits. */
+export function agentStoreView(
+  store: ProjectStoreAccess,
+  call?: AgentEditCall,
+): ProjectStoreAccess {
   const resolveRef = async (ref: string): Promise<string | null> => {
     const s = (ref ?? "").trim();
     if (!s || escapes(s)) return null;
@@ -52,6 +59,7 @@ export function agentStoreView(store: ProjectStoreAccess): ProjectStoreAccess {
   return new Proxy(store, {
     get(target, prop) {
       if (prop === "resolveRef") return resolveRef;
+      if (prop === AGENT_CALL) return call ?? null;
       const v: unknown = Reflect.get(target, prop, target);
       return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
     },
@@ -59,13 +67,15 @@ export function agentStoreView(store: ProjectStoreAccess): ProjectStoreAccess {
 }
 
 /** The context every agent-originated tool call runs with: the store limited to what the project
- *  knows, and the turn's Stop threaded into the runner when there is one. */
+ *  knows (and naming `call`, the tool call it runs for), and the turn's Stop threaded into the runner
+ *  when there is one. */
 export function agentToolContext(
   base: ClientToolContext,
   signal?: AbortSignal,
   origin?: MutationOrigin,
+  call?: AgentEditCall,
 ): ClientToolContext {
-  const store = agentStoreView(base.store);
+  const store = agentStoreView(base.store, call);
   if (!signal) return { ...base, store };
   return {
     ...base,
