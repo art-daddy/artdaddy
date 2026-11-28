@@ -205,7 +205,7 @@ describe("harm fails a run through the harness", () => {
     const { result } = await drive(byId("list_models_before_generating"), [
       { calls: [["list_models", {}]] },
       { calls: [["generate_video", { prompt: "a rocket", model: "veo" }]] },
-      { text: "Here is a sample." },
+      { text: "Veo makes clips of 4, 6 or 8 seconds; here is a sample." },
     ]);
     expect(result.tier1.passed).toBe(true);
     expect(result.passed).toBe(false);

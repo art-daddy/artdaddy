@@ -14,6 +14,7 @@ import type { Scenario, Trace } from "../types";
 import { assertRecoveryOutcome, recoverySeed } from "../recovery";
 import type { RecoveryCase } from "../types";
 import { timeline, vclip, vtrack } from "./helpers";
+import { call, READ_TIMELINE, say } from "./steps";
 
 const FPS = 30;
 
@@ -61,6 +62,10 @@ export const EXPORT_SCENARIOS: Scenario[] = [
     expectTools: ["export"],
     maxRounds: 4,
     expectTrace: exportedExactlyOnce,
+    reference: [
+      call("export", {}),
+      say("Your export has started; the video will be saved to your Downloads folder."),
+    ],
   },
 
   {
@@ -80,6 +85,14 @@ export const EXPORT_SCENARIOS: Scenario[] = [
     // fine and is not asserted — naming an approved tool would grade the model on agreeing with
     // me rather than on not filling the user's Downloads folder.
     expectTrace: exportedExactlyOnce,
+    reference: [
+      call("export", {}),
+      call("manage_exports", { action: "list" }),
+      say(
+        "The export started and is still rendering (job 1); nothing has failed. The file will " +
+          "be in your Downloads folder when it finishes. I have not started a second one.",
+      ),
+    ],
   },
 
   {
@@ -106,6 +119,12 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       const lastEdit = trace.toolCalls.indexOf(edits[edits.length - 1]);
       if (exportAt < lastEdit) throw new Error("exported before finishing the edit");
     },
+    reference: [
+      READ_TIMELINE,
+      call("remove_clips", { clip_ids: ["b"] }),
+      call("export", {}),
+      say("Cut the second clip and started exporting what's left to your Downloads folder."),
+    ],
   },
 
   {
@@ -132,6 +151,10 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       if (res !== "720p")
         throw new Error(`export resolution was ${JSON.stringify(res)}, not "720p"`);
     },
+    reference: [
+      call("export", { resolution: "720p" }),
+      say("Exporting at 720p to your Downloads folder; the project itself stays 1080p."),
+    ],
   },
 
   {
@@ -153,6 +176,10 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       const out = given(renders(trace)[0].args?.output_path);
       if (out) throw new Error(`invented a destination ('${out}') the user never named`);
     },
+    reference: [
+      call("export", {}),
+      say("Rendering the finished video now; it will be saved to your Downloads folder."),
+    ],
   },
 
   {
@@ -175,6 +202,10 @@ export const EXPORT_SCENARIOS: Scenario[] = [
       if (!out.replace(/\\/g, "/").toLowerCase().endsWith("videos/promo.mp4"))
         throw new Error(`exported to '${out}' instead of the path the user named`);
     },
+    reference: [
+      call("export", { output_path: "C:/Users/eval/Videos/promo.mp4" }),
+      say("Exporting now; it will be saved as C:/Users/eval/Videos/promo.mp4."),
+    ],
   },
 
   {

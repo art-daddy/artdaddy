@@ -137,6 +137,7 @@ describe("gradeRun", () => {
     const good: Trace = {
       ...emptyTrace(),
       toolCalls: [{ round: 1, name: "list_models", args: {}, ok: true }],
+      finalText: "Video is made with Veo, in clips of 4, 6 or 8 seconds.",
     };
     const g = gradeRun(s, s.seed(), s.seed(), good);
     expect([g.tier0.passed, g.tier1.passed, g.harm.passed, g.passed]).toEqual([

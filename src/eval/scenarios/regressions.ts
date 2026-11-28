@@ -21,6 +21,7 @@ import {
   vclip,
   vtrack,
 } from "./helpers";
+import { call, READ_TIMELINE, say } from "./steps";
 
 /** The synclock seed: main track + a sync-locked overlay + linked audio + music bed. */
 function synclockSeed() {
@@ -50,6 +51,11 @@ export const REGRESSIONS: Scenario[] = [
     expect: (tl) => near(Number(clipById(tl, "a")?.speed ?? 1), 1.2, 0.05, "speed"),
     expectTools: ["set_clip_properties"],
     maxRounds: 4,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], speed: 1.2 }),
+      say("The clip plays at 1.2x now."),
+    ],
   },
   {
     id: "ripple_both_ids",
@@ -76,6 +82,11 @@ export const REGRESSIONS: Scenario[] = [
     },
     expectTools: ["ripple_delete", "remove_clips"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("ripple_delete", { track_id: "v2", ranges: [{ start: 60, end: 120 }] }),
+      say("Cut the second clip out and closed the gap: the third clip now follows the first."),
+    ],
   },
   {
     id: "linked_av_retime_sync",
@@ -97,6 +108,11 @@ export const REGRESSIONS: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["shot"], speed: 0.5 }),
+      say("The shot plays at half speed now, and its linked audio slowed with it."),
+    ],
   },
   {
     id: "synclock_ripple",
@@ -121,6 +137,14 @@ export const REGRESSIONS: Scenario[] = [
     },
     expectTools: ["ripple_delete", "remove_clips"],
     maxRounds: 8,
+    reference: [
+      READ_TIMELINE,
+      call("ripple_delete", { track_id: "v2", ranges: [{ start: 60, end: 120 }] }),
+      say(
+        "Removed the middle section and closed the gap: the outro now follows the intro, with " +
+          "its audio and the logo moving with it. The music bed runs on as before.",
+      ),
+    ],
   },
   {
     id: "t009_property_thrash",
@@ -139,6 +163,16 @@ export const REGRESSIONS: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 4,
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", {
+        clip_ids: ["a"],
+        opacity: 0.8,
+        speed: 1.2,
+        fade: { out: 15 },
+      }),
+      say("Set the clip to 80% opacity and 1.2x speed, with a half-second fade-out."),
+    ],
   },
   {
     id: "vertical_reframe_480p",
@@ -195,5 +229,27 @@ export const REGRESSIONS: Scenario[] = [
     },
     expectTools: ["set_clip_properties"],
     maxRounds: 12,
+    // The careful run reframes once, then explains instead of zooming: the cover fit already
+    // magnifies the 480p picture 4x, and more zoom is the reported failure, not a fix.
+    reference: [
+      READ_TIMELINE,
+      call("set_clip_properties", { clip_ids: ["a"], fit: "cover" }),
+      say(
+        "It now fills the vertical frame: the widescreen shot is scaled up to cover the 9:16 " +
+          "canvas, with its sides cropped off.",
+      ),
+      READ_TIMELINE,
+      say(
+        "The clip is still playing its footage at normal speed; only its framing changed. A " +
+          "talking shot with little movement can look still once it is cropped this tight, and " +
+          "the 480p source is already shown 4 times larger than it was filmed. Zooming in further " +
+          "would only make it softer.",
+      ),
+      say(
+        "I have not zoomed in again: the picture is already magnified 4 times, and more would " +
+          "break it up without adding any movement. To make it feel less static I can add a slow " +
+          "push-in within that limit, or cut in other shots if you have them. Which would you like?",
+      ),
+    ],
   },
 ];

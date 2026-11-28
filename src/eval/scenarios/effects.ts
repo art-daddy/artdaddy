@@ -5,6 +5,7 @@
 // make the model thrash — which is the exact failure the rework fixed.
 import type { Scenario } from "../types";
 import { aclip, assert, atrack, clipById, timeline, vclip, vtrack } from "./helpers";
+import { call, READ_TIMELINE, say } from "./steps";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- graders poke the effect stack
 type Any = any;
@@ -39,6 +40,11 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     },
     expectTools: ["apply_effects"],
     maxRounds: 4,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", { clip_ids: ["a"], add: [{ type: "blur", enabled: false }] }),
+      say("The blur is off for now; its settings are kept, so it can be switched back on."),
+    ],
   },
   {
     id: "effect_remove",
@@ -65,6 +71,11 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     },
     expectTools: ["apply_effects"],
     maxRounds: 4,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", { clip_ids: ["a"], remove: ["grain"] }),
+      say("Removed the film grain; the vignette is still there."),
+    ],
   },
   {
     id: "effect_partial_update",
@@ -95,6 +106,14 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     },
     expectTools: ["apply_effects"],
     maxRounds: 4,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", {
+        clip_ids: ["a"],
+        add: [{ type: "chroma", params: { similarity: 0.28 } }],
+      }),
+      say("Widened the key's tolerance from 0.20 to 0.28; the key colour and blend are unchanged."),
+    ],
   },
   {
     id: "effect_copy_look",
@@ -128,6 +147,17 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     },
     expectTools: ["apply_effects"],
     maxRounds: 6,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", {
+        clip_ids: ["b"],
+        add: [
+          { type: "grain", params: { grain: 35 } },
+          { type: "vignette", params: { vignette: 0.5 } },
+        ],
+      }),
+      say("The second clip now has the first one's look: the same grain and vignette."),
+    ],
   },
   {
     id: "audio_eq_boost",
@@ -147,6 +177,11 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     },
     expectTools: ["apply_effects"],
     maxRounds: 5,
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", { clip_ids: ["m"], add: [{ type: "eq", params: { bass: 4 } }] }),
+      say("Boosted the music's low end with an EQ (+4 dB on the bass)."),
+    ],
   },
   {
     id: "effect_refusal_recovery",
@@ -184,5 +219,14 @@ export const EFFECT_SCENARIOS: Scenario[] = [
     // allowance the scenario could never pass, however well the model recovered.
     maxToolErrors: 1,
     maxRounds: 6,
+    // The careful run gives the EQ a setting the first time, so nothing is refused.
+    reference: [
+      READ_TIMELINE,
+      call("apply_effects", {
+        clip_ids: ["m"],
+        add: [{ type: "eq", params: { bass: 2, treble: 2 } }],
+      }),
+      say("Put an EQ on the music with a gentle lift (+2 dB) on the bass and treble."),
+    ],
   },
 ];
