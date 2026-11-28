@@ -23,10 +23,9 @@ export interface ClipChange {
   readonly fields: readonly string[];
 }
 
-/** One JSON text per value, whatever the order its object keys were written in. `undefined` is no value at all. */
+/** One JSON text per value, whatever the order its object keys were written in: what JSON.stringify would write, keys
+ *  sorted. A value JSON has no text for (`undefined`, a function) is no value at all, and `null` inside a list. */
 export function canonical(value: unknown): string | undefined {
-  if (value === undefined || typeof value === "function" || typeof value === "symbol")
-    return undefined;
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? undefined;
   if (Array.isArray(value)) return `[${value.map((v) => canonical(v) ?? "null").join(",")}]`;
   const keys = Object.keys(value as Record<string, unknown>).sort();
@@ -38,13 +37,12 @@ export function canonical(value: unknown): string | undefined {
   return `{${parts.join(",")}}`;
 }
 
-/** Every clip of the timeline that has an id, by id. */
+/** Every clip of the timeline that has an id, by id. A track may have no clip list; a clip with no id cannot be followed. */
 export function clipStates(timeline: Timeline): Map<string, ClipState> {
   const out = new Map<string, ClipState>();
-  for (const track of Array.isArray(timeline?.tracks) ? timeline.tracks : []) {
-    if (!track || typeof track !== "object") continue;
-    for (const clip of Array.isArray(track.clips) ? track.clips : []) {
-      if (!clip || typeof clip !== "object" || typeof clip.id !== "string" || !clip.id) continue;
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips ?? []) {
+      if (typeof clip?.id !== "string" || !clip.id) continue;
       const state = new Map<string, string>([[TRACK, String(track.id)]]);
       for (const [key, value] of Object.entries(clip)) {
         const text = canonical(value);
@@ -60,7 +58,7 @@ function changedFields(a: ClipState, b: ClipState): string[] {
   const fields: string[] = [];
   for (const key of new Set([...a.keys(), ...b.keys()]))
     if (a.get(key) !== b.get(key)) fields.push(key);
-  return fields.sort();
+  return fields;
 }
 
 /** What an edit from `before` to `after` did to each clip it made or changed (a clip it removed is left out). */

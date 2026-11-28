@@ -63,15 +63,12 @@ describe("a hand edit that puts the agent's change back", () => {
     expect(putBack(t0, moved, moved, halfway)).toEqual([]);
   });
 
-  it("is not seen when the hand edit leaves that clip alone, even though the clip is still the way it was", () => {
-    // The agent moved `a`; the person then trims `b`. `a` is not put back: it was never touched.
-    const trimmed = timeline({
-      v1: [
-        clip("a", { timeline_in: 100, timeline_out: 130 }),
-        clip("b", { timeline_in: 40, timeline_out: 60 }),
-      ],
+  it("is not seen when the hand edit leaves that clip alone, even though the clip is the way it was", () => {
+    // The agent moved `a`; an Undo already put it back, and the person now trims `b`: `a` was not touched by this edit.
+    const bTrimmed = timeline({
+      v1: [clip("a"), clip("b", { timeline_in: 40, timeline_out: 60 })],
     });
-    expect(putBack(t0, moved, moved, trimmed)).toEqual([]);
+    expect(putBack(t0, moved, t0, bTrimmed)).toEqual([]);
     // ...and a clip the agent never changed is never counted, whatever the hand does to it.
     expect(
       putBack(
@@ -92,10 +89,31 @@ describe("a hand edit that puts the agent's change back", () => {
       ],
     });
     expect(putBack(t0, added, added, t0)).toEqual(["new"]);
+    // A clip the edit made has no state from before it and no fields: only its removal puts it back.
+    expect(clipChanges(t0, added).get("new")).toEqual({ before: null, fields: [] });
     const otherGone = timeline({
       v1: [clip("a"), clip("new", { timeline_in: 80, timeline_out: 90 })],
     });
     expect(putBack(t0, added, added, otherGone)).toEqual([]);
+  });
+
+  it("reads a field set to nothing as a field that is not there, as the saved project does", () => {
+    // In memory an edit may leave `opacity: undefined` where the file has no opacity: JSON writes them alike.
+    const half = timeline({ v1: [clip("a", { opacity: 0.5 })] });
+    const unset = timeline({ v1: [clip("a", { opacity: undefined })] });
+    expect(putBack(timeline({ v1: [clip("a")] }), half, half, unset)).toEqual(["a"]);
+    expect(canonical({ a: 1, b: undefined, c: () => 1 })).toBe(canonical({ a: 1 }));
+    expect(canonical([1, undefined, () => 1])).toBe(JSON.stringify([1, undefined, () => 1]));
+  });
+
+  it("follows only clips it can name: a track with no clip list, and a clip with no id, are passed over", () => {
+    const t = timeline({ v1: [clip("a"), { ...clip("x"), id: undefined }] });
+    t.tracks.push({ id: "v9", kind: "video", z: 9 }); // no `clips` at all
+    expect([...clipStates(t).keys()]).toEqual(["a"]);
+    const moved = timeline({
+      v1: [clip("a", { timeline_in: 60, timeline_out: 90 }), { ...clip("x"), id: undefined }],
+    });
+    expect([...clipChanges(t, moved).keys()]).toEqual(["a"]);
   });
 
   it("never counts a clip the agent removed: a clip made again by hand is a new clip", () => {
