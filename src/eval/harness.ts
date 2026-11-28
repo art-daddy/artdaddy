@@ -30,6 +30,7 @@ import { ClientToolRegistry } from "../tools/registry";
 import { INTERNAL_DIR, ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import { gradeRun } from "./oracle";
 import { stageFaults } from "./faults";
+import { useFootage } from "./footage";
 import { registerJourneyStubs } from "./journey";
 import {
   emptyStudioState,
@@ -369,9 +370,11 @@ export async function driveScenario(
     // widens that to the WHOLE non-timeline catalog (see studio.ts) — same rule:
     // no network, no paid inference, no ffmpeg.
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
-    else if (scenario.surface === "studio")
+    else if (scenario.surface === "studio") {
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
-    else if (scenario.surface === "recovery") {
+      // A case with its own footage: the library, looks, speech and probe answer from it.
+      if (scenario.footage) useFootage(registry, ctx, scenario.footage);
+    } else if (scenario.surface === "recovery") {
       recovery = new RecoveryRuntime(scenario.recovery, ctx);
       await recovery.initialize();
       const surfaceResponse = await authedFetch(`${opts.server}/contract/tools`);
